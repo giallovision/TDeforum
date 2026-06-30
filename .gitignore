@@ -1,0 +1,23 @@
+# A1111 Core & Environments
+a1111_core/
+
+# Environment Variables
+.env
+
+# Media & Archives
+archive/
+td_inputs/
+td_masks/
+td_outputs/
+
+# TouchDesigner Temp, Logs, & Backups
+Backup/
+scripts/td_console.log
+*.crash
+*.toe.toe
+*.dmp
+*.log
+
+# Python Caches
+__pycache__/
+*.pyc

@@ -1,0 +1,50 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# 1. System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3.10-venv python3.10-dev python3-pip \
+    git git-lfs libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    ffmpeg curl wget build-essential google-perftools \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Establish isolated virtual environment inside image layers
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# IMPORTANT: Downgrade pip slightly to bypass a known metadata bug with pytorch_lightning 1.9.4
+RUN pip install "pip<24.1" setuptools wheel
+
+# 3. Pre-install exact hardware frameworks directly into the image
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+RUN pip install xformers==0.0.26.post1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install "numpy<2" "controlnet_aux==0.0.9" "mediapipe==0.10.14"
+
+# 4. Clone stable revisions of the application frameworks
+WORKDIR /opt
+RUN git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git a1111
+WORKDIR /opt/a1111
+
+RUN git clone https://github.com/deforum-art/sd-webui-deforum.git extensions/sd-webui-deforum
+RUN git clone https://github.com/Mikubill/sd-webui-controlnet.git extensions/sd-webui-controlnet
+
+# 5. Fix the controlnet requirements file before it can run
+RUN sed -i '1i numpy==1.26.4\nmediapipe==0.10.14\ncontrolnet_aux==0.0.9' extensions/sd-webui-controlnet/requirements.txt
+
+# --- THE MIRROR FIX ---
+# Redirect the installer away from the dead Stability AI repository to the active community mirror
+ENV STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
+
+# 6. BAKE ALL REQUIREMENTS INTO THE IMAGE
+# This securely executes the A1111 environment builder to pull all core and extension dependencies into the image layer
+RUN python3 -c "import sys; sys.argv=['launch.py', '--skip-torch-cuda-test']; from modules import launch_utils; launch_utils.prepare_environment()"
+
+# Environment adjustments
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4
+
+# Bypass the runtime updater entirely and fire the api layout directly
+CMD ["python3", "webui.py", "--api", "--listen", "--port", "7865", "--xformers", "--deforum-api"]

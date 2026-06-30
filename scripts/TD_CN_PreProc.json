@@ -1,0 +1,74 @@
+{
+  "10": {
+    "inputs": {
+      "video": "input/archive/taichi_portrait.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 300,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "AnimateDiff"
+    },
+    "class_type": "VHS_LoadVideoPath",
+    "_meta": {
+      "title": "TD_INPUT_VIDEO"
+    }
+  },
+  "11": {
+    "inputs": {
+      "width": 1024,
+      "height": 576,
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "stretch",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "TD_SCALING"
+    }
+  },
+  "19": {
+    "inputs": {
+      "preprocessor": "PiDiNetPreprocessor",
+      "resolution": 576,
+      "image": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "AIO_Preprocessor",
+    "_meta": {
+      "title": "TD_PREPROCESSOR"
+    }
+  },
+  "21": {
+    "inputs": {
+      "frame_rate": 60,
+      "loop_count": 0,
+      "filename_prefix": "TDeforum_mask_",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 10,
+      "save_metadata": false,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "TD_OUTPUT_VIDEO"
+    }
+  }
+}

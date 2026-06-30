@@ -1,0 +1,39 @@
+# ~/Codebase/TDeforum/docker-compose.yml
+services:
+  a1111-api:
+    container_name: tdeforum-a1111
+    build:
+      context: .
+      dockerfile: Dockerfile.a1111
+    restart: unless-stopped
+    shm_size: '8gb' 
+    ports:
+      - "7865:7865"
+    labels:
+      - "gvis.proxy.domain=${PROXY_DOMAIN}"
+      - "gvis.proxy.port=7865"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ./td_outputs:/opt/a1111/outputs
+      - ./td_masks:/opt/a1111/td_masks
+      - ./td_inputs/comfy_videos:/opt/a1111/td_inputs/comfy_videos
+      - ${HOST_USER_DIR}/Codebase/comfyui/output/preprocessed_vids:/opt/a1111/td_masks/preprocessed_vids
+      # NVME MODEL ASSETS: Preserving your shared asset matrices
+      - ${SHARED_NVME_MOUNT}/comfyui/models/checkpoints:/opt/a1111/models/Stable-diffusion
+      - ${SHARED_NVME_MOUNT}/comfyui/models/vae:/opt/a1111/models/VAE
+      - ${SHARED_NVME_MOUNT}/comfyui/models/loras:/opt/a1111/models/Lora
+      - ${SHARED_NVME_MOUNT}/comfyui/models/embeddings:/opt/a1111/embeddings
+      - ${SHARED_NVME_MOUNT}/comfyui/models/controlnet:/opt/a1111/extensions/sd-webui-controlnet/models
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
+      - can_run_as_root=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
