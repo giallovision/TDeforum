@@ -1,0 +1,11 @@
+# TouchDesigner (Windows, via the T:/ share) writes CRLF and Linux tools write LF.
+# Store LF in git so diffs only show real changes, whichever side saved the file.
+* text=auto eol=lf
+
+*.toe binary
+*.tox binary
+*.mov binary
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.safetensors binary

@@ -1,0 +1,65 @@
+From 1a01e8e12f04df9aa6a394a576be441bbef04429 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 20:19:50 +0000
+Subject: [PATCH] Send full ControlNet schedules for disabled units 2-5
+
+Deforum parses every ControlNet unit's weight/guidance schedules even when
+the unit is off. The payload only sent cn_N_enabled=false for units 2-5, so
+Deforum got None and crashed in parse_key_frames ("'NoneType' object has no
+attribute 'split'"). Disabled units now get unit 1's defaults with the unit
+number swapped; only enabled is False. Adds a regression test.
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ scripts/tdeforum/payload.py |  7 +++++++
+ tests/test_payload.py       | 14 ++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 8dcf0a0..bc6916d 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -161,7 +161,14 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+         except (TypeError, ValueError):
+             settings[field.key] = coerce(field, field.default)
+             warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
++    # Deforum parses every unit's schedules even when the unit is off, so units 2-5
++    # get unit 1's defaults with the unit number swapped; only `enabled` is False.
+     for unit in range(2, CN_UNITS + 1):
++        for field in schema.cn_fields(1):
++            if field.api == "cn_1_enabled":
++                continue
++            key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
++            settings[key] = coerce(field, field.default)
+         settings["cn_%d_enabled" % unit] = False
+ 
+     # Output handling the TD side relies on (auto-load expects <outdir>/<timestring>.mp4).
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index 64f71b6..f5ca095 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -75,6 +75,20 @@ class PayloadTest(unittest.TestCase):
+         for unit in range(2, 6):
+             self.assertIs(s["cn_%d_enabled" % unit], False)
+ 
++    def test_disabled_cn_units_send_full_schedules(self):
++        # Deforum crashes on a None schedule even for a disabled unit (gvispc1 log:
++        # "'NoneType' object has no attribute 'split'"), so every unit needs them all.
++        s = self.build()["request"]["deforum_settings"]
++        for unit in range(2, 6):
++            for field in schema.cn_fields(1):
++                if field.api == "cn_1_enabled":
++                    continue
++                key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
++                self.assertIn(key, s)
++                self.assertIsNotNone(s[key], key)
++            self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
++            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(1.0)")
++
+     def test_td_only_fields_not_sent(self):
+         s = self.build()["request"]["deforum_settings"]
+         for key in ("comfy_preproc_enable", "comfy_preprocessor", "video_frame_mode",
+-- 
+2.43.0
+

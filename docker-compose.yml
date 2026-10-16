@@ -1,12 +1,25 @@
 # ~/Codebase/TDeforum/docker-compose.yml
+#
+# Day to day (see Makefile):  make up | make down | make logs | make wait
+# Build once:                 make build   -> tdeforum-a1111:local
+# Freeze a known-good image:  make bake    -> tdeforum-a1111:stable  (+ dated tag)
+#                             then A1111_TAG=stable in .env
 services:
   a1111-api:
     container_name: tdeforum-a1111
+    image: ${A1111_IMAGE:-tdeforum-a1111}:${A1111_TAG:-local}
     build:
       context: .
       dockerfile: Dockerfile.a1111
+      args:              # unset -> Dockerfile defaults (pinned refs)
+        - A1111_REF
+        - DEFORUM_REF
+        - CONTROLNET_REF
     restart: unless-stopped
-    shm_size: '8gb' 
+    init: true           # reaps Deforum's ffmpeg children, forwards signals
+    stop_signal: SIGINT  # A1111 handles SIGINT with an immediate exit
+    stop_grace_period: 20s
+    shm_size: '8gb'
     ports:
       - "7865:7865"
     labels:
@@ -16,20 +29,27 @@ services:
       memlock: -1
       stack: 67108864
     volumes:
+      # Pipeline I/O shared with TouchDesigner over the T:/ share
       - ./td_outputs:/opt/a1111/outputs
       - ./td_masks:/opt/a1111/td_masks
       - ./td_inputs/comfy_videos:/opt/a1111/td_inputs/comfy_videos
       - ${HOST_USER_DIR}/Codebase/comfyui/output/preprocessed_vids:/opt/a1111/td_masks/preprocessed_vids
-      # NVME MODEL ASSETS: Preserving your shared asset matrices
+      # NVME MODEL ASSETS: shared with ComfyUI
       - ${SHARED_NVME_MOUNT}/comfyui/models/checkpoints:/opt/a1111/models/Stable-diffusion
       - ${SHARED_NVME_MOUNT}/comfyui/models/vae:/opt/a1111/models/VAE
       - ${SHARED_NVME_MOUNT}/comfyui/models/loras:/opt/a1111/models/Lora
       - ${SHARED_NVME_MOUNT}/comfyui/models/embeddings:/opt/a1111/embeddings
       - ${SHARED_NVME_MOUNT}/comfyui/models/controlnet:/opt/a1111/extensions/sd-webui-controlnet/models
+      # Runtime state that used to vanish with every container recreate:
+      # settings + checkpoint hash cache, HF/torch caches, Deforum depth
+      # models (MiDaS weights are 1.3-1.5 GB), ControlNet annotator downloads.
+      - a1111_state:/opt/a1111/state
+      - a1111_cache:/root/.cache
+      - deforum_models:/opt/a1111/models/Deforum
+      - controlnet_annotators:/opt/a1111/extensions/sd-webui-controlnet/annotator/downloads
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
-      - can_run_as_root=1
     deploy:
       resources:
         reservations:
@@ -37,3 +57,9 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu, utility, compute]
+
+volumes:
+  a1111_state:
+  a1111_cache:
+  deforum_models:
+  controlnet_annotators:

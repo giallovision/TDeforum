@@ -1,0 +1,36 @@
+From 34665aa6e53fa69ee30ffdec79855deebb0534b7 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 20:21:06 +0000
+Subject: [PATCH] Build the expected progress URL from config in the controller
+ test
+
+test_full_render_and_autoload hardcoded the default server address, so it
+failed whenever scripts/tdeforum.local.json overrode server_host (the normal
+setup for a LAN address other than the default). Compare against
+config.deforum_url(config.load()) instead. Passes with and without an override.
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ tests/test_controller.py | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index f0fa450..e82dff7 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -68,7 +68,10 @@ class ControllerTest(unittest.TestCase):
+ 
+         self.tick()
+         polls = self.root.op("webclient_progress").requests
+-        self.assertEqual(polls[-1][:2], ("GET", "http://192.168.1.42:7865/deforum_api/jobs/batch(1)-0"))
++        # Built from the loaded config so a scripts/tdeforum.local.json override
++        # (e.g. server_host) does not break the test.
++        expected = config.deforum_url(config.load(), "/deforum_api/jobs/batch(1)-0")
++        self.assertEqual(polls[-1][:2], ("GET", expected))
+ 
+         respond(self.root, "webclient_progress", 200,
+                 {"id": "batch(1)-0", "status": "ACCEPTED", "phase": "GENERATING", "phase_progress": 0.4})
+-- 
+2.43.0
+

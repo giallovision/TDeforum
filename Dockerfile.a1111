@@ -1,50 +1,122 @@
+# syntax=docker/dockerfile:1
+#
+# TDeforum: AUTOMATIC1111 + Deforum + ControlNet, API-only image.
+#
+# Build speed: layers go from least to most frequently changed, and every
+# download (apt, pip wheels incl. the ~2.5 GB torch stack) goes through a
+# BuildKit cache mount, so even a --no-cache rebuild re-uses downloaded wheels.
+# Reproducibility: every git checkout is pinned (`make lock` re-pins them from
+# a running container), and a pip constraints file stops later installers from
+# swapping the torch/xformers stack.
+
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1
 
-# 1. System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3.10-venv python3.10-dev python3-pip \
-    git git-lfs libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
-    ffmpeg curl wget build-essential google-perftools \
-    && rm -rf /var/lib/apt/lists/*
+# 1. System packages ---------------------------------------------------------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3.10-dev python3-pip \
+        git git-lfs libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+        ffmpeg curl ca-certificates build-essential libgoogle-perftools4
 
-# 2. Establish isolated virtual environment inside image layers
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# 2. Virtualenv + CUDA torch stack -------------------------------------------------
+#    xformers 0.0.26.post1 wheels require torch==2.3.0 exactly; installing an
+#    unpinned torch first made pip download a second torch and could leave
+#    torchvision/torchaudio built for the wrong torch.
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}" \
+    VIRTUAL_ENV=/opt/venv \
+    PIP_CONSTRAINT=/opt/constraints.txt
 
-# IMPORTANT: Downgrade pip slightly to bypass a known metadata bug with pytorch_lightning 1.9.4
-RUN pip install "pip<24.1" setuptools wheel
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+ARG TORCH_VERSION=2.3.0
+ARG TORCHVISION_VERSION=0.18.0
+ARG TORCHAUDIO_VERSION=2.3.0
+ARG XFORMERS_VERSION=0.0.26.post1
 
-# 3. Pre-install exact hardware frameworks directly into the image
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-RUN pip install xformers==0.0.26.post1 --index-url https://download.pytorch.org/whl/cu121
-RUN pip install "numpy<2" "controlnet_aux==0.0.9" "mediapipe==0.10.14"
+# Pins every later `pip install` must respect (A1111 + extension installers included).
+RUN printf '%s\n' \
+        "torch==${TORCH_VERSION}" \
+        "torchvision==${TORCHVISION_VERSION}" \
+        "torchaudio==${TORCHAUDIO_VERSION}" \
+        "xformers==${XFORMERS_VERSION}" \
+        "numpy<2" > /opt/constraints.txt
 
-# 4. Clone stable revisions of the application frameworks
+# pip<24.1 sidesteps the pytorch_lightning 1.9.4 metadata bug.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "pip<24.1" setuptools wheel && \
+    pip install --index-url "${TORCH_INDEX_URL}" \
+        "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+        "torchaudio==${TORCHAUDIO_VERSION}" "xformers==${XFORMERS_VERSION}"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "numpy<2" "controlnet_aux==0.0.9" "mediapipe==0.10.14"
+
+# 3. Pinned sources ---------------------------------------------------------------
+#    Defaults are the current heads of each repo (all unchanged since mid-2024),
+#    i.e. exactly what the old unpinned clones produced. `make lock` rewrites
+#    these lines from whatever is running in the container.
+ARG A1111_REPO=https://github.com/AUTOMATIC1111/stable-diffusion-webui.git
+ARG A1111_REF=82a973c04367123ae98bd9abdf80d9eda9b910e2
+ARG DEFORUM_REPO=https://github.com/deforum-art/sd-webui-deforum.git
+ARG DEFORUM_REF=5d63a339dbec8d476657a1f672a4eeb6dc79ed37
+ARG CONTROLNET_REPO=https://github.com/Mikubill/sd-webui-controlnet.git
+ARG CONTROLNET_REF=56cec5b2958edf3b1807b7e7b2b1b5186dbd2f81
+
 WORKDIR /opt
-RUN git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git a1111
+RUN git clone --quiet "${A1111_REPO}" a1111 && \
+    git -C a1111 checkout --quiet "${A1111_REF}" && \
+    git clone --quiet "${DEFORUM_REPO}" a1111/extensions/sd-webui-deforum && \
+    git -C a1111/extensions/sd-webui-deforum checkout --quiet "${DEFORUM_REF}" && \
+    git clone --quiet "${CONTROLNET_REPO}" a1111/extensions/sd-webui-controlnet && \
+    git -C a1111/extensions/sd-webui-controlnet checkout --quiet "${CONTROLNET_REF}"
 WORKDIR /opt/a1111
 
-RUN git clone https://github.com/deforum-art/sd-webui-deforum.git extensions/sd-webui-deforum
-RUN git clone https://github.com/Mikubill/sd-webui-controlnet.git extensions/sd-webui-controlnet
+# ControlNet's installer must not re-resolve these.
+RUN sed -i '1i numpy==1.26.4\nmediapipe==0.10.14\ncontrolnet_aux==0.0.9' \
+        extensions/sd-webui-controlnet/requirements.txt
 
-# 5. Fix the controlnet requirements file before it can run
-RUN sed -i '1i numpy==1.26.4\nmediapipe==0.10.14\ncontrolnet_aux==0.0.9' extensions/sd-webui-controlnet/requirements.txt
-
-# --- THE MIRROR FIX ---
-# Redirect the installer away from the dead Stability AI repository to the active community mirror
+# 4. Bake all A1111 + extension requirements into the image -------------------------
+#    The Stability-AI stablediffusion repo is gone; use the community mirror.
 ENV STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -c "import sys; sys.argv=['launch.py', '--skip-torch-cuda-test']; \
+from modules import launch_utils; launch_utils.prepare_environment()"
 
-# 6. BAKE ALL REQUIREMENTS INTO THE IMAGE
-# This securely executes the A1111 environment builder to pull all core and extension dependencies into the image layer
-RUN python3 -c "import sys; sys.argv=['launch.py', '--skip-torch-cuda-test']; from modules import launch_utils; launch_utils.prepare_environment()"
+# 5. Warm small runtime downloads so a fresh container starts without internet:
+#    the SD1.x CLIP tokenizer/config A1111 fetches on model load, and the RAFT
+#    weights Deforum's optical-flow cadence uses. Best effort: a network hiccup
+#    here only means they download on first use instead.
+RUN python3 -c "from transformers import CLIPTokenizer, CLIPTextConfig; \
+CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14'); \
+CLIPTextConfig.from_pretrained('openai/clip-vit-large-patch14')" \
+    || echo "WARN: CLIP tokenizer warm-up skipped" ; \
+    python3 -c "from torchvision.models.optical_flow import raft_large, Raft_Large_Weights; \
+raft_large(weights=Raft_Large_Weights.DEFAULT, progress=False)" \
+    || echo "WARN: RAFT warm-up skipped"
 
-# Environment adjustments
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
-ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4
+# 6. Runtime ---------------------------------------------------------------------------
+#    /opt/a1111/state holds config.json, ui-config.json and the checkpoint hash
+#    cache; compose mounts a volume there so they survive container recreation.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics \
+    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4 \
+    SD_WEBUI_CACHE_DIR=/opt/a1111/state/cache
+RUN mkdir -p /opt/a1111/state/cache
 
-# Bypass the runtime updater entirely and fire the api layout directly
-CMD ["python3", "webui.py", "--api", "--listen", "--port", "7865", "--xformers", "--deforum-api"]
+EXPOSE 7865
+HEALTHCHECK --interval=15s --timeout=5s --start-period=240s --retries=4 \
+    CMD curl -fsS http://127.0.0.1:7865/internal/ping >/dev/null || exit 1
+
+# A1111 exits immediately on SIGINT (its own handler); compose sets stop_signal.
+STOPSIGNAL SIGINT
+ENTRYPOINT ["python3", "webui.py"]
+CMD ["--api", "--listen", "--port", "7865", "--xformers", "--deforum-api", \
+     "--ui-settings-file", "/opt/a1111/state/config.json", \
+     "--ui-config-file", "/opt/a1111/state/ui-config.json"]

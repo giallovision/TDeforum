@@ -1,0 +1,367 @@
+"""Single source of truth for the Deforum COMP's custom parameters.
+
+build_master_ui.py builds the TouchDesigner pages of the ``deforum`` Base COMP
+from FIELDS, and payload.py reads the same FIELDS to decide what is sent to
+Deforum and under which key. Add a field here once and it appears in both.
+
+Field.target:
+    "deforum"  -> deforum_settings[<key>]          (Deforum only reads keys it knows)
+    "options"  -> options_overrides[<key>]         (A1111 opts for the batch)
+    None       -> TouchDesigner-only (tempo, pipeline controls, mod matrix, ...)
+
+Kinds:
+    MOD       modulatable schedule. TD gets a float <Name> (the base value, which
+              you can keyframe, export to or bind) and a string <Name>raw (a
+              hand-written Deforum schedule that, when not empty, is sent verbatim).
+              payload.py adds the Mod Matrix and the Mod CHOP on top of the base.
+    SCHEDULE  plain string schedule; numbers are wrapped as 0:(v).
+
+TD parameter names are derived from the API name exactly as the original
+build_master_ui.py did (``translation_z`` -> ``Translationz``), so values and
+expressions from the old Deforum_UI migrate by name.
+
+Defaults ("baselines"): motion is neutral (no camera movement); every other
+value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
+CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+"""
+
+from . import modulation, tempo
+
+PAGE_TEMPO = "Tempo"
+PAGE_GLOBALS = "Globals"
+PAGE_PROMPTS = "Prompts"
+PAGE_MOTION2D = "Motion 2D"
+PAGE_MOTION3D = "Motion 3D"
+PAGE_CAMERA = "Camera & Depth"
+PAGE_DIFFUSION = "Diffusion"
+PAGE_NOISE = "Noise & Color"
+PAGE_FLOW = "Flow & Anti-blur"
+PAGE_MODS = "Mod Matrix"
+PAGE_CN1 = "ControlNet Unit 1"
+PAGE_PIPELINE = "Pipeline"
+
+PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
+              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
+              PAGE_CN1, PAGE_PIPELINE]
+
+# Kinds understood by build_master_ui.py and payload.py
+STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
+SCHEDULE = "schedule"      # string par; plain numbers are wrapped as 0:(v)
+MOD = "mod"                # float base + <Name>raw override; modulated by the Mod Matrix / CHOP
+SEED = "seed"              # string par (seeds overflow TD int pars); sent as int
+CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
+STATUS = "status"          # read-only string written by the controller
+
+RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
+MOD_SLOTS = 8
+
+
+def td_name(api_name):
+    """API name -> TouchDesigner custom parameter name (original naming rule)."""
+    if api_name == "W":
+        return "Width"
+    if api_name == "H":
+        return "Height"
+    clean = "".join(c for c in api_name if c.isalnum())
+    name = clean[0].upper() + clean[1:].lower() if clean else ""
+    if name and name[-1].isdigit():
+        name += "val"
+    return name
+
+
+def _default_label(api_name):
+    if api_name == "W":
+        return "Width"
+    if api_name == "H":
+        return "Height"
+    label = api_name.replace("_schedule", "").replace("_", " ").title()
+    if label.startswith("Cn 1 "):
+        label = label[len("Cn 1 "):]
+    return label
+
+
+class Field(object):
+    __slots__ = ("api", "default", "page", "kind", "menu", "labels", "label",
+                 "target", "key", "expr", "norm", "as_schedule", "safe", "dims")
+
+    def __init__(self, api, default, page, kind, menu=None, labels=None, label=None,
+                 target="deforum", key=None, expr=None, norm=None, as_schedule=False,
+                 safe=None, dims=None):
+        self.api = api
+        self.default = default
+        self.page = page
+        self.kind = kind
+        self.menu = list(menu) if menu else None
+        self.labels = list(labels) if labels else (list(menu) if menu else None)
+        self.label = label or _default_label(api)
+        self.target = target
+        self.key = key or api
+        self.expr = expr
+        self.norm = norm
+        self.as_schedule = as_schedule   # numeric par sent as a 0:(v) schedule
+        self.safe = safe                 # (lo, hi) Deforum-sane range for warnings; None = open
+        self.dims = dims                 # "2D" / "3D" when Deforum only uses it in that mode
+
+    @property
+    def td_name(self):
+        return td_name(self.api)
+
+    @property
+    def raw_td_name(self):
+        return self.td_name + RAW_SUFFIX
+
+    def __repr__(self):
+        return "Field(%s -> %s)" % (self.api, self.td_name)
+
+
+F = Field
+TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
+    PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
+    PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
+
+COMFY_PREPROCESSORS = [
+    "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
+    "LineArtPreprocessor", "CannyEdgePreprocessor", "HEDPreprocessor",
+    "PiDiNetPreprocessor", "M-LSDPreprocessor",
+]
+FLOW_METHODS = ["None", "RAFT", "DIS Medium", "DIS Fine", "Farneback"]
+DEPTH_ALGORITHMS = ["Midas-3-Hybrid", "Midas+AdaBins (old)", "Zoe+AdaBins (old)", "AdaBins", "Zoe", "Leres"]
+
+
+def _mod(api, default, page, norm, label=None, safe=None, dims=None):
+    return F(api, default, page, MOD, norm=norm, label=label, safe=safe, dims=dims)
+
+
+# (api, baseline, page, slider range, label, safe range, dims)
+_MODS = [
+    # Motion 2D (zoom/angle/centre are 2D-only; translation x/y move the camera in 2D and 3D)
+    _mod("zoom", 1.0, M2, (0.9, 1.1), "Zoom (2D, 1 = still)", (0.01, None), "2D"),
+    _mod("angle", 0.0, M2, (-10, 10), "Angle (2D, deg/frame)", None, "2D"),
+    _mod("transform_center_x", 0.5, M2, (0, 1), "Transform Center X (2D)", None, "2D"),
+    _mod("transform_center_y", 0.5, M2, (0, 1), "Transform Center Y (2D)", None, "2D"),
+    _mod("translation_x", 0.0, M2, (-10, 10), "Translation X (2D + 3D)"),
+    _mod("translation_y", 0.0, M2, (-10, 10), "Translation Y (2D + 3D)"),
+    # Motion 3D
+    _mod("translation_z", 0.0, M3, (-10, 10), "Translation Z (3D push)", None, "3D"),
+    _mod("rotation_3d_x", 0.0, M3, (-3, 3), "Rotation 3D X (tilt, deg/frame)", None, "3D"),
+    _mod("rotation_3d_y", 0.0, M3, (-3, 3), "Rotation 3D Y (pan, deg/frame)", None, "3D"),
+    _mod("rotation_3d_z", 0.0, M3, (-3, 3), "Rotation 3D Z (roll, deg/frame)", None, "3D"),
+    # Camera & Depth
+    _mod("fov_schedule", 70.0, CA, (20, 120), "FOV (3D)", (1, 179), "3D"),
+    _mod("near_schedule", 200.0, CA, (1, 1000), "Near (3D)", (0.001, None), "3D"),
+    _mod("far_schedule", 10000.0, CA, (1000, 20000), "Far (3D)", (0.001, None), "3D"),
+    _mod("aspect_ratio_schedule", 1.0, CA, (0.5, 2), "Aspect Ratio (3D)", (0.01, None), "3D"),
+    _mod("perspective_flip_theta", 0.0, CA, (-90, 90), "Flip Theta"),
+    _mod("perspective_flip_phi", 0.0, CA, (-90, 90), "Flip Phi"),
+    _mod("perspective_flip_gamma", 0.0, CA, (-90, 90), "Flip Gamma"),
+    _mod("perspective_flip_fv", 53.0, CA, (10, 120), "Flip FV", (0.001, None)),
+    # Diffusion
+    _mod("strength_schedule", 0.65, DI, (0, 1), "Strength (keep of previous frame)", (0, 1)),
+    _mod("noise_schedule", 0.065, DI, (0, 0.2), "Noise", (0, 1)),
+    _mod("contrast_schedule", 1.0, DI, (0.8, 1.2), "Contrast", (0, None)),
+    _mod("cfg_scale_schedule", 7.0, DI, (1, 15), "CFG Scale", (0, None)),
+    _mod("steps_schedule", 25.0, DI, (1, 50), "Steps (needs Enable Steps Scheduling)", (1, None)),
+    _mod("noise_multiplier_schedule", 1.05, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
+    _mod("subseed_strength_schedule", 0.0, DI, (0, 1), "Subseed Strength (needs Enable Subseed)", (0, 1)),
+    _mod("ddim_eta_schedule", 0.0, DI, (0, 1), "DDIM Eta (needs Enable)", (0, None)),
+    _mod("ancestral_eta_schedule", 1.0, DI, (0, 1.5), "Ancestral Eta (needs Enable)", (0, None)),
+    _mod("clipskip_schedule", 2.0, DI, (1, 4), "CLIP Skip (needs Enable)", (1, 12)),
+    # Flow & anti-blur (kernel is a plain odd INT: OpenCV rejects even blur sizes)
+    _mod("cadence_flow_factor_schedule", 1.0, FL, (0, 2), "Cadence Flow Factor", (0, None)),
+    _mod("redo_flow_factor_schedule", 1.0, FL, (0, 2), "Redo Flow Factor", (0, None)),
+    _mod("amount_schedule", 0.1, FL, (0, 1), "Anti-blur Amount", (0, None)),
+    _mod("sigma_schedule", 1.0, FL, (0.1, 5), "Anti-blur Sigma", (0, None)),
+    _mod("threshold_schedule", 0.0, FL, (0, 1), "Anti-blur Threshold", (0, None)),
+]
+MOD_APIS = [f.api for f in _MODS]
+MOD_LABELS = [f.label for f in _MODS]
+SCHEDULE_APIS = MOD_APIS   # bake / preview targets (kept for older callers)
+
+_SLOT_TARGETS = ["zoom", "translation_z", "strength_schedule", "noise_schedule",
+                 "rotation_3d_y", "angle", "cfg_scale_schedule", "translation_x"]
+
+
+def _slot_fields(n):
+    p = "mod%d_" % n
+    return [
+        F(p + "active", False, MM, TOGGLE, label="Slot %d On" % n, target=None),
+        F(p + "target", _SLOT_TARGETS[(n - 1) % len(_SLOT_TARGETS)], MM, MENU, menu=MOD_APIS,
+          labels=MOD_LABELS, label="Slot %d Target" % n, target=None),
+        F(p + "shape", "sine", MM, MENU, menu=modulation.SHAPE_NAMES, labels=modulation.SHAPE_LABELS,
+          label="Slot %d Shape" % n, target=None),
+        F(p + "beats", 1.0, MM, FLOAT, norm=(0.25, 16), label="Slot %d Cycle (beats)" % n, target=None),
+        F(p + "depth", 0.0, MM, FLOAT, norm=(-1, 1), label="Slot %d Depth" % n, target=None),
+        F(p + "phase", 0.0, MM, FLOAT, norm=(0, 1), label="Slot %d Phase (cycles)" % n, target=None),
+        F(p + "sharpness", 4.0, MM, FLOAT, norm=(0.5, 16), label="Slot %d Sharpness" % n, target=None),
+    ]
+
+
+FIELDS = [
+    # --- Tempo -----------------------------------------------------------------
+    F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
+    F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
+    F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
+    F("out_fps", 60, TE, INT, norm=(24, 60), label="Output FPS", target=None),
+    F("render_strategy", "cadence", TE, MENU, menu=tempo.STRATEGIES, labels=tempo.STRATEGY_LABELS,
+      label="Render Strategy", target=None),
+    F("render_fps", "30", TE, MENU, menu=tempo.RENDER_FPS_CHOICES, label="Render FPS (interpolate)",
+      target=None),
+    F("interp_engine", "RIFE v4.6", TE, MENU, menu=tempo.INTERP_ENGINES, label="Interpolation Engine",
+      target=None),
+    F("diffusion_cadence", 4, TE, INT, norm=(1, 8), label="Diffusion Cadence (diffuse every Nth frame)"),
+    F("seamless_loop", True, TE, TOGGLE, label="Seamless Loop", target=None),
+    F("loop_overlap_beats", 1.0, TE, FLOAT, norm=(0, 4), label="Loop Overlap (beats, crossfaded)", target=None),
+    F("loop_seeds", True, TE, TOGGLE, label="Loop Seeds (repeat seeds each loop)", target=None),
+    F("length_source", "tempo", TE, MENU, menu=["tempo", "manual"],
+      labels=["Tempo (loop length)", "Manual (Max Frames)"], target=None),
+    F("max_frames", 240, TE, INT, norm=(1, 1000), label="Max Frames (manual)"),
+    F("tempo_info", "", TE, STATUS, label="Plan", target=None),
+
+    # --- Globals ---------------------------------------------------------------
+    F("sd_model_checkpoint", "0", G, CHECKPOINT, label="Model (index / schedule)"),
+    F("sd_vae", "Automatic", G, STR, label="VAE", target="options"),
+    F("W", 1024, G, INT, norm=(0, 1920)),
+    F("H", 576, G, INT, norm=(0, 1920)),
+    F("steps", 10, G, INT, norm=(1, 50)),
+    F("sampler", "LCM", G, STR),
+    F("scheduler", "Automatic", G, STR),
+    F("animation_mode", "3D", G, MENU, menu=["2D", "3D", "Video Input", "Interpolation"]),
+    F("seed_behavior", "iter", G, MENU,
+      menu=["iter", "fixed", "random", "ladder", "alternate", "schedule"],
+      labels=["Iterate (+1)", "Fixed", "Random", "Ladder", "Alternate", "Schedule"]),
+    F("seed", "-1", G, SEED),
+    # Deforum ignores "n_prompt"; the API reads animation_prompts_negative.
+    F("n_prompt", "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark",
+      G, STR, label="Negative Prompt", key="animation_prompts_negative"),
+    F("strength", 0.8, G, FLOAT, norm=(0, 1), label="Init Strength (first frame)"),
+    F("use_mask_video", False, G, TOGGLE),
+    F("video_init_path", "/opt/a1111/td_inputs/comfy_videos/archive/taichi_portrait.mp4", G, STR),
+    F("video_mask_path", "/opt/a1111/td_masks/mask_01.mov", G, STR),
+    F("video_frame_mode", "trim", G, MENU, menu=["trim", "stride"],
+      labels=["Trim (Normal Speed)", "Stride (Timelapse)"], target=None),
+
+    # --- Prompts ---------------------------------------------------------------
+    F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
+      labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
+    F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
+
+    # --- Motion 2D -------------------------------------------------------------
+    F("border", "replicate", M2, MENU, menu=["replicate", "wrap"],
+      labels=["Clamp / Hold (Replicate)", "Wrap / Tile"]),
+] + [f for f in _MODS if f.page == M2] + [
+
+    # --- Motion 3D -------------------------------------------------------------
+    F("padding_mode", "border", M3, MENU, menu=["border", "reflection", "zeros"],
+      labels=["Border (smear)", "Reflection (mirror)", "Zeros (black)"]),
+    F("sampling_mode", "bicubic", M3, MENU, menu=["bicubic", "bilinear", "nearest"]),
+] + [f for f in _MODS if f.page == M3] + [
+
+    # --- Camera & Depth ---------------------------------------------------------
+    F("use_depth_warping", True, CA, TOGGLE),
+    F("depth_algorithm", "Midas-3-Hybrid", CA, MENU, menu=DEPTH_ALGORITHMS),
+    F("midas_weight", 0.2, CA, FLOAT, norm=(0, 1)),
+    # Without this toggle Deforum ignores every perspective_flip_* schedule (2D and 3D).
+    F("enable_perspective_flip", False, CA, TOGGLE),
+] + [f for f in _MODS if f.page == CA] + [
+
+    # --- Diffusion ---------------------------------------------------------------
+    F("enable_steps_scheduling", False, DI, TOGGLE),
+    F("enable_noise_multiplier_scheduling", True, DI, TOGGLE),
+    F("enable_subseed_scheduling", False, DI, TOGGLE),
+    F("subseed_schedule", "0:(1)", DI, SCHEDULE),
+    F("enable_ddim_eta_scheduling", False, DI, TOGGLE, label="Enable DDIM Eta Scheduling"),
+    F("enable_ancestral_eta_scheduling", False, DI, TOGGLE),
+    F("enable_clipskip_scheduling", False, DI, TOGGLE, label="Enable CLIP Skip Scheduling"),
+] + [f for f in _MODS if f.page == DI] + [
+
+    # --- Noise & Color -----------------------------------------------------------
+    F("noise_type", "perlin", NO, MENU, menu=["perlin", "uniform"]),
+    F("perlin_w", 8, NO, INT, norm=(1, 16), label="Perlin W"),
+    F("perlin_h", 8, NO, INT, norm=(1, 16), label="Perlin H"),
+    F("perlin_octaves", 4, NO, INT, norm=(1, 7)),
+    F("perlin_persistence", 0.5, NO, FLOAT, norm=(0, 1)),
+    F("color_coherence", "LAB", NO, MENU, menu=["None", "HSV", "LAB", "RGB", "Video Input", "Image"]),
+    F("color_force_grayscale", False, NO, TOGGLE),
+    # Deforum's API turns this ON whenever the key is missing (deprecation_utils), which it
+    # was in every earlier payload; kept on so existing looks don't shift. Deforum's UI
+    # default (and recommendation for coherence) is off.
+    F("legacy_colormatch", True, NO, TOGGLE, label="Legacy Colormatch (earlier renders used it)"),
+
+    # --- Flow & Anti-blur ----------------------------------------------------------
+    F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),
+    F("optical_flow_redo_generation", "None", FL, MENU, menu=FLOW_METHODS),
+    F("kernel_schedule", 5, FL, INT, norm=(1, 15), label="Anti-blur Kernel (odd)", as_schedule=True),
+] + [f for f in _MODS if f.page == FL] + [
+
+    # --- Mod Matrix ----------------------------------------------------------------
+    F("chop_mode", "add", MM, MENU, menu=modulation.CHOP_MODES,
+      labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
+    F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
+    F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
+] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
+
+    # --- ControlNet Unit 1 ---------------------------------------------------------
+    F("cn_1_enabled", False, CN, TOGGLE),
+    F("cn_1_module", "none", CN, STR),
+    F("cn_1_model", "ctrl_v1p_qr_monster_v2", CN, STR),
+    F("cn_1_vid_path", "/opt/a1111/td_masks/mask_01.mov", CN, STR),
+    F("cn_1_mask_vid_path", "", CN, STR),
+    F("cn_1_weight", 1.0, CN, FLOAT, norm=(0, 2), as_schedule=True),
+    F("cn_1_guidance_start", 0.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
+    F("cn_1_guidance_end", 1.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
+    F("cn_1_processor_res", 512, CN, INT, norm=(64, 2048)),
+    F("cn_1_threshold_a", 0.5, CN, FLOAT, norm=(0, 255)),
+    F("cn_1_threshold_b", 0.5, CN, FLOAT, norm=(0, 255)),
+    F("cn_1_resize_mode", "Inner Fit (Scale to Fit)", CN, MENU,
+      menu=["Inner Fit (Scale to Fit)", "Outer Fit (Shrink to Fit)", "Just Resize"]),
+    F("cn_1_control_mode", "Balanced", CN, MENU,
+      menu=["Balanced", "My prompt is more important", "ControlNet is more important"]),
+    F("cn_1_low_vram", False, CN, TOGGLE),
+    F("cn_1_pixel_perfect", True, CN, TOGGLE),
+    F("cn_1_overwrite_frames", True, CN, TOGGLE),
+    F("cn_1_loopback_mode", False, CN, TOGGLE),
+    # ComfyUI preprocessing of the init video into the CN1 guide video.
+    F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),
+    F("comfy_preprocessor", "PiDiNetPreprocessor", CN, MENU, menu=COMFY_PREPROCESSORS, target=None),
+
+    # --- Pipeline (TouchDesigner only) ----------------------------------------------
+    F("pipeline_status", "idle", PL, STATUS, label="Status", target=None),
+    F("auto_load", True, PL, TOGGLE, label="Auto-load finished render", target=None),
+    F("force_preprocess", False, PL, TOGGLE, label="Force ComfyUI re-preprocess", target=None),
+    F("loop_out_frames", "0", PL, STATUS, label="Loaded loop length (frames)", target=None),
+    F("loop_out_overlap", "0", PL, STATUS, label="Loaded loop overlap (frames)", target=None),
+    F("loop_out_rate", "1", PL, STATUS, label="Loaded file frames per output frame", target=None),
+    F("loop_offset", 0, PL, INT, norm=(0, 480), label="Loop Player Offset (frames)", target=None),
+]
+
+BY_API = dict((f.api, f) for f in FIELDS)
+BY_TD = dict((f.td_name, f) for f in FIELDS)
+MOD_FIELDS = [f for f in FIELDS if f.kind == MOD]
+
+# TD parameter names that older builds created but which do nothing now.
+# build_master_ui.py drops them; listed so the rebuild report can mention them.
+RETIRED_TD_NAMES = {
+    "Scale": "not a Deforum key (CFG comes from cfg_scale_schedule)",
+    "Cfgscale": "not a Deforum key (CFG comes from cfg_scale_schedule)",
+    "Baketarget": "replaced by the Mod CHOP: a channel named after a parameter modulates it",
+}
+
+
+def cn_fields(unit):
+    prefix = "cn_%d_" % unit
+    return [f for f in FIELDS if f.api.startswith(prefix)]
+
+
+def slot_fields(n):
+    prefix = "mod%d_" % n
+    return [f for f in FIELDS if f.api.startswith(prefix)]
+
+
+def all_td_names():
+    """Every TD parameter the COMP has (MOD fields contribute two)."""
+    names = []
+    for f in FIELDS:
+        names.append(f.td_name)
+        if f.kind == MOD:
+            names.append(f.raw_td_name)
+    return names

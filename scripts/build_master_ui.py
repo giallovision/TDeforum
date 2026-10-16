@@ -1,197 +1,325 @@
-import os
+# Text DAT `builder_master_ui` (right-click > Run Script).
+#
+# Builds (or rebuilds) the `deforum` Base COMP in this network from
+# scripts/tdeforum/schema.py -- the same list the payload builder reads -- and
+# replaces the old Deforum_UI:
+#
+#   * first run: values, expressions and binds are MIGRATED from Deforum_UI
+#     (schedules become a float base + a raw override; see tdeforum/migrate.py).
+#     Deforum_UI itself is left untouched and is no longer read; delete it later.
+#   * later runs: the COMP's own values are KEPT, matched by parameter name.
+#     Set RESET_TO_DEFAULTS = True to go back to the schema baselines instead.
+#
+# Inside the COMP it creates (only when missing, never overwriting your edits):
+#   prompt_seq        table DAT  beat | prompt | xfade   (seeded from prompt.json)
+#   in_mod            In CHOP    COMP input 1: the Mod CHOP (channels named after parameters)
+#   schedule_preview  table DAT  filled by the bake button / td_controller.preview()
+#   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
+
 import json
+import os
+import sys
 
-def run_ui_construction():
-    preprocessor_options = [
-        'DWPreprocessor',
-        'DepthAnythingV2Preprocessor',
-        'SAMPreprocessor',
-        'LineArtPreprocessor',
-        'CannyEdgePreprocessor',
-        'HEDPreprocessor',
-        'PiDiNetPreprocessor',
-        'M-LSDPreprocessor'
-    ]
+RESET_TO_DEFAULTS = False
+COMP_NAME = 'deforum'
+OLD_UI = 'Deforum_UI'
 
-    # Hardcoded master configurations - no external directory dependencies
-    field_blocks = [
-        ('sd_model_checkpoint', 'angraRealflexLCMV6_v10.safetensors'),
-        ('sd_vae', 'Automatic'),
-        ('W', '1024'), ('H', '576'),
-        ('steps', '10'), ('max_frames', '240'),
-        ('sampler', 'LCM'), ('animation_mode', 'Video Input'),
-        ('seed_behavior', 'fixed'), ('seed', '8675309'),
-        ('n_prompt', 'worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark'),
-        ('use_mask_video', 'True'),
-        ('video_init_path', '/opt/a1111/td_inputs/comfy_videos/archive/taichi_portrait.mp4'),
-        ('comfy_preproc_enable', 'False'),
-        ('comfy_preprocessor', 'PiDiNetPreprocessor'),
-        ('video_mask_path', '/opt/a1111/td_masks/mask_01.mov'),
-        ('video_frame_mode', 'Trim (Normal Speed)'),
-        ('cn_1_enabled', 'False'),
-        ('cn_1_module', 'none'),
-        ('cn_1_model', 'ctrl_v1p_qr_monster_v2'),
-        ('cn_1_vid_path', '/opt/a1111/td_masks/mask_01.mov'),
-        ('cn_1_mask_vid_path', ''),
-        ('cn_1_weight', '1.0'),
-        ('cn_1_guidance_start', '0.0'),
-        ('cn_1_guidance_end', '1.0'),
-        ('cn_1_processor_res', '512'),
-        ('cn_1_threshold_a', '0.5'),
-        ('cn_1_threshold_b', '0.5'),
-        ('cn_1_resize_mode', 'Inner Fit (Scale to Fit)'),
-        ('cn_1_low_vram', 'False'),
-        ('cn_1_pixel_perfect', 'True'),
-        ('cn_1_control_mode', 'Balanced'),
-        ('scale', '1.0'),
-        ('cfg_scale', '2.0'),
-        ('strength', '0.8'),
-        ('diffusion_cadence', '2'),
-        ('optical_flow_cadence', 'RAFT'),
-        ('border', 'replicate'),
-        ('zoom', '0:(1.0)'), ('angle', '0:(0)'), 
-        ('translation_x', '0:(0)'), ('translation_y', '0:(0)'), ('translation_z', '0:(0)'),
-        ('rotation_3d_x', '0:(0)'), ('rotation_3d_y', '0:(0)'), ('rotation_3d_z', '0:(0)'),
-        ('transform_center_x', '0:(0.5)'), ('transform_center_y', '0:(0.5)'),
-        ('perspective_flip_theta', '0:(0)'), ('perspective_flip_phi', '0:(0)'),
-        ('perspective_flip_gamma', '0:(0)'), ('perspective_flip_fv', '0:(50)'),
-        ('noise_schedule', '0: (0.065)'), ('strength_schedule', '0: (0.8)'),
-        ('contrast_schedule', '0: (1.0)'), ('cfg_scale_schedule', '0: (2.0)'),
-        ('fov_schedule', '0: (70)'), ('near_schedule', '0: (200)'), ('far_schedule', '0: (10000)')
-    ]
+_path = me.par.file.eval()
+_scripts = os.path.dirname(_path) if _path else 'T:/scripts'
+if _scripts not in sys.path:
+    sys.path.insert(0, _scripts)
 
-    root_net = me.parent()
-    ui_node = root_net.op('Deforum_UI') or root_net.create(baseCOMP, 'Deforum_UI')
-    
-    map_table = root_net.op('deforum_api_map') or root_net.create(tableDAT, 'deforum_api_map')
-    map_table.clear()
-    map_table.appendRow(['td_name', 'api_name'])
-    
-    for page in list(ui_node.customPages):
-        page.destroy()
-        
-    global_keys = ['sd_model_checkpoint', 'sd_vae', 'W', 'H', 'steps', 'max_frames', 'sampler', 'animation_mode', 'seed_behavior', 'seed', 'n_prompt', 'use_mask_video', 'video_init_path', 'comfy_preproc_enable', 'comfy_preprocessor', 'video_mask_path', 'video_frame_mode']
-    motion_keys = ['border', 'zoom', 'angle', 'translation_x', 'translation_y', 'translation_z', 'rotation_3d_x', 'rotation_3d_y', 'rotation_3d_z', 'transform_center_x', 'transform_center_y']
-    schedule_keys = ['cfg_scale_schedule', 'strength_schedule', 'noise_schedule', 'contrast_schedule', 'pix2pix_img_cfg_scale_schedule']
-    perspective_keys = ['perspective_flip_theta', 'perspective_flip_phi', 'perspective_flip_gamma', 'perspective_flip_fv', 'fov_schedule', 'near_schedule', 'far_schedule']
-    
-    pages = {
-        'Globals': ui_node.appendCustomPage('Globals'),
-        'Motion': ui_node.appendCustomPage('Motion (2D/3D)'),
-        'Schedules': ui_node.appendCustomPage('Schedules'),
-        'Perspective': ui_node.appendCustomPage('Perspective 3D'),
-        'ControlNet': ui_node.appendCustomPage('ControlNet Unit 1'),
-        'Advanced': ui_node.appendCustomPage('Advanced Setup')
-    }
-    
-    print("🔨 Forging clean layout control surface...")
-    for raw_name, default in field_blocks:
-        raw_name = raw_name.strip()
-        default = default.strip()
-        
-        if raw_name == 'sd_model_checkpoint':
-            default = '0'
-        
-        if raw_name in global_keys: current_page = pages['Globals']
-        elif raw_name in motion_keys: current_page = pages['Motion']
-        elif raw_name in schedule_keys: current_page = pages['Schedules']
-        elif raw_name in perspective_keys: current_page = pages['Perspective']
-        elif raw_name.startswith('cn_1_'): current_page = pages['ControlNet']
-        else: current_page = pages['Advanced']
-        
-        if raw_name == 'W': td_name = 'Width'
-        elif raw_name == 'H': td_name = 'Height'
+import tdeforum
+tdeforum.reload_all()
+from tdeforum import migrate, payload, prompt_seq, schema, td_controller
+
+
+def say(text):
+    print('[TDeforum] ' + text)
+
+
+def _mode_name(par):
+    return getattr(par.mode, 'name', str(par.mode)).split('.')[-1].upper()
+
+
+def snapshot(comp):
+    saved = {}
+    for p in comp.customPars:
+        saved[p.name] = {
+            'mode': _mode_name(p),
+            'expr': p.expr,
+            'bind': getattr(p, 'bindExpr', ''),
+            'val': p.val,
+        }
+    return saved
+
+
+def restore(par, saved):
+    mode = saved['mode']
+    if mode == 'EXPRESSION' and saved['expr']:
+        par.expr = saved['expr']
+        par.mode = ParMode.EXPRESSION
+        return
+    if mode == 'BIND' and saved['bind']:
+        par.bindExpr = saved['bind']
+        par.mode = ParMode.BIND
+        return
+    # CONSTANT, or EXPORT (the exporting CHOP re-attaches by name; keep its fallback value)
+    value = saved['val']
+    if par.isMenu and value not in par.menuNames:
+        return
+    par.mode = ParMode.CONSTANT
+    try:
+        par.val = value
+    except Exception:
+        if par.style == 'Int':
+            par.val = int(float(value))
+        elif par.style == 'Float':
+            par.val = float(value)
         else:
-            clean = "".join([x for x in raw_name if x.isalnum()])
-            td_name = clean[0].upper() + clean[1:].lower() if clean else ""
-        
-        if td_name and td_name[-1].isdigit(): td_name += 'val'
-        if not td_name: continue
-            
-        label = raw_name.replace('_', ' ').title()
-        if raw_name == 'W': label = 'Width'
-        if raw_name == 'H': label = 'Height'
-        if label.startswith('Cn 1 '): label = label.replace('Cn 1 ', '')
-        if raw_name == 'n_prompt': label = 'Negative Prompt'
-        
-        map_table.appendRow([td_name, raw_name])
-        
-        if raw_name == 'animation_mode':
-            p = current_page.appendMenu(td_name, label=label)[0]
-            p.menuNames = ['2D', '3D', 'Video Input', 'Interpolation']
-            p.menuLabels = ['2D', '3D', 'Video Input', 'Interpolation']
-            p.val = 'Video Input'
-        elif raw_name == 'seed_behavior':
-            p = current_page.appendMenu(td_name, label=label)[0]
-            p.menuNames = ['iter', 'fixed', 'random', 'schedule']
-            p.menuLabels = ['Iterate (+1)', 'Fixed', 'Random', 'Schedule']
-            p.val = default
-        elif raw_name == 'video_frame_mode':
-            p = current_page.appendMenu(td_name, label=label)[0]
-            p.menuNames = ['trim', 'stride']
-            p.menuLabels = ['Trim (Normal Speed)', 'Stride (Timelapse)']
-            p.val = 'trim'
-        elif raw_name == 'border':
-            p = current_page.appendMenu(td_name, label=label)[0]
-            p.menuNames = ['replicate', 'wrap', 'zeros']
-            p.menuLabels = ['Clamp / Hold (Replicate)', 'Wrap / Tile', 'Black (Zeros)']
-            p.val = 'replicate'
-        elif raw_name == 'comfy_preprocessor':
-            p = current_page.appendMenu(td_name, label=label)[0]
-            p.menuNames = preprocessor_options
-            p.menuLabels = preprocessor_options
-            p.val = default
-        elif default.lower() in ['true', 'false']:
-            p = current_page.appendToggle(td_name, label=label)[0]
-            p.val = (default.lower() == 'true')
-        elif raw_name in motion_keys or raw_name in schedule_keys or raw_name in perspective_keys:
-            p = current_page.appendStr(td_name, label=label)[0]
-            p.val = default
-        elif 'prompt' in raw_name or 'path' in raw_name or 'model' in raw_name or 'module' in raw_name or raw_name.startswith('sd_'):
-            p = current_page.appendStr(td_name, label=label)[0]
-            p.val = default
-        elif default.replace('.', '', 1).isdigit() or raw_name in ['W', 'H', 'steps', 'max_frames', 'cn_1_processor_res', 'seed']:
-            if raw_name in ['W', 'H', 'steps', 'max_frames', 'cn_1_processor_res', 'seed'] or (default.isdigit() and '.' not in default):
-                if raw_name == 'seed': 
-                    p = current_page.appendStr(td_name, label=label)[0]
-                    p.val = default
-                else:
-                    p = current_page.appendInt(td_name, label=label)[0]
-                    try: p.val = int(default)
-                    except: p.val = 0
-                    if raw_name in ['W', 'H']: p.normMax = 1920
-                    elif raw_name == 'max_frames': 
-                        p.normMax = 1000
-                        p.expr = 'me.time.end'
-            else:
-                p = current_page.appendFloat(td_name, label=label)[0]
-                try: p.val = float(default)
-                except: p.val = 0.0
-                p.normMin = -10.0
-                p.normMax = 10.0
-        else:
-            p = current_page.appendStr(td_name, label=label)[0]
-            p.val = default
+            par.val = str(value)
 
-    # Track target path to curate custom curated prompt frameworks
-    prompt_file_path = r'T:\scripts\prompt.json'
-    if not os.path.exists(prompt_file_path):
+
+def _help(p, text):
+    try:
+        p.help = text
+    except Exception:
+        pass
+
+
+def create(page, field, section=False):
+    name, label = field.td_name, field.label
+    kind = field.kind
+    if kind == schema.MENU:
+        p = page.appendMenu(name, label=label)[0]
+        p.menuNames = field.menu
+        p.menuLabels = field.labels
+        p.default = field.default
+    elif kind == schema.TOGGLE:
+        p = page.appendToggle(name, label=label)[0]
+        p.default = bool(field.default)
+    elif kind == schema.INT:
+        p = page.appendInt(name, label=label)[0]
+        p.default = int(field.default)
+    elif kind in (schema.FLOAT, schema.MOD):
+        p = page.appendFloat(name, label=label)[0]
+        p.default = float(field.default)
+    else:  # str, schedule, seed, checkpoint, status
+        p = page.appendStr(name, label=label)[0]
+        p.default = str(field.default)
+    if field.norm and kind in (schema.INT, schema.FLOAT, schema.MOD):
+        p.normMin, p.normMax = field.norm
+    p.val = p.default
+    if section:
+        try:
+            p.startSection = True
+        except Exception:
+            pass
+    if kind == schema.STATUS:
+        p.readOnly = True
+    if field.expr:
+        p.expr = field.expr
+        p.mode = ParMode.EXPRESSION
+    created = [p]
+    if kind == schema.MOD:
+        _help(p, 'Base value. Keyframe it, export to it or bind it; the Mod Matrix and the Mod CHOP '
+                 'add beat-locked motion on top.')
+        raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
+        raw.default = ''
+        _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
+                   'When not empty it is sent verbatim and the base + modulation are ignored.')
+        created.append(raw)
+    return created
+
+
+# --------------------------------------------------------------------------- inner network
+
+def _set_menu(par, *choices):
+    """Set a built-in menu par to the first choice it knows; report if none fits."""
+    names = list(getattr(par, 'menuNames', []) or [])
+    for choice in choices:
+        if choice in names:
+            par.val = choice
+            return True
+    say('NOTE %s.%s has no %s (menu: %s); set it by hand' % (par.owner.name, par.name, '/'.join(choices), names))
+    return False
+
+
+def _expr(op_, name, expression):
+    par = getattr(op_.par, name, None)
+    if par is None:
+        say('NOTE %s has no parameter %r; loop player needs it set by hand to: %s' % (op_.name, name, expression))
+        return
+    par.expr = expression
+    par.mode = ParMode.EXPRESSION
+
+
+def _get(comp, optype, name, x, y):
+    found = comp.op(name)
+    if found is None:
+        found = comp.create(optype, name)
+        found.nodeX, found.nodeY = x, y
+        say('created %s/%s' % (comp.name, name))
+    return found
+
+
+# Playhead in output frames, wrapped to the loaded loop.
+_LOOP = "int(parent().par.Loopoutframes.eval() or 0)"
+_RATE = "float(parent().par.Loopoutrate.eval() or 1)"
+_P = '((absTime.frame + parent().par.Loopoffset.eval()) %% max(1, %s))' % _LOOP
+
+
+def _blank(table):
+    """New Table DATs may hold one empty cell; treat any all-empty table as empty."""
+    for r in range(table.numRows):
+        for c in range(table.numCols):
+            if str(table[r, c].val).strip():
+                return False
+    return True
+
+
+def build_inner(comp, values):
+    seq = _get(comp, tableDAT, 'prompt_seq', -400, 200)
+    if _blank(seq):
+        seq.clear()
+        seq.appendRow(['beat', 'prompt', 'xfade'])
+        try:
+            with open(_scripts + '/prompt.json', 'r', encoding='utf-8') as fh:
+                prompts = json.load(fh)
+            tp = payload.tempo_plan(values)
+            fpb = tp['fpb'] if tp else 30.0
+            for row in prompt_seq.rows_from_prompts(prompts, fpb):
+                seq.appendRow(list(row))
+            say('prompt_seq seeded from prompt.json (frame keys converted to beats; check them)')
+        except Exception as exc:
+            seq.appendRow(['0', 'A cinematic macro shot of liquid gold morphing, biomorphic shapes', ''])
+            say('prompt_seq seeded with a default prompt (%s)' % exc)
+    seq.viewer = True
+
+    _get(comp, inCHOP, 'in_mod', -400, 0)
+    preview = _get(comp, tableDAT, 'schedule_preview', -400, -200)
+    if _blank(preview):
+        preview.clear()
+        preview.appendRow(['parameter', 'mode', 'schedule'])
+    preview.viewer = True
+
+    head = _get(comp, moviefileinTOP, 'loop_head', 0, 100)
+    tail = _get(comp, moviefileinTOP, 'loop_tail', 0, -100)
+    for player, offset in ((head, ''), (tail, ' + int(%s * %s)' % (_LOOP, _RATE))):
+        playmode = getattr(player.par, 'playmode', None)
+        if playmode is not None:
+            _set_menu(playmode, 'specify', 'specifyindex')
+        unit = getattr(player.par, 'indexunit', None)
+        if unit is not None:
+            _set_menu(unit, 'indices', 'index', 'frames')
+        _expr(player, 'index', 'int(%s * %s)%s' % (_P, _RATE, offset))
+
+    cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
+    cross.inputConnectors[0].connect(head)
+    cross.inputConnectors[1].connect(tail)
+    # Tail weight 1 -> 0 over the overlap at the start of each loop, 0 afterwards.
+    _expr(cross, 'cross', '(lambda p, o: max(0.0, 1.0 - p / o) if 0 < o and p < o else 0.0)'
+                          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
+    out = _get(comp, outTOP, 'out_loop', 400, 0)
+    out.inputConnectors[0].connect(cross)
+
+
+# --------------------------------------------------------------------------- side tables
+
+def ensure_prompt_dat(root, comp):
+    prompt_path = _scripts + '/prompt.json'
+    if not os.path.exists(prompt_path):
         default_prompt = {"0": "Biomorphic liquid gold morphing", "120": "Bioluminescent neural network blooming"}
-        with open(prompt_file_path, 'w', encoding='utf-8') as f:
+        with open(prompt_path, 'w', encoding='utf-8') as f:
             json.dump(default_prompt, f, indent=4)
-
-    prompt_dat = root_net.op('deforum_prompts') or root_net.create(textDAT, 'deforum_prompts')
-    prompt_dat.par.file = 'T:/scripts/prompt.json'
+    prompt_dat = root.op('deforum_prompts') or root.create(textDAT, 'deforum_prompts')
+    prompt_dat.par.file = prompt_path
     prompt_dat.par.syncfile = 1
-
-    map_table.dock = ui_node
-    map_table.viewer = False
-    map_table.expose = False
-    
-    prompt_dat.dock = ui_node
+    prompt_dat.dock = comp
     prompt_dat.viewer = True
-    prompt_dat.nodeX = ui_node.nodeX
-    prompt_dat.nodeY = ui_node.nodeY - 180
     prompt_dat.expose = False
 
-run_ui_construction()
+
+def write_map_table(root, comp):
+    table = root.op('deforum_api_map') or root.create(tableDAT, 'deforum_api_map')
+    table.clear()
+    table.appendRow(['td_name', 'api_name', 'sent_as', 'target', 'page'])
+    for field in schema.FIELDS:
+        table.appendRow([field.td_name, field.api, field.key, field.target or 'td-only', field.page])
+        if field.kind == schema.MOD:
+            table.appendRow([field.raw_td_name, field.api + ' (raw)', field.key, 'deforum', field.page])
+    table.dock = comp
+    table.viewer = False
+    table.expose = False
+
+
+# --------------------------------------------------------------------------- main
+
+def run():
+    root = me.parent()
+    comp = root.op(COMP_NAME)
+    old = root.op(OLD_UI)
+    first = comp is None
+    if first:
+        comp = root.create(baseCOMP, COMP_NAME)
+        if old is not None:
+            comp.nodeX, comp.nodeY = old.nodeX + 250, old.nodeY
+        say('created %s' % comp.path)
+
+    if RESET_TO_DEFAULTS:
+        saved, from_old = {}, False
+    elif first and old is not None:
+        saved, from_old = snapshot(old), True
+    else:
+        saved, from_old = snapshot(comp), False
+
+    for page in list(comp.customPages):
+        page.destroy()
+    pages = dict((name, comp.appendCustomPage(name)) for name in schema.PAGE_ORDER)
+
+    by_name = {}
+    for field in schema.FIELDS:
+        section = field.api.endswith('_active') and field.api.startswith('mod')
+        for p in create(pages[field.page], field, section):
+            by_name[p.name] = p
+
+    kept, notes = [], []
+    for action in migrate.plan(saved, from_old):
+        if action[0] == 'note':
+            notes.append(action[1])
+            continue
+        _kind, name, entry = action
+        par = by_name.get(name)
+        if par is None:
+            continue
+        try:
+            restore(par, entry)
+            kept.append(name)
+        except Exception as exc:
+            say('could not restore %s: %s' % (name, exc))
+
+    values = td_controller.read_ui(comp)
+    build_inner(comp, values)
+    write_map_table(root, comp)
+    ensure_prompt_dat(root, comp)
+
+    total = len(schema.all_td_names())
+    say('%s %s: %d parameters on %d pages, %d values %s.' % (
+        'built' if first else 'rebuilt', comp.path, total, len(schema.PAGE_ORDER), len(kept),
+        'migrated from ' + OLD_UI if from_old else 'kept'))
+    for name in migrate.dropped(saved):
+        say('  dropped %s (%s)' % (name, schema.RETIRED_TD_NAMES.get(name, 'not in schema')))
+    for note in notes:
+        say('NOTE ' + note)
+    try:
+        tp = payload.tempo_plan(values)
+        say('tempo: ' + (tdeforum.tempo.describe(tp) if tp else 'manual length'))
+    except ValueError as exc:
+        say('tempo settings invalid: %s' % exc)
+    if first and old is not None:
+        say('%s is no longer read. Delete it once the COMP looks right.' % OLD_UI)
+    say('next: wire your loop CHOP into %s input 1 (channel names = parameter names, e.g. translation_z), '
+        'edit %s/prompt_seq, then press bake to preview the schedules.' % (comp.name, comp.name))
+
+
+run()

@@ -1,0 +1,4 @@
+# Dockerfile.a1111 clones everything it needs, so the build context is
+# intentionally empty: no renders, masks, a1111_core copy or symlinked inputs
+# get sent to the daemon. Add `!path` lines if you ever add a COPY step.
+*
