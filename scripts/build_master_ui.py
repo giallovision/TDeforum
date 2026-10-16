@@ -15,6 +15,8 @@
 #   in_mod            In CHOP    COMP input 1: the Mod CHOP (channels named after parameters)
 #   schedule_preview  table DAT  filled by the bake button / td_controller.preview()
 #   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
+#   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
+#                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
 
 import json
 import os
@@ -213,6 +215,15 @@ def build_inner(comp, values):
         if unit is not None:
             _set_menu(unit, 'indices', 'index', 'frames')
         _expr(player, 'index', 'int(%s * %s)%s' % (_P, _RATE, offset))
+
+    for unit in range(1, schema.CN_UI_UNITS + 1):
+        y = -300 - 150 * unit
+        sel = _get(comp, selectTOP, td_controller.FEED_SELECT % unit, 0, y)
+        rec = _get(comp, moviefileoutTOP, td_controller.FEED_OUT % unit, 250, y)
+        rec.inputConnectors[0].connect(sel)
+        kind = getattr(rec.par, 'type', None)
+        if kind is not None:
+            _set_menu(kind, 'movie')
 
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)

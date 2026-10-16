@@ -22,6 +22,7 @@ from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
 
 import math
 
+from . import feed
 from . import modulation
 from . import prompt_seq
 from . import schedules
@@ -296,23 +297,27 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             and "padding_mode" not in values:
         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
 
-    # --- ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off --
-    for field in schema.cn_fields(1):
-        raw = values.get(field.api, field.default)
-        try:
-            settings[field.key] = coerce(field, raw)
-        except (TypeError, ValueError):
-            settings[field.key] = coerce(field, field.default)
-            warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
-    # Deforum parses every unit's schedules even when the unit is off, so units 2-5
-    # get unit 1's defaults with the unit number swapped; only `enabled` is False.
-    for unit in range(2, CN_UNITS + 1):
+    # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
+    # Deforum parses every unit's schedules even when the unit is off, so a unit the
+    # UI does not have (or an old UI without it) gets unit 1's defaults with the unit
+    # number swapped; only `enabled` is False. Empty strings are meaningful here.
+    for unit in range(1, CN_UNITS + 1):
         for field in schema.cn_fields(1):
-            if field.api == "cn_1_enabled":
-                continue
+            api = field.api.replace("cn_1_", "cn_%d_" % unit, 1)
             key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
-            settings[key] = coerce(field, field.default)
-        settings["cn_%d_enabled" % unit] = False
+            known = unit == 1 or api in values
+            if field.api == "cn_1_enabled" and not known:
+                settings[key] = False
+                continue
+            raw = values.get(api, field.default) if known else field.default
+            try:
+                settings[key] = coerce(field, raw)
+            except (TypeError, ValueError):
+                settings[key] = coerce(field, field.default)
+                warnings.append("%s: could not read %r, used %r" % (field.td_name.replace("Cn1", "Cn%d" % unit),
+                                                                  raw, field.default))
+        if _as_bool(settings.get("cn_%d_enabled" % unit, False)):
+            _check_cn_guide(values, unit, settings, total, frame_counter, warnings)
 
     # --- prompts ------------------------------------------------------------------------
     sequence = None
@@ -399,6 +404,32 @@ def _count(counter, path, label, warnings):
     return frames
 
 
+def _check_cn_guide(values, unit, settings, total, frame_counter, warnings):
+    """Warn when an enabled unit's guide video is shorter than the render.
+
+    Deforum reads video frame k for render frame k; past the end of the video the
+    unit gets no image. TOP feeds are verified when they are recorded, so only
+    plain files are checked here.
+    """
+    if feed.mode_of(values, unit) != feed.FILE or frame_counter is None:
+        return
+    path = _text(settings.get("cn_%d_vid_path" % unit, ""))
+    if not feed.is_video(path):
+        return
+    try:
+        frames = frame_counter(path)
+    except Exception as exc:
+        warnings.append("ControlNet %d guide %s: frame count failed (%s)" % (unit, path, exc))
+        return
+    if frames is None:
+        warnings.append("ControlNet %d guide %s is not readable from TouchDesigner; length not checked"
+                        % (unit, path))
+    elif frames < total:
+        warnings.append("ControlNet %d guide has %d frames but the render needs %d; the last %d frames "
+                        "get no guidance (record a longer feed or use Guide Source: TOP)"
+                        % (unit, frames, total, total - frames))
+
+
 def summary(result):
     s = result["request"]["deforum_settings"]
     plan = result["plan"]
@@ -417,5 +448,7 @@ def summary(result):
                     if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
     if moving:
         parts.append("mod: " + ", ".join(moving))
-    parts.append("CN1 %s" % ("on: " + str(s.get("cn_1_model")) if s.get("cn_1_enabled") else "off"))
+    active = ["CN%d %s" % (u, s.get("cn_%d_model" % u)) for u in range(1, CN_UNITS + 1)
+              if s.get("cn_%d_enabled" % u)]
+    parts.append(", ".join(active) if active else "CN off")
     return " | ".join(parts)

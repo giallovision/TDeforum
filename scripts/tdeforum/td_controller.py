@@ -9,6 +9,7 @@ Entry points (each called from a thin DAT in scripts/):
     load_latest(root)       LoadVideo button        loadvideo_exec.py
     export_payload(root)    dry run, no POST        export_deforum_payload.py
     preprocess_only(root)   ComfyUI only            comfy_preprocessor_payload_exec.py
+    capture_tick(root)      every frame             feed_capture_exec.py  (records TOP guide feeds)
     cancel / status / doctor                        textport helpers
 
 ``root`` is the COMP holding the network (/project1). Pipeline state lives in
@@ -26,6 +27,7 @@ import traceback
 
 from . import comfy
 from . import config
+from . import feed
 from . import payload
 from . import schema
 from . import tempo
@@ -40,8 +42,12 @@ COMFY_RUNNING = "comfy_running"
 DEFORUM_SUBMITTED = "deforum_submitted"
 DEFORUM_RUNNING = "deforum_running"
 WAITING_FILE = "waiting_for_file"
-BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE)
+CAPTURING = "capturing"            # stepping the timeline and recording TOP guide feeds
+WAITING_FEED = "waiting_for_feed"  # recorded; waiting for the movie files to be finalised
+BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE,
+        CAPTURING, WAITING_FEED)
 LOST_CONTACT_S = 120.0
+FEED_FINALIZE_TIMEOUT_S = 60.0
 
 # Operators this controller talks to, relative to root.
 NAMES = {
@@ -54,6 +60,7 @@ NAMES = {
     "models": "available_models",
     "movie": "moviefilein1",
     "folder": "folder_monitor",
+    "feed_exec": "feed_capture_exec",   # Execute DAT, Frame End -> capture_tick()
 }
 # Inside the Deforum COMP
 INNER = {
@@ -63,6 +70,8 @@ INNER = {
     "head": "loop_head",              # loop player: Movie File In at the playhead
     "tail": "loop_tail",              # loop player: Movie File In one loop later
 }
+FEED_SELECT = "feed%d_sel"            # Select TOP per ControlNet unit (set to the source TOP)
+FEED_OUT = "feed%d_out"               # Movie File Out TOP per unit (records the guide movie)
 
 RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
 INTERP_FALLBACK_S = 30.0
@@ -269,18 +278,29 @@ def queue(root):
     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
         return
+    if st.get("state") == CAPTURING:
+        _abort_capture(root, st)          # stale capture: put the timeline back first
     try:
         values, result = build(root, cfg)
         for warning in result["warnings"]:
             log("warning: " + warning)
-        if _wants_preprocess(values):
-            if _start_preprocess(root, cfg, values, result, st, then_render=True):
-                return
-            values, result = build(root, cfg)  # cache hit changed Cn1vidpath
-        _submit_deforum(root, cfg, result, st)
+        if feed.requests(values):
+            if _start_feed(root, cfg, values, result, st):
+                return                    # resumes in _after_feed() once the movies are ready
+            values, result = build(root, cfg)   # stills changed the Vid Path pars
+        _render_stage(root, cfg, st, values, result)
     except Exception as exc:
         traceback.print_exc()
         _fail(root, st, "queue failed: %s" % exc)
+
+
+def _render_stage(root, cfg, st, values, result):
+    """ComfyUI preprocess (optional), then the Deforum batch."""
+    if _wants_preprocess(values):
+        if _start_preprocess(root, cfg, values, result, st, then_render=True):
+            return
+        values, result = build(root, cfg)  # cache hit changed Cn1vidpath
+    _submit_deforum(root, cfg, result, st)
 
 
 def preprocess_only(root):
@@ -311,6 +331,8 @@ def cancel(root):
     elif st.get("state") in (COMFY_SUBMITTED, COMFY_RUNNING):
         _op(root, "comfy").request(config.comfy_url(cfg, "/interrupt"), "POST",
                                    header=JSON_HEADERS, data="{}")
+    elif st.get("state") in (CAPTURING, WAITING_FEED):
+        _abort_capture(root, st)
     _finish(root, st, "cancelled (was %s)" % st.get("state", IDLE))
 
 
@@ -325,6 +347,10 @@ def _wants_preprocess(values):
         return False
     if not payload._as_bool(values.get("cn_1_enabled", False)):
         log("ComfyUI preprocess is on but ControlNet unit 1 is off; skipping preprocess")
+        return False
+    if feed.mode_of(values, 1) != feed.FILE:
+        log("ComfyUI preprocess reads video_init_path, not a TOP feed; skipping it for unit 1 "
+            "(use ControlNet's own module, e.g. depth_midas, on the feed instead)")
         return False
     return True
 
@@ -369,10 +395,308 @@ def _submit_deforum(root, cfg, result, st):
     log("render submitted: " + payload.summary(result))
 
 
-def _set_cn_video(root, container_path):
-    par = getattr(_op(root, "ui").par, "Cn1vidpath", None)
+def _set_cn_video(root, container_path, unit=1):
+    par = getattr(_op(root, "ui").par, "Cn%dvidpath" % unit, None)
     if par is not None:
         _set_constant(par, container_path)
+
+
+# --------------------------------------------------------------------------- ControlNet feeds
+#
+# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The
+# timeline is paused and stepped one frame at a time, because the loop is locked
+# to the project frames:
+#
+#   settle   timeline set to the first frame; wait two frames so a full frame cooks there
+#   armed    Movie File Out TOPs set to record + pause (the file opens)
+#   record   every Frame End: check the timeline is where we put it, pulse Add Frame,
+#            move to the next planned frame; the last pulse stops recording
+#   (WAITING_FEED) the movie files are finalised, counted and handed to the CN units
+#
+# Built-in TouchDesigner API used: op('/').time.{frame, play, rate, start},
+# project.realTime, Select TOP .top, Movie File Out TOP .file/.record/.pause/.addframe,
+# TOP.save(). Anything missing raises a message naming it. Pipeline > "Feed: recording
+# method" = continuous skips pause/Add Frame and records every cooked frame instead.
+
+def _timeline(root):
+    top = root.op("/")
+    timeline = getattr(top, "time", None)
+    if timeline is None:
+        raise RuntimeError("cannot reach the project timeline (op('/').time)")
+    return timeline
+
+
+def _realtime(value=None):
+    """Return project.realTime; set it first when `value` is given. None outside TouchDesigner."""
+    try:
+        import td
+        project = td.project
+        previous = getattr(project, "realTime", None)
+    except Exception:
+        return None
+    if value is not None:
+        try:
+            project.realTime = value
+        except Exception:
+            pass
+    return previous
+
+
+def _resolve_top(root, path, unit):
+    if not path:
+        raise RuntimeError("ControlNet %d: Source TOP is empty (e.g. /project1/final_out)" % unit)
+    found = root.op(path)
+    if found is None:
+        raise RuntimeError("ControlNet %d: Source TOP %r not found" % (unit, path))
+    return found
+
+
+def _par(op_, name):
+    par = getattr(op_.par, name, None) if op_ is not None else None
+    if par is None:
+        raise RuntimeError("%s has no parameter %r; set the feed up by hand or tell the maintainer which "
+                           "TouchDesigner build this is" % (getattr(op_, "name", op_), name))
+    return par
+
+
+def _feed_plan(root, values, result):
+    """(feed.frame_plan(...), timeline rate) for the render in `result`."""
+    timeline = _timeline(root)
+    rate = float(getattr(timeline, "rate", 60.0) or 60.0)
+    start = int(float(values.get("feed_loop_start", 0) or 0)) or int(getattr(timeline, "start", 1) or 1)
+    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start), rate
+
+
+def _feed_ops(ui, unit):
+    sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
+    if sel is None or out is None:
+        raise RuntimeError("the deforum COMP has no %s / %s; run builder_master_ui"
+                           % (FEED_SELECT % unit, FEED_OUT % unit))
+    return sel, out
+
+
+def _set_feed_info(root, unit, text):
+    _set_par(_op(root, "ui"), "Feed%dinfo" % unit, text)
+
+
+def _start_feed(root, cfg, values, result, st):
+    """Capture every TOP-sourced guide. True when a recording is now running."""
+    wants = feed.requests(values)
+    for want in wants:
+        if want.mode == feed.TOP_STILL:
+            _capture_still(root, cfg, want)
+    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
+    return bool(loops) and _begin_loop_capture(root, cfg, values, result, loops)
+
+
+def _feed_target(cfg, want):
+    share = feed.share_path(cfg, want.unit, want.mode)
+    if share is None:
+        raise RuntimeError("cn_feed_dir %s is not under config path_map; TouchDesigner cannot write there"
+                           % cfg["cn_feed_dir"])
+    os.makedirs(os.path.dirname(share), exist_ok=True)
+    return share, feed.container_path(cfg, want.unit, want.mode)
+
+
+def _capture_still(root, cfg, want):
+    top = _resolve_top(root, want.top, want.unit)
+    share, container = _feed_target(cfg, want)
+    top.save(share)
+    if not os.path.isfile(share):
+        raise RuntimeError("ControlNet %d: %s.save() wrote nothing to %s" % (want.unit, want.top, share))
+    _set_cn_video(root, container, want.unit)
+    _set_feed_info(root, want.unit, "still %s" % time.strftime("%H:%M:%S"))
+    log("ControlNet %d guide: still from %s -> %s" % (want.unit, want.top, container))
+
+
+def _begin_loop_capture(root, cfg, values, result, loops):
+    ui = _op(root, "ui")
+    exec_dat = root.op(NAMES["feed_exec"])
+    if exec_dat is None:
+        raise RuntimeError("no %s DAT: run setup_network" % NAMES["feed_exec"])
+    for name in ("active", "frameend"):
+        par = getattr(exec_dat.par, name, None)
+        if par is not None and not par.eval():
+            raise RuntimeError("%s.%s is off, so the capture would never advance" % (exec_dat.name, name))
+
+    timeline = _timeline(root)
+    plan, rate = _feed_plan(root, values, result)
+    for warning in plan["warnings"]:
+        log("warning: " + warning)
+
+    method = feed.method_of(values)
+    units = []
+    for want in loops:
+        sel, out = _feed_ops(ui, want.unit)
+        _resolve_top(root, want.top, want.unit)
+        share, container = _feed_target(cfg, want)
+        if os.path.isfile(share):
+            os.remove(share)                  # so "file exists" below means "this recording"
+        _set_constant(_par(sel, "top"), want.top)
+        _set_constant(_par(out, "file"), share)
+        for name, value in (("type", "movie"), ("pause", 0), ("record", 0)):
+            par = getattr(out.par, name, None)
+            if par is not None:
+                _set_constant(par, value)
+        _par(out, "record")
+        if method == feed.ADD_FRAME:
+            _par(out, "addframe")
+            _par(out, "pause")
+        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container})
+
+    now = time.time()
+    st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
+          "j": 0, "since_set": 0, "submitted": now, "updated": now,
+          "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
+    _save(root, st)
+    timeline.play = False
+    timeline.frame = plan["frames"][0]
+    _set_status(root, "feed: recording 0/%d" % len(plan["frames"]))
+    log("recording ControlNet feed%s %s from %s: %s (timeline %g fps, method %s)" % (
+        "s" if len(units) > 1 else "", ",".join(str(u["unit"]) for u in units),
+        ", ".join(sorted(set(u["top"] for u in units))), feed.describe(plan), rate, method))
+    return True
+
+
+def capture_tick(root):
+    """Frame End callback (feed_capture_exec). Does nothing unless a capture is running."""
+    st = _state(root)
+    if st.get("state") != CAPTURING:
+        return
+    try:
+        _capture_step(root, st)
+    except Exception as exc:
+        traceback.print_exc()
+        _abort_capture(root, st)
+        _fail(root, st, "feed capture failed: %s" % exc)
+
+
+def _capture_step(root, st):
+    ui = _op(root, "ui")
+    timeline = _timeline(root)
+    frames = st["frames"]
+    outs = [_feed_ops(ui, u["unit"])[1] for u in st["units"]]
+    st["updated"] = time.time()
+    st["since_set"] = st.get("since_set", 0) + 1
+    phase = st["phase"]
+
+    if phase == "settle":
+        # The first callback may still belong to the frame the timeline was set in;
+        # two callbacks guarantee a whole frame was cooked at frames[0].
+        if st["since_set"] >= 2:
+            if int(timeline.frame) != frames[0]:
+                raise RuntimeError("the timeline moved to %s while waiting to start (expected %d); "
+                                   "is something else driving it?" % (timeline.frame, frames[0]))
+            for out in outs:
+                if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
+                    _set_constant(out.par.pause, 1)
+                _set_constant(out.par.record, 1)
+            st["phase"] = "armed"
+        _save(root, st)
+        return
+
+    # "armed" and "record" both land here. In "armed" a frame has cooked since record (+pause)
+    # were set, so the movie files are open: Add Frame is safe, and in the continuous method
+    # that cooked frame (still at frames[0]) is the first recorded one.
+    j = st["j"]
+    if int(timeline.frame) != frames[j]:
+        raise RuntimeError("recording frame %d: the timeline is at %s, expected %d; something else is "
+                           "moving it (a playing Timer, Time CHOP or script?)" % (j, timeline.frame, frames[j]))
+    if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
+        for out in outs:
+            out.par.addframe.pulse()
+    j += 1
+    st["j"], st["phase"] = j, "record"
+    if j <= 3 or j == len(frames):
+        log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), frames[j - 1]))
+    if j < len(frames):
+        timeline.frame = frames[j]
+        st["since_set"] = 0
+        if j % 30 == 0:
+            _set_status(root, "feed: recording %d/%d" % (j, len(frames)))
+        _save(root, st)
+        return
+
+    for out in outs:
+        _set_constant(out.par.record, 0)
+    _restore_timeline(root, st.get("restore"))
+    now = time.time()
+    st.update(state=WAITING_FEED, waiting_since=now, updated=now, sizes={}, restore=None)
+    _save(root, st)
+    _set_status(root, "feed: finalising")
+    log("feed recorded (%d frames); waiting for the movie files" % len(frames))
+
+
+def _restore_timeline(root, restore):
+    if not restore:
+        return
+    try:
+        timeline = _timeline(root)
+        timeline.frame = restore["frame"]
+        timeline.play = restore["play"]
+    except Exception as exc:
+        log("could not restore the timeline: %s" % exc)
+    if restore.get("realtime") is not None:
+        _realtime(restore["realtime"])
+
+
+def _abort_capture(root, st):
+    """Stop recording and give the timeline back. Safe to call twice."""
+    ui = _op(root, "ui")
+    for u in st.get("units", []):
+        try:
+            out = ui.op(FEED_OUT % u["unit"])
+            if out is not None and getattr(out.par, "record", None) is not None:
+                _set_constant(out.par.record, 0)
+        except Exception as exc:
+            log("could not stop feed %s: %s" % (u.get("unit"), exc))
+    _restore_timeline(root, st.get("restore"))
+    st["restore"] = None
+    _save(root, st)
+
+
+def _poll_feed(root, cfg, st):
+    """Wait for the recorded movies to settle, check their length, then render."""
+    now = time.time()
+    sizes, stable = dict(st.get("sizes") or {}), True
+    for u in st["units"]:
+        size = os.path.getsize(u["share"]) if os.path.isfile(u["share"]) else -1
+        if size <= 0 or sizes.get(str(u["unit"])) != size:
+            stable = False
+        sizes[str(u["unit"])] = size
+    st["sizes"] = sizes
+    if not stable:
+        if now - st.get("waiting_since", now) > FEED_FINALIZE_TIMEOUT_S:
+            _fail(root, st, "the recorded feed %s did not appear within %ds (is the Movie File Out codec "
+                            "available on this licence?)" % (st["units"][0]["share"], FEED_FINALIZE_TIMEOUT_S))
+            return
+        _save(root, st)
+        return
+
+    expected, counter = len(st["frames"]), _frame_counter(cfg)
+    for u in st["units"]:
+        try:
+            actual = counter(u["container"])
+        except Exception as exc:
+            log("ControlNet %d feed: frame count failed (%s)" % (u["unit"], exc))
+            actual = None
+        ok, message = feed.verify(expected, actual)
+        if not ok:
+            _fail(root, st, "ControlNet %d feed: %s (%s)" % (u["unit"], message, u["share"]))
+            return
+        log("ControlNet %d feed ready: %s (%s)" % (u["unit"], u["container"], message))
+        _set_cn_video(root, u["container"], u["unit"])
+        _set_feed_info(root, u["unit"], "%d frames @ %s" % (expected, time.strftime("%H:%M:%S")))
+    _after_feed(root, cfg, st)
+
+
+def _after_feed(root, cfg, st):
+    try:
+        values, result = build(root, cfg)
+        _render_stage(root, cfg, st, values, result)
+    except Exception as exc:
+        traceback.print_exc()
+        _fail(root, st, "render after the feed failed: %s" % exc)
 
 
 # --------------------------------------------------------------------------- polling
@@ -405,6 +729,11 @@ def tick(root):
     elif current == WAITING_FILE:
         _try_load(root, cfg, st)
         return
+    elif current == WAITING_FEED:
+        _poll_feed(root, cfg, st)
+        return
+    elif current == CAPTURING:
+        return  # driven every frame by feed_capture_exec; cancel() aborts it
     _save(root, st)
 
 
@@ -660,7 +989,7 @@ def preview(root):
     parameters first, then the prompt keys) and logs the summary and warnings.
     """
     cfg = config.load()
-    _values, result = build(root, cfg)
+    values, result = build(root, cfg)
     for warning in result["warnings"]:
         log("warning: " + warning)
     order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
@@ -677,8 +1006,30 @@ def preview(root):
     for api, (how, sched) in rows:
         if how != "constant":
             log("%-28s %-10s %s" % (api, how, sched if len(sched) < 160 else sched[:157] + "..."))
+    held = ["%s %s" % (api.replace("_schedule", ""), result["schedules"][api][1])
+            for api in ("strength_schedule", "cfg_scale_schedule", "noise_schedule")
+            if api in result["schedules"] and result["schedules"][api][0] == "constant"]
+    if held:
+        log("held (also in schedule_preview): " + " | ".join(held))
+    _log_feed_plan(root, values, result)
     log("preview: " + payload.summary(result))
     return result
+
+
+def _log_feed_plan(root, values, result):
+    wants = feed.requests(values)
+    for want in wants:
+        if want.mode == feed.TOP_STILL:
+            log("feed: ControlNet %d takes one still from %s at Queue" % (want.unit, want.top or "(no TOP set)"))
+    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
+    if loops:
+        try:
+            plan, rate = _feed_plan(root, values, result)
+            log("feed: ControlNet %s record %s from %s at Queue (timeline %g fps)" % (
+                ",".join(str(w.unit) for w in loops), feed.describe(plan),
+                ", ".join(sorted(set(w.top or "(no TOP set)" for w in loops))), rate))
+        except Exception as exc:
+            log("feed: cannot plan the recording: %s" % exc)
 
 
 def bake(root):
@@ -687,6 +1038,37 @@ def bake(root):
 
 
 # --------------------------------------------------------------------------- diagnostics
+
+def _doctor_feeds(root, cfg, ui, values):
+    """TOP guide feeds: which units use them, whether the pieces they need exist."""
+    wants = feed.requests(values)
+    for unit in range(1, feed.UNITS + 1):
+        mode = feed.mode_of(values, unit)
+        if mode == feed.FILE:
+            continue
+        want = [w for w in wants if w.unit == unit]
+        top = str(values.get("feed_%d_top" % unit, "") or "")
+        found = root.op(top) is not None if top else False
+        log("ControlNet %d guide: %s from %s [%s]%s" % (
+            unit, mode, top or "(no Source TOP)", "TOP found" if found else "TOP NOT FOUND",
+            "" if want else " (unit is off, so it will not be recorded)"))
+        sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
+        if mode == feed.TOP_LOOP and (sel is None or out is None):
+            log("  %s / %s missing from the COMP: run builder_master_ui" % (FEED_SELECT % unit, FEED_OUT % unit))
+    if any(w.mode == feed.TOP_LOOP for w in wants):
+        exec_dat = root.op(NAMES["feed_exec"])
+        if exec_dat is None:
+            log("%s missing: run setup_network (the loop recorder steps on its Frame End)" % NAMES["feed_exec"])
+        try:
+            timeline = _timeline(root)
+            log("timeline: %g fps, starts at frame %s, frame %s" % (
+                float(getattr(timeline, "rate", 0) or 0), getattr(timeline, "start", "?"), timeline.frame))
+        except Exception as exc:
+            log("timeline unreadable: %s" % exc)
+    if wants:
+        folder = config.to_share(cfg, cfg["cn_feed_dir"] + "/")
+        log("feeds are written to %s (container %s)" % (folder, cfg["cn_feed_dir"]))
+
 
 def doctor(root):
     """Print what the pipeline can and cannot see. Safe to run any time."""
@@ -717,6 +1099,7 @@ def doctor(root):
                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
         rows = read_prompt_rows(ui)
         log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
+        _doctor_feeds(root, cfg, ui, values)
     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
         container_path = str(values.get(api, "") or "")
         if not container_path:

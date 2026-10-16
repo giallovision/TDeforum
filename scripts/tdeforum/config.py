@@ -35,6 +35,10 @@ DEFAULTS = {
     },
     "comfy_output_node": "21",
     "comfy_client_id": "tdeforum",
+    # Where TouchDesigner writes ControlNet guide feeds (container path; must be under
+    # path_map so both sides see it) and their container format (.mov for ProRes/Animation).
+    "cn_feed_dir": "/opt/a1111/td_masks/feeds",
+    "cn_feed_ext": ".mp4",
     # Model used when an index in Sdmodelcheckpoint is missing from available_models.
     "default_checkpoint": "angraRealflexLCMV6_v10.safetensors",
     # Pipeline timing.

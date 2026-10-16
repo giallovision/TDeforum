@@ -126,6 +126,28 @@ def main():
         set_par(loader, 'file', SCRIPTS + '/loadvideo_exec.py')
         set_par(loader, 'syncfile', True)
 
+    # 7b. Frame-End stepper that records ControlNet feeds from TOPs.
+    stepper = ROOT.op('feed_capture_exec')
+    if stepper is None:
+        stepper = ROOT.create(executeDAT, 'feed_capture_exec')
+        stepper.nodeX, stepper.nodeY = (loader.nodeX if loader is not None else 0), \
+            (loader.nodeY - 150 if loader is not None else -300)
+        say('created feed_capture_exec')
+    set_par(stepper, 'file', SCRIPTS + '/feed_capture_exec.py')
+    set_par(stepper, 'syncfile', True)
+    set_par(stepper, 'framestart', False)
+    set_par(stepper, 'frameend', True)
+    set_par(stepper, 'active', True)
+
+    # 7c. The builder DAT reads its script from the share like the others, so a patched
+    #     build_master_ui.py is what runs (a DAT holding stale text rebuilt the old UI once).
+    builder = ROOT.op('builder_master_ui')
+    if builder is None:
+        builder = ROOT.create(textDAT, 'builder_master_ui')
+        say('created builder_master_ui')
+    set_par(builder, 'file', SCRIPTS + '/build_master_ui.py')
+    set_par(builder, 'syncfile', True)
+
     # 8. Report (no changes): creative-chain wiring worth a look.
     comp = ROOT.op('deforum')
     wave = ROOT.op('wave_generator')

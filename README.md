@@ -68,7 +68,7 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
 
 ### The `deforum` COMP
 
-Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · Pipeline**.
+Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
 
 Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
 
@@ -84,6 +84,25 @@ On top of the base, three modulation sources, all tempo-locked:
 | **Prompt sequence** | `deforum/prompt_seq` table, columns *beat*, *prompt*, *xfade* | held prompt keys + beat-length crossfades written as weighted `AND` prompts |
 
 Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
+
+### ControlNet from a TOP (`final_out`)
+
+Deforum can only read a *file* for ControlNet, so TouchDesigner records the TOP into one. On each *ControlNet Unit* page set **Guide Source**:
+
+* **Existing file**: the unit's *Vid Path* as before.
+* **TOP: record the loop**: Queue records *Source TOP* (for example `/project1/final_out`) into `T:/td_masks/feeds/cnN_feed.mp4` and points the unit's Vid Path at it.
+* **TOP: one still frame**: saves the current frame as a PNG; Deforum uses it for every frame.
+
+How a loop feed is made: Deforum frame k is guided by video frame k, so the recording has exactly *max_frames* frames. Queue pauses the timeline, steps it to the planned frame for each render frame (wrapping around the loop for the overlap), and records one video frame per step. At 60 fps + cadence that is every timeline frame; with RIFE/FILM it is every 2nd/3rd/4th. *Pipeline › Feed Loop Start* is the timeline frame the loop begins on (0 = the timeline start). *Pipeline › Feed Method* chooses Add Frame (exact) or "record every cooked frame" (fallback).
+
+Notes:
+
+* `final_out` must be driven by the **project timeline** (`me.time.frame`, Timeline CHOP, ...), not `absTime` or real-time clocks, or the recording will not match the loop.
+* Feedback networks (Feedback TOP, Cache) depend on stepping through every frame; they are not reproducible by jumping, so keep the guide source feed-forward.
+* Preview (**bake**) logs the plan ("feed 1: 270 frames, timeline 1..240 ...") without recording.
+* ComfyUI preprocessing is skipped for TOP feeds; use ControlNet's own module (`depth_midas`, `canny`, ...) or leave it at `none` for ready-made masks or QR images.
+* `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
+* Units 1-3 have pages; units 4-5 stay available through the payload only.
 
 ### Tempo
 
@@ -153,6 +172,7 @@ scripts/
     tempo.py           # bpm / bars / fps -> render plan (cadence or interpolation)
     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+    feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
     migrate.py         # Deforum_UI -> deforum COMP value migration
     payload.py         # batch request + frame plan
     comfy.py           # ComfyUI request / history parsing

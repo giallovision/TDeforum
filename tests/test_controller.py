@@ -267,5 +267,218 @@ class TempoCompTest(ControllerTest.__bases__[0]):
         self.assertEqual(ctl._op(root, "ui").name, "Deforum_UI")
 
 
+FEED_UI = dict(TEMPO_UI, mod1_active=False, cn_1_enabled=True, feed_1_mode="top_loop",
+               feed_1_top="/project1/final_out", feed_loop_start=0)
+
+
+class FeedTest(ControllerTest.__bases__[0]):
+    """ControlNet guide feeds recorded from a TOP at Queue."""
+
+    setUp = ControllerTest.setUp
+    state = ControllerTest.state
+    tick = ControllerTest.tick
+
+    def make(self, **overrides):
+        self.root = make_network(dict(FEED_UI, **overrides), comp=True,
+                                 prompt_rows=[("0", "gold", "")])
+        self.ui = self.root.op("deforum")
+        self.timeline = self.root.timeline
+        self.out = self.ui.op("feed1_out")
+        return self.ui
+
+    def record_all(self, limit=500):
+        """Run Frame End callbacks until the recording finishes (one callback per TD frame)."""
+        for _ in range(limit):
+            if self.state() != ctl.CAPTURING:
+                return
+            ctl.capture_tick(self.root)
+        self.fail("capture never finished")
+
+    def posts(self):
+        return self.root.op("webclient_deforum").requests
+
+    def feed_file(self, n=1):
+        path = self.share + "/td_masks/feeds/cn%d_feed.mp4" % n
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * 200)
+        return path
+
+    def test_loop_capture_end_to_end(self):
+        ui = self.make()
+        self.timeline.frame, self.timeline.play = 42, True
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.CAPTURING)
+        self.assertEqual(self.posts(), [], "nothing is rendered before the guide exists")
+        self.assertEqual((self.timeline.play, self.timeline.frame), (False, 1))
+        self.assertEqual(ui.op("feed1_sel").par.top.val, "/project1/final_out")
+        self.assertEqual(self.out.par.file.val, self.share + "/td_masks/feeds/cn1_feed.mp4")
+
+        self.record_all()
+        self.assertEqual(self.state(), ctl.WAITING_FEED)
+        # 75 render frames at 30 fps from a 60 fps timeline: every second frame, wrapping at 120.
+        expected = [1 + (2 * k) % 120 for k in range(75)]
+        self.assertEqual(self.out.recorded, expected)
+        self.assertEqual(self.out.par.addframe.pulses, 75)
+        self.assertEqual(self.out.par.record.val, 0)
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 42), "timeline given back")
+        self.assertEqual(self.posts(), [])
+
+        path = self.feed_file()
+        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
+            self.tick()                                  # size seen once
+            self.assertEqual(self.state(), ctl.WAITING_FEED)
+            self.tick()                                  # size stable -> verified -> render
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+        s = json.loads(self.posts()[0][2])["deforum_settings"]
+        self.assertEqual(s["cn_1_vid_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
+        self.assertIs(s["cn_1_enabled"], True)
+        self.assertEqual(s["max_frames"], 75)
+        self.assertEqual(ui.par.Cn1vidpath.val, "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
+        self.assertIn("75 frames", ui.par.Feed1info.val)
+        self.assertTrue(os.path.isfile(path))
+
+    def test_continuous_method_records_every_cooked_frame(self):
+        ui = self.make(feed_method="continuous")
+        ctl.queue(self.root)
+        for _ in range(500):
+            if self.state() != ctl.CAPTURING:
+                break
+            for unit in (1, 2, 3):                      # a TD frame cooks, then Frame End fires
+                mfo = ui.op("feed%d_out" % unit)
+                if mfo.par.record.val and not mfo.par.pause.val:
+                    mfo.recorded.append(self.timeline.frame)
+            ctl.capture_tick(self.root)
+        self.assertEqual(self.state(), ctl.WAITING_FEED)
+        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
+        self.assertEqual(self.out.par.addframe.pulses, 0)
+
+    def test_two_units_record_in_one_pass(self):
+        ui = self.make(cn_2_enabled=True, feed_2_mode="top_loop", feed_2_top="/project1/final_out",
+                       cn_2_vid_path="")
+        ctl.queue(self.root)
+        self.record_all()
+        self.assertEqual(ui.op("feed2_out").recorded, self.out.recorded)
+        self.assertEqual(ui.op("feed2_out").par.file.val, self.share + "/td_masks/feeds/cn2_feed.mp4")
+
+    def test_feed_too_short_stops_the_render(self):
+        self.make()
+        ctl.queue(self.root)
+        self.record_all()
+        self.feed_file()
+        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 70):
+            self.tick()
+            self.tick()
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("recorded 70 frames, expected 75", self.root.storage[ctl.STATE_KEY]["last_result"])
+        self.assertEqual(self.posts(), [])
+
+    def test_feed_file_never_appears(self):
+        self.make()
+        ctl.queue(self.root)
+        self.record_all()
+        self.root.storage[ctl.STATE_KEY]["waiting_since"] = time.time() - ctl.FEED_FINALIZE_TIMEOUT_S - 1
+        self.tick()
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("did not appear", self.root.storage[ctl.STATE_KEY]["last_result"])
+
+    def test_timeline_moved_by_someone_else_aborts_and_restores(self):
+        self.make()
+        self.timeline.frame, self.timeline.play = 7, True
+        ctl.queue(self.root)
+        for _ in range(10):
+            ctl.capture_tick(self.root)
+        self.timeline.frame = 500                       # a script / Timer moved it
+        ctl.capture_tick(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("something else is moving it", self.root.storage[ctl.STATE_KEY]["last_result"])
+        self.assertEqual(self.out.par.record.val, 0)
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
+        self.assertEqual(self.posts(), [])
+
+    def test_cancel_during_capture(self):
+        self.make()
+        self.timeline.frame, self.timeline.play = 7, True
+        ctl.queue(self.root)
+        for _ in range(10):
+            ctl.capture_tick(self.root)
+        ctl.cancel(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertEqual(self.out.par.record.val, 0)
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
+        ctl.capture_tick(self.root)                     # late callbacks are harmless
+        self.assertEqual(self.timeline.frame, 7)
+
+    def test_queue_while_capturing_is_ignored(self):
+        self.make()
+        ctl.queue(self.root)
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.CAPTURING)
+        self.assertEqual(self.posts(), [])
+
+    def test_still_mode_saves_a_png_and_renders_at_once(self):
+        ui = self.make(feed_1_mode="top_still")
+        ctl.queue(self.root)
+        top = self.root.op("final_out")
+        self.assertEqual(top.saved, [self.share + "/td_masks/feeds/cn1_feed.png"])
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+        s = json.loads(self.posts()[0][2])["deforum_settings"]
+        self.assertEqual(s["cn_1_vid_path"], "/opt/a1111/td_masks/feeds/cn1_feed.png")
+        self.assertEqual(self.timeline.frame, 1)        # the timeline is never touched for a still
+        self.assertTrue(ui.par.Feed1info.val.startswith("still"))
+
+    def test_missing_source_top_fails_before_touching_the_timeline(self):
+        self.make(feed_1_top="/project1/nothing")
+        self.timeline.frame = 9
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("not found", self.root.storage[ctl.STATE_KEY]["last_result"])
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 9))
+
+    def test_missing_stepper_dat_fails_with_the_fix(self):
+        self.make()
+        del self.root.children["feed_capture_exec"]
+        ctl.queue(self.root)
+        self.assertIn("run setup_network", self.root.storage[ctl.STATE_KEY]["last_result"])
+
+    def test_disabled_unit_or_file_mode_renders_normally(self):
+        self.make(cn_1_enabled=False)
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+        self.assertEqual(self.out.recorded, [])
+        self.make(feed_1_mode="file")
+        ctl.cancel(self.root)
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+
+    def test_comfy_preprocess_is_skipped_for_a_top_feed(self):
+        ui = self.make(comfy_preproc_enable=True)
+        ctl.queue(self.root)
+        self.record_all()
+        self.feed_file()
+        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
+            self.tick()
+            self.tick()
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+        self.assertEqual(self.root.op("webclient_comfyui").requests, [])
+
+    def test_preview_describes_the_recording_without_sending_anything(self):
+        self.make()
+        result = ctl.preview(self.root)
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(self.state() if ctl.STATE_KEY in self.root.storage else ctl.IDLE, ctl.IDLE)
+        self.assertEqual(result["request"]["deforum_settings"]["max_frames"], 75)
+
+    def test_other_cn_units_are_sent_from_their_pages(self):
+        self.make(cn_2_enabled=True, cn_2_model="control_depth", cn_2_weight=0.7, cn_2_vid_path="/x/d.mp4")
+        result = ctl.export_payload(self.root)
+        s = result["request"]["deforum_settings"]
+        self.assertEqual((s["cn_2_model"], s["cn_2_weight"], s["cn_2_vid_path"]),
+                         ("control_depth", "0:(0.7)", "/x/d.mp4"))
+        self.assertIs(s["cn_2_enabled"], True)
+        self.assertIs(s["cn_3_enabled"], False)
+        self.assertEqual(s["cn_3_weight"], "0:(1.0)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -163,6 +163,10 @@ BUILTINS = {
                        ("indexunit", "Menu", "frames", ("indices", "frames", "seconds", "fraction")),
                        ("reloadpulse", "Pulse", 0, ())],
     "crossTOP": [("cross", "Float", 0, ())],
+    "selectTOP": [("top", "Str", "", ())],
+    "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
+                        ("record", "Toggle", False, ()), ("pause", "Toggle", False, ()),
+                        ("addframe", "Pulse", 0, ())],
     "textDAT": [("file", "Str", "", ()), ("syncfile", "Toggle", False, ())],
 }
 
@@ -171,7 +175,8 @@ def run_builder(root, scripts_dir, out):
     me = Node("textDAT", "builder_master_ui", root, BUILTINS["textDAT"])
     me.par.file.val = scripts_dir + "/build_master_ui.py"
     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
-    for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP"):
+    for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
+                 "selectTOP", "moviefileoutTOP"):
         env[kind] = kind
     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
         with open(BUILDER, encoding="utf-8") as fh:
@@ -240,6 +245,18 @@ class BuilderTest(unittest.TestCase):
         self.assertIs(comp.op("out_loop").inputConnectors[0].source, cross)
         self.assertIsNotNone(comp.op("in_mod"))
         self.assertFalse(any("NOTE loop_" in line for line in self.log))
+
+    def test_feed_ops_per_unit(self):
+        comp = self.build()
+        for unit in (1, 2, 3):
+            sel, rec = comp.op("feed%d_sel" % unit), comp.op("feed%d_out" % unit)
+            self.assertIsNotNone(sel)
+            self.assertIs(rec.inputConnectors[0].source, sel)
+            self.assertEqual(rec.par.type.val, "movie")
+            self.assertEqual(getattr(comp.par, "Feed%dmode" % unit).val, "file")
+            self.assertTrue(hasattr(comp.par, "Cn%dvidpath" % unit))
+        self.assertFalse(any("NOTE feed" in line for line in self.log))
+        self.assertEqual(comp.par.Feedloopstart.val, 0)
 
     def test_rebuild_keeps_values_and_tables(self):
         comp = self.build()

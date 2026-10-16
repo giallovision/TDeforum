@@ -46,6 +46,7 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
 - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
 - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+- [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
@@ -53,7 +54,8 @@ This document outlines the macro-architecture for our generative visual performa
 - [ ] Workflow Drafting: Build the base video-to-video + OpenPose JSON workflow in ComfyUI.
 
 ### 🔮 Future Implementations
-- [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5 (payload already reads CN fields generically from `schema.py`; add `cn_2_*` fields there).
+- [ ] ControlNet Units 4-5 pages (payload already supports them).
+- [ ] Verify the TOP feed recording in TouchDesigner; ComfyUI preprocessing of TOP feeds.
 - [ ] OSC Architecture: send the tempo/loop state and Mod Matrix values to Resolume's OSC routing addresses.
 - [ ] Beat clock CHOP inside the `deforum` COMP (beat / bar phase at the COMP's BPM) for driving live TD visuals in sync with the renders.
 - [ ] Parseq-style per-parameter keyframe editor (Animation COMP → Mod CHOP) for hand-drawn curves.

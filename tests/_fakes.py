@@ -60,7 +60,10 @@ class Op(object):
 
     # COMP
     def op(self, name):
-        return self.children.get(name)
+        found = self.children.get(name)
+        if found is None and isinstance(name, str) and "/" in name.strip("/"):
+            found = self.children.get(name.rsplit("/", 1)[-1])   # absolute paths: last component
+        return found
 
     def add(self, child):
         self.children[child.name] = child
@@ -105,6 +108,44 @@ class Op(object):
         return list(self.channels)
 
 
+class Timeline(object):
+    """op('/').time"""
+
+    def __init__(self, frame=1, play=True, rate=60.0, start=1):
+        self.frame, self.play, self.rate, self.start = frame, play, rate, start
+
+
+class FakeTop(Op):
+    """A source TOP; save() writes a file like TOP.save()."""
+
+    def __init__(self, name, parent=None):
+        Op.__init__(self, name, parent)
+        self.saved = []
+
+    def save(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"png")
+        self.saved.append(path)
+        return path
+
+
+class FakeMfo(Op):
+    """Movie File Out TOP: Add Frame records the timeline frame the source shows right now."""
+
+    def __init__(self, name, parent, timeline):
+        Op.__init__(self, name, parent, file=Par("file", ""), type=Par("type", "movie"),
+                    record=Par("record", 0), pause=Par("pause", 0))
+        self.recorded = []
+        self.par.addframe = Par("addframe", 0)
+        self.par.addframe.pulse = self._add_frame
+        self.timeline = timeline
+
+    def _add_frame(self):
+        self.par.addframe.pulses += 1
+        if self.par.record.val and self.par.pause.val:
+            self.recorded.append(self.timeline.frame)
+
+
 def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
     """A /project1 with the ops td_controller uses.
 
@@ -122,7 +163,8 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
         if field.kind == schema.MOD and comp:
             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
     if comp:
-        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate"):
+        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
+                     "Feed1info", "Feed2info", "Feed3info"):
             ui_pars.setdefault(name, "")
     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
     if comp:
@@ -133,6 +175,15 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
         ui.add(Op("schedule_preview", ui))
         for name in ("loop_head", "loop_tail"):
             ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
+        root.timeline = Timeline()
+        top = root.add(Op("/", root))
+        top.time = root.timeline
+        root.add(FakeTop("final_out", root))
+        root.add(Op("feed_capture_exec", root, active=Par("active", True), frameend=Par("frameend", True)))
+        for unit in (1, 2, 3):
+            ui.add(Op("feed%d_sel" % unit, ui, top=Par("top", "")))
+            ui.add(FakeMfo("feed%d_out" % unit, ui, root.timeline))
+
     for name in ("webclient_deforum", "webclient_progress", "webclient_comfyui"):
         root.add(Op(name, root, callbacks=None))
     root.add(Op("deforum_prompts", root))

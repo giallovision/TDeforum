@@ -8,6 +8,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
 * ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
 * ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
 * ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
+* ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
 * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
 * ``migrate``       old Deforum_UI values -> the COMP's parameters
 * ``payload``       builds the Deforum batch request + frame plan
@@ -21,10 +22,10 @@ import this package and forward their callbacks to ``td_controller``.
 import importlib
 import sys
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # Leaves first, so dependants pick up reloaded modules.
-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "schema",
+_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "schema",
                "migrate", "payload", "comfy", "td_controller")
 
 

@@ -25,7 +25,9 @@ value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
 CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 """
 
-from . import modulation, tempo
+import re
+
+from . import feed, modulation, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -37,12 +39,14 @@ PAGE_DIFFUSION = "Diffusion"
 PAGE_NOISE = "Noise & Color"
 PAGE_FLOW = "Flow & Anti-blur"
 PAGE_MODS = "Mod Matrix"
-PAGE_CN1 = "ControlNet Unit 1"
+CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
+PAGE_CNS = ["ControlNet Unit %d" % n for n in range(1, CN_UI_UNITS + 1)]
+PAGE_CN1 = PAGE_CNS[0]
 PAGE_PIPELINE = "Pipeline"
 
 PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
               PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
-              PAGE_CN1, PAGE_PIPELINE]
+              ] + PAGE_CNS + [PAGE_PIPELINE]
 
 # Kinds understood by build_master_ui.py and payload.py
 STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
@@ -75,9 +79,7 @@ def _default_label(api_name):
     if api_name == "H":
         return "Height"
     label = api_name.replace("_schedule", "").replace("_", " ").title()
-    if label.startswith("Cn 1 "):
-        label = label[len("Cn 1 "):]
-    return label
+    return re.sub(r"^Cn \d ", "", label)
 
 
 class Field(object):
@@ -196,6 +198,37 @@ def _slot_fields(n):
     ]
 
 
+def _cn_unit_fields(n):
+    """ControlNet unit n: the Deforum cn_n_* keys, plus the TD-only feed_n_* guide source."""
+    p, page = "cn_%d_" % n, PAGE_CNS[n - 1]
+    f = "feed_%d_" % n
+    return [
+        F(p + "enabled", False, page, TOGGLE),
+        F(f + "mode", feed.FILE, page, MENU, menu=feed.MODES, labels=feed.MODE_LABELS,
+          label="Guide Source", target=None),
+        F(f + "top", "", page, STR, label="Source TOP (path, e.g. /project1/final_out)", target=None),
+        F(f + "info", "", page, STATUS, label="Last Feed", target=None),
+        F(p + "module", "none", page, STR),
+        F(p + "model", "ctrl_v1p_qr_monster_v2", page, STR),
+        F(p + "vid_path", "/opt/a1111/td_masks/mask_01.mov", page, STR),
+        F(p + "mask_vid_path", "", page, STR),
+        F(p + "weight", 1.0, page, FLOAT, norm=(0, 2), as_schedule=True),
+        F(p + "guidance_start", 0.0, page, FLOAT, norm=(0, 1), as_schedule=True),
+        F(p + "guidance_end", 1.0, page, FLOAT, norm=(0, 1), as_schedule=True),
+        F(p + "processor_res", 512, page, INT, norm=(64, 2048)),
+        F(p + "threshold_a", 0.5, page, FLOAT, norm=(0, 255)),
+        F(p + "threshold_b", 0.5, page, FLOAT, norm=(0, 255)),
+        F(p + "resize_mode", "Inner Fit (Scale to Fit)", page, MENU,
+          menu=["Inner Fit (Scale to Fit)", "Outer Fit (Shrink to Fit)", "Just Resize"]),
+        F(p + "control_mode", "Balanced", page, MENU,
+          menu=["Balanced", "My prompt is more important", "ControlNet is more important"]),
+        F(p + "low_vram", False, page, TOGGLE),
+        F(p + "pixel_perfect", True, page, TOGGLE),
+        F(p + "overwrite_frames", True, page, TOGGLE),
+        F(p + "loopback_mode", False, page, TOGGLE),
+    ]
+
+
 FIELDS = [
     # --- Tempo -----------------------------------------------------------------
     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
@@ -298,29 +331,9 @@ FIELDS = [
       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
-] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
-
-    # --- ControlNet Unit 1 ---------------------------------------------------------
-    F("cn_1_enabled", False, CN, TOGGLE),
-    F("cn_1_module", "none", CN, STR),
-    F("cn_1_model", "ctrl_v1p_qr_monster_v2", CN, STR),
-    F("cn_1_vid_path", "/opt/a1111/td_masks/mask_01.mov", CN, STR),
-    F("cn_1_mask_vid_path", "", CN, STR),
-    F("cn_1_weight", 1.0, CN, FLOAT, norm=(0, 2), as_schedule=True),
-    F("cn_1_guidance_start", 0.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
-    F("cn_1_guidance_end", 1.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
-    F("cn_1_processor_res", 512, CN, INT, norm=(64, 2048)),
-    F("cn_1_threshold_a", 0.5, CN, FLOAT, norm=(0, 255)),
-    F("cn_1_threshold_b", 0.5, CN, FLOAT, norm=(0, 255)),
-    F("cn_1_resize_mode", "Inner Fit (Scale to Fit)", CN, MENU,
-      menu=["Inner Fit (Scale to Fit)", "Outer Fit (Shrink to Fit)", "Just Resize"]),
-    F("cn_1_control_mode", "Balanced", CN, MENU,
-      menu=["Balanced", "My prompt is more important", "ControlNet is more important"]),
-    F("cn_1_low_vram", False, CN, TOGGLE),
-    F("cn_1_pixel_perfect", True, CN, TOGGLE),
-    F("cn_1_overwrite_frames", True, CN, TOGGLE),
-    F("cn_1_loopback_mode", False, CN, TOGGLE),
-    # ComfyUI preprocessing of the init video into the CN1 guide video.
+] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] \
+  + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
+    # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------
     F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),
     F("comfy_preprocessor", "PiDiNetPreprocessor", CN, MENU, menu=COMFY_PREPROCESSORS, target=None),
 
@@ -332,6 +345,10 @@ FIELDS = [
     F("loop_out_overlap", "0", PL, STATUS, label="Loaded loop overlap (frames)", target=None),
     F("loop_out_rate", "1", PL, STATUS, label="Loaded file frames per output frame", target=None),
     F("loop_offset", 0, PL, INT, norm=(0, 480), label="Loop Player Offset (frames)", target=None),
+    F("feed_loop_start", 0, PL, INT, norm=(0, 1000),
+      label="Feed: loop start frame (0 = timeline start)", target=None),
+    F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
+      label="Feed: recording method", target=None),
 ]
 
 BY_API = dict((f.api, f) for f in FIELDS)
