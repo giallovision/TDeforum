@@ -228,8 +228,10 @@ def build_inner(comp, values):
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)
     cross.inputConnectors[1].connect(tail)
-    # Tail weight 1 -> 0 over the overlap at the start of each loop, 0 afterwards.
-    _expr(cross, 'cross', '(lambda p, o: max(0.0, 1.0 - p / o) if 0 < o and p < o else 0.0)'
+    # Tail weight 1 -> 0 over the overlap at the start of each loop (smoothstep: no kink at
+    # either end), 0 afterwards.
+    _expr(cross, 'cross', '(lambda p, o: (lambda w: w * w * (3.0 - 2.0 * w))(1.0 - p / o) '
+                          'if 0 < o and p < o else 0.0)'
                           '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
     out = _get(comp, outTOP, 'out_loop', 400, 0)
     out.inputConnectors[0].connect(cross)

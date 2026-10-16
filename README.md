@@ -120,7 +120,7 @@ With *Seamless Loop* on:
 3. Deforum renders an extra *Loop Overlap* (beats) past the loop. With *Loop Seeds*, seeds follow `s + t % loop`, so the tail re-diffuses the head's noise.
 4. The **loop player** inside the COMP (`loop_head`, `loop_tail` → `loop_cross` → COMP output 1) plays the loop and crossfades the tail into the head over the overlap, so the wrap is the render's own continuation. *Loop Player Offset* shifts it against your timeline.
 
-Deforum is feed-forward, so the last frame never equals the first; the overlap crossfade is what closes the loop.
+Deforum is feed-forward, so the last frame never equals the first; the overlap crossfade is what closes the loop. Measured on a 270-frame test render the head and tail frames differ about four times more than neighbouring frames, even with a perfectly periodic ControlNet guide, so the crossfade is a dissolve between two different images: raise *Loop Overlap* to 2-4 beats to make it a slow morph (costs that many extra render frames). The crossfade is eased (smoothstep).
 
 ### Writing your own schedules (`…raw`)
 
