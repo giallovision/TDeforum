@@ -396,6 +396,65 @@ class FeedTest(ControllerTest.__bases__[0]):
         self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
         self.assertEqual(self.posts(), [])
 
+    def test_timeline_still_moving_after_pause_is_repaused(self):
+        self.make()
+        self.timeline.frame, self.timeline.play = 47, True
+        ctl.queue(self.root)
+        self.timeline.frame = 2                         # play=False took a frame to apply
+        self.record_all()
+        self.assertEqual(self.state(), ctl.WAITING_FEED)
+        self.assertEqual(self.out.recorded[0], 1)
+
+    def test_timeline_that_never_stops_fails_clearly(self):
+        self.make()
+        ctl.queue(self.root)
+        for _ in range(40):
+            self.timeline.frame += 1
+            ctl.capture_tick(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("keeps moving", self.root.storage[ctl.STATE_KEY]["last_result"])
+
+    def test_stalled_frame_end_falls_back_to_run_chain(self):
+        self.make()
+        self.timeline.frame, self.timeline.play = 47, True
+        scheduled = []
+        original = ctl._schedule_run
+        self.addCleanup(setattr, ctl, "_schedule_run", original)
+        ctl._schedule_run = lambda root: scheduled.append(1)
+        ctl.queue(self.root)
+        ctl.capture_tick(self.root)                     # Frame End works for a moment, then stops
+        st = self.root.storage[ctl.STATE_KEY]
+        st["updated"] -= 60
+        st["last_tick"] = 0
+        self.tick()
+        self.assertEqual(self.root.storage[ctl.STATE_KEY]["driver"], "run")
+        ctl.capture_tick(self.root)                     # a late Frame End is ignored now
+        before = self.root.storage[ctl.STATE_KEY]["since_set"]
+        ctl.capture_tick(self.root)
+        self.assertEqual(self.root.storage[ctl.STATE_KEY]["since_set"], before)
+        for _ in range(500):
+            if self.state() != ctl.CAPTURING:
+                break
+            ctl.capture_tick(self.root, "run")
+        self.assertEqual(self.state(), ctl.WAITING_FEED)
+        self.assertTrue(scheduled)
+
+    def test_resync_pulses_file_synced_dats(self):
+        self.make()
+        class Dat(object):
+            def __init__(s, path):
+                s.name = "d"
+                s.par = type("P", (), {})()
+                s.par.file = type("F", (), {"eval": lambda self: path})()
+                s.pulses = 0
+                outer = s
+                s.par.loadonstartpulse = type("L", (), {"pulse": lambda self: setattr(outer, "pulses", outer.pulses + 1)})()
+        scripts = ctl.config.load()["scripts_dir"]
+        inside, outside = Dat(scripts + "/x.py"), Dat("C:/other/x.py")
+        self.root.findChildren = lambda depth=1: [inside, outside]
+        self.assertEqual(ctl.resync(self.root), 1)
+        self.assertEqual((inside.pulses, outside.pulses), (1, 0))
+
     def test_cancel_during_capture(self):
         self.make()
         self.timeline.frame, self.timeline.play = 7, True

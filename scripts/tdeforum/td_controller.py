@@ -48,6 +48,8 @@ BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAIT
         CAPTURING, WAITING_FEED)
 LOST_CONTACT_S = 120.0
 FEED_FINALIZE_TIMEOUT_S = 60.0
+CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+SETTLE_RETRIES = 8           # re-pause attempts when the timeline is still moving after play=False
 
 # Operators this controller talks to, relative to root.
 NAMES = {
@@ -274,6 +276,7 @@ def _write_runtime_json(cfg, name, data):
 def queue(root):
     """Queue button: preprocess (optional) then render."""
     cfg = config.load()
+    resync(root, cfg)
     st = _state(root)
     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
@@ -418,6 +421,32 @@ def _set_cn_video(root, container_path, unit=1):
 # TOP.save(). Anything missing raises a message naming it. Pipeline > "Feed: recording
 # method" = continuous skips pause/Add Frame and records every cooked frame instead.
 
+def resync(root, cfg=None):
+    """Reload every DAT in `root` whose File points into the scripts folder (Load File pulse).
+
+    TouchDesigner only notices a changed file on its own sometimes; this makes Queue, bake and
+    doctor pick up edits made in VS Code. Uses the DAT's Load File pulse when it has one."""
+    cfg = cfg or config.load()
+    base = str(cfg["scripts_dir"]).replace("\\", "/").lower().rstrip("/") + "/"
+    find = getattr(root, "findChildren", None)
+    if find is None:
+        return 0
+    count = 0
+    for dat in find(depth=1):
+        par = getattr(dat.par, "file", None)
+        pulse = getattr(dat.par, "loadonstartpulse", None)
+        if par is None or pulse is None:
+            continue
+        try:
+            path = str(par.eval()).replace("\\", "/").lower()
+            if path.startswith(base):
+                pulse.pulse()
+                count += 1
+        except Exception as exc:
+            log("resync %s failed: %s" % (getattr(dat, "name", "?"), exc))
+    return count
+
+
 def _timeline(root):
     top = root.op("/")
     timeline = getattr(top, "time", None)
@@ -558,17 +587,49 @@ def _begin_loop_capture(root, cfg, values, result, loops):
     return True
 
 
-def capture_tick(root):
-    """Frame End callback (feed_capture_exec). Does nothing unless a capture is running."""
+def capture_tick(root, source="frameend"):
+    """Frame End callback (feed_capture_exec). Does nothing unless a capture is running.
+
+    A capture is driven by one source at a time: "frameend", or "run" (a td.run() chain) when
+    no Frame End callback arrived for CAPTURE_STALL_S seconds (see tick())."""
     st = _state(root)
     if st.get("state") != CAPTURING:
         return
+    if source != st.get("driver", "frameend"):
+        return
     try:
+        if not st.get("seen_cb"):
+            st["seen_cb"] = True
+            tl = _timeline(root)
+            log("capture: first %s callback (timeline frame %s, playing %s)"
+                % (source, tl.frame, tl.play))
         _capture_step(root, st)
     except Exception as exc:
         traceback.print_exc()
         _abort_capture(root, st)
         _fail(root, st, "feed capture failed: %s" % exc)
+        return
+    if source == "run" and _state(root).get("state") == CAPTURING:
+        _schedule_run(root)
+
+
+def _schedule_run(root):
+    """Call capture_tick(root, 'run') again two frames from now (a whole frame cooks in between)."""
+    script = ("import sys; sys.path.insert(0, %r); from tdeforum import td_controller; "
+              "td_controller.capture_tick(op(%r), 'run')" % (config.load()["scripts_dir"], root.path))
+    import td
+    td.run(script, delayFrames=2)
+
+
+def _stall_diagnostic(root, st):
+    tl = _timeline(root)
+    dat = root.op(NAMES["feed_exec"])
+    pars = ", ".join("%s=%s" % (n, getattr(dat.par, n).eval()) for n in ("active", "frameend")
+                     if dat is not None and getattr(dat.par, n, None) is not None)
+    return ("no Frame End callback for %.0fs while recording (phase %s, frame %d/%d, timeline at %s, "
+            "playing %s, %s: %s)" % (time.time() - st.get("updated", time.time()), st.get("phase"),
+                                      st.get("j", 0), len(st.get("frames", [])), tl.frame, tl.play,
+                                      NAMES["feed_exec"], pars or "DAT not found"))
 
 
 def _capture_step(root, st):
@@ -585,8 +646,18 @@ def _capture_step(root, st):
         # two callbacks guarantee a whole frame was cooked at frames[0].
         if st["since_set"] >= 2:
             if int(timeline.frame) != frames[0]:
-                raise RuntimeError("the timeline moved to %s while waiting to start (expected %d); "
-                                   "is something else driving it?" % (timeline.frame, frames[0]))
+                # play=False can take a frame to apply, so the timeline may have stepped once.
+                st["retries"] = st.get("retries", 0) + 1
+                if st["retries"] > SETTLE_RETRIES:
+                    raise RuntimeError("the timeline keeps moving (now %s, expected %d) although it was "
+                                       "paused; is something else driving it?" % (timeline.frame, frames[0]))
+                log("capture: timeline at %s (playing %s), pausing again at %d (attempt %d)"
+                    % (timeline.frame, timeline.play, frames[0], st["retries"]))
+                timeline.play = False
+                timeline.frame = frames[0]
+                st["since_set"] = 0
+                _save(root, st)
+                return
             for out in outs:
                 if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
                     _set_constant(out.par.pause, 1)
@@ -733,7 +804,20 @@ def tick(root):
         _poll_feed(root, cfg, st)
         return
     elif current == CAPTURING:
-        return  # driven every frame by feed_capture_exec; cancel() aborts it
+        # Driven every frame by feed_capture_exec; cancel() aborts it. If its callbacks do not
+        # arrive (paused timelines may not call Frame End), fall back to a run() chain.
+        if now - st.get("updated", now) > CAPTURE_STALL_S and st.get("driver", "frameend") != "run":
+            try:
+                log("warning: " + _stall_diagnostic(root, st))
+                log("switching the capture to a run() chain")
+                st["driver"] = "run"
+                _save(root, st)
+                capture_tick(root, "run")
+            except Exception as exc:
+                traceback.print_exc()
+                _abort_capture(root, st)
+                _fail(root, st, "feed capture could not start: %s" % exc)
+        return
     _save(root, st)
 
 
@@ -989,6 +1073,7 @@ def preview(root):
     parameters first, then the prompt keys) and logs the summary and warnings.
     """
     cfg = config.load()
+    resync(root, cfg)
     values, result = build(root, cfg)
     for warning in result["warnings"]:
         log("warning: " + warning)
@@ -1073,6 +1158,7 @@ def _doctor_feeds(root, cfg, ui, values):
 def doctor(root):
     """Print what the pipeline can and cannot see. Safe to run any time."""
     cfg = config.load()
+    resync(root, cfg)
     log("share root %s | scripts %s | runtime %s" % (cfg["share_root"], cfg["scripts_dir"], cfg["runtime_dir"]))
     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
     ui = _op(root, "ui")
