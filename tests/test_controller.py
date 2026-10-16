@@ -291,8 +291,13 @@ class FeedTest(ControllerTest.__bases__[0]):
         for _ in range(limit):
             if self.state() != ctl.CAPTURING:
                 return
-            ctl.capture_tick(self.root)
+            self.step()
         self.fail("capture never finished")
+
+    def step(self, source="frameend"):
+        """One TouchDesigner frame: the timeline advances, then Frame End fires."""
+        self.timeline.advance()
+        ctl.capture_tick(self.root, source)
 
     def posts(self):
         return self.root.op("webclient_deforum").requests
@@ -310,7 +315,7 @@ class FeedTest(ControllerTest.__bases__[0]):
         ctl.queue(self.root)
         self.assertEqual(self.state(), ctl.CAPTURING)
         self.assertEqual(self.posts(), [], "nothing is rendered before the guide exists")
-        self.assertEqual((self.timeline.play, self.timeline.frame), (False, 1))
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 1))
         self.assertEqual(ui.op("feed1_sel").par.top.val, "/project1/final_out")
         self.assertEqual(self.out.par.file.val, self.share + "/td_masks/feeds/cn1_feed.mp4")
 
@@ -344,6 +349,7 @@ class FeedTest(ControllerTest.__bases__[0]):
         for _ in range(500):
             if self.state() != ctl.CAPTURING:
                 break
+            self.timeline.advance()
             for unit in (1, 2, 3):                      # a TD frame cooks, then Frame End fires
                 mfo = ui.op("feed%d_out" % unit)
                 if mfo.par.record.val and not mfo.par.pause.val:
@@ -382,37 +388,40 @@ class FeedTest(ControllerTest.__bases__[0]):
         self.assertEqual(self.state(), ctl.IDLE)
         self.assertIn("did not appear", self.root.storage[ctl.STATE_KEY]["last_result"])
 
-    def test_timeline_moved_by_someone_else_aborts_and_restores(self):
-        self.make()
-        self.timeline.frame, self.timeline.play = 7, True
-        ctl.queue(self.root)
-        for _ in range(10):
-            ctl.capture_tick(self.root)
-        self.timeline.frame = 500                       # a script / Timer moved it
-        ctl.capture_tick(self.root)
-        self.assertEqual(self.state(), ctl.IDLE)
-        self.assertIn("something else is moving it", self.root.storage[ctl.STATE_KEY]["last_result"])
-        self.assertEqual(self.out.par.record.val, 0)
-        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
-        self.assertEqual(self.posts(), [])
-
-    def test_timeline_still_moving_after_pause_is_repaused(self):
+    def test_stray_jump_is_corrected(self):
         self.make()
         self.timeline.frame, self.timeline.play = 47, True
         ctl.queue(self.root)
-        self.timeline.frame = 2                         # play=False took a frame to apply
+        for i in range(20):
+            self.step()
+        self.timeline._frame = 500                      # a script moved it once
         self.record_all()
         self.assertEqual(self.state(), ctl.WAITING_FEED)
-        self.assertEqual(self.out.recorded[0], 1)
+        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
 
-    def test_timeline_that_never_stops_fails_clearly(self):
+    def test_setting_the_frame_may_land_one_past(self):
         self.make()
+        self.timeline.lands_past = 1
         ctl.queue(self.root)
-        for _ in range(40):
-            self.timeline.frame += 1
+        self.record_all()
+        self.assertEqual(self.state(), ctl.WAITING_FEED)
+        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
+
+    def test_timeline_that_is_held_elsewhere_fails_clearly_and_restores(self):
+        self.make()
+        self.timeline.frame, self.timeline.play = 7, True
+        ctl.queue(self.root)
+        for _ in range(60):
+            if self.state() != ctl.CAPTURING:
+                break
+            self.timeline.advance()
+            self.timeline._frame = 500                  # something else keeps driving it
             ctl.capture_tick(self.root)
         self.assertEqual(self.state(), ctl.IDLE)
-        self.assertIn("keeps moving", self.root.storage[ctl.STATE_KEY]["last_result"])
+        self.assertIn("something else driving the timeline", self.root.storage[ctl.STATE_KEY]["last_result"])
+        self.assertEqual(self.out.par.record.val, 0)
+        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
+        self.assertEqual(self.posts(), [])
 
     def test_stalled_frame_end_falls_back_to_run_chain(self):
         self.make()
@@ -422,20 +431,20 @@ class FeedTest(ControllerTest.__bases__[0]):
         self.addCleanup(setattr, ctl, "_schedule_run", original)
         ctl._schedule_run = lambda root: scheduled.append(1)
         ctl.queue(self.root)
-        ctl.capture_tick(self.root)                     # Frame End works for a moment, then stops
+        self.step()                                     # Frame End works for a moment, then stops
         st = self.root.storage[ctl.STATE_KEY]
         st["updated"] -= 60
         st["last_tick"] = 0
         self.tick()
         self.assertEqual(self.root.storage[ctl.STATE_KEY]["driver"], "run")
-        ctl.capture_tick(self.root)                     # a late Frame End is ignored now
+        self.step()                                     # a late Frame End is ignored now
         before = self.root.storage[ctl.STATE_KEY]["since_set"]
-        ctl.capture_tick(self.root)
+        self.step()
         self.assertEqual(self.root.storage[ctl.STATE_KEY]["since_set"], before)
         for _ in range(500):
             if self.state() != ctl.CAPTURING:
                 break
-            ctl.capture_tick(self.root, "run")
+            self.step("run")
         self.assertEqual(self.state(), ctl.WAITING_FEED)
         self.assertTrue(scheduled)
 

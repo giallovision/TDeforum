@@ -49,7 +49,6 @@ BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAIT
 LOST_CONTACT_S = 120.0
 FEED_FINALIZE_TIMEOUT_S = 60.0
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
-SETTLE_RETRIES = 8           # re-pause attempts when the timeline is still moving after play=False
 
 # Operators this controller talks to, relative to root.
 NAMES = {
@@ -578,8 +577,11 @@ def _begin_loop_capture(root, cfg, values, result, loops):
           "j": 0, "since_set": 0, "submitted": now, "updated": now,
           "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
     _save(root, st)
-    timeline.play = False
+    # The timeline keeps PLAYING: a paused TouchDesigner cooks no frames, so no Frame End
+    # callback (or timer) would ever arrive. realTime is off, so every cooked frame is one
+    # timeline step, and the stepper only records when the timeline shows the planned frame.
     timeline.frame = plan["frames"][0]
+    timeline.play = True
     _set_status(root, "feed: recording 0/%d" % len(plan["frames"]))
     log("recording ControlNet feed%s %s from %s: %s (timeline %g fps, method %s)" % (
         "s" if len(units) > 1 else "", ",".join(str(u["unit"]) for u in units),
@@ -633,56 +635,64 @@ def _stall_diagnostic(root, st):
 
 
 def _capture_step(root, st):
+    """One Frame End while recording (the timeline is playing, one step per callback).
+
+    settle   a few frames so the Select/Movie File Out TOPs cook; then arm record (+pause) and
+             jump the timeline to the first planned frame
+    record   when the timeline shows frames[j]: pulse Add Frame (or, for the continuous
+             method, that cooked frame is recorded by itself), then, unless the timeline is
+             going to reach frames[j+1] by itself, jump there. Setting the frame inside a
+             callback may land on the target or one past it; `off` learns which."""
     ui = _op(root, "ui")
     timeline = _timeline(root)
     frames = st["frames"]
     outs = [_feed_ops(ui, u["unit"])[1] for u in st["units"]]
     st["updated"] = time.time()
     st["since_set"] = st.get("since_set", 0) + 1
-    phase = st["phase"]
+    add_frame = st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME
 
-    if phase == "settle":
-        # The first callback may still belong to the frame the timeline was set in;
-        # two callbacks guarantee a whole frame was cooked at frames[0].
-        if st["since_set"] >= 2:
-            if int(timeline.frame) != frames[0]:
-                # play=False can take a frame to apply, so the timeline may have stepped once.
-                st["retries"] = st.get("retries", 0) + 1
-                if st["retries"] > SETTLE_RETRIES:
-                    raise RuntimeError("the timeline keeps moving (now %s, expected %d) although it was "
-                                       "paused; is something else driving it?" % (timeline.frame, frames[0]))
-                log("capture: timeline at %s (playing %s), pausing again at %d (attempt %d)"
-                    % (timeline.frame, timeline.play, frames[0], st["retries"]))
-                timeline.play = False
-                timeline.frame = frames[0]
-                st["since_set"] = 0
-                _save(root, st)
-                return
+    if st["phase"] == "settle":
+        if st["since_set"] >= 3:
             for out in outs:
-                if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
+                if add_frame:
                     _set_constant(out.par.pause, 1)
                 _set_constant(out.par.record, 1)
-            st["phase"] = "armed"
+            timeline.frame = frames[0]
+            st.update(phase="record", off=0, just_set=True, misses=0)
         _save(root, st)
         return
 
-    # "armed" and "record" both land here. In "armed" a frame has cooked since record (+pause)
-    # were set, so the movie files are open: Add Frame is safe, and in the continuous method
-    # that cooked frame (still at frames[0]) is the first recorded one.
-    j = st["j"]
-    if int(timeline.frame) != frames[j]:
-        raise RuntimeError("recording frame %d: the timeline is at %s, expected %d; something else is "
-                           "moving it (a playing Timer, Time CHOP or script?)" % (j, timeline.frame, frames[j]))
-    if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
+    j, f = st["j"], int(timeline.frame)
+    if not timeline.play:
+        timeline.play = True
+    if f != frames[j]:
+        if not add_frame:
+            raise RuntimeError("recording frame %d: the timeline is at %s, expected %d; the continuous "
+                               "method cannot skip frames, use Feed Method = Add Frame" % (j, f, frames[j]))
+        st["misses"] = st.get("misses", 0) + 1
+        if st["misses"] > 30:
+            raise RuntimeError("recording frame %d: the timeline shows %s, expected %d, after %d tries "
+                               "(playing %s); is something else driving the timeline?"
+                               % (j, f, frames[j], st["misses"] - 1, timeline.play))
+        if st.get("just_set") and f == frames[j] + 1 and st.get("off", 0) == 0:
+            st["off"] = 1
+            log("capture: setting the frame lands one past the target, compensating")
+        timeline.frame = frames[j] - st.get("off", 0)
+        st["just_set"] = True
+        _save(root, st)
+        return
+
+    if add_frame:
         for out in outs:
             out.par.addframe.pulse()
     j += 1
-    st["j"], st["phase"] = j, "record"
+    st.update(j=j, misses=0, just_set=False)
     if j <= 3 or j == len(frames):
-        log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), frames[j - 1]))
+        log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), f))
     if j < len(frames):
-        timeline.frame = frames[j]
-        st["since_set"] = 0
+        if frames[j] != f + 1:
+            timeline.frame = frames[j] - st.get("off", 0)
+            st["just_set"] = True
         if j % 30 == 0:
             _set_status(root, "feed: recording %d/%d" % (j, len(frames)))
         _save(root, st)

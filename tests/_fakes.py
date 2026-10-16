@@ -109,10 +109,29 @@ class Op(object):
 
 
 class Timeline(object):
-    """op('/').time"""
+    """op('/').time. advance() is one TouchDesigner frame: a playing timeline steps +1, unless
+    a script set the frame since the last advance (then it shows the set value plus `lands_past`,
+    0 or 1, modelling whether a frame set inside a callback lands on the target or one past)."""
 
-    def __init__(self, frame=1, play=True, rate=60.0, start=1):
-        self.frame, self.play, self.rate, self.start = frame, play, rate, start
+    def __init__(self, frame=1, play=True, rate=60.0, start=1, lands_past=0):
+        self._frame, self.play, self.rate, self.start = frame, play, rate, start
+        self.lands_past, self._set = lands_past, False
+
+    @property
+    def frame(self):
+        return self._frame
+
+    @frame.setter
+    def frame(self, value):
+        self._frame, self._set = value, True
+
+    def advance(self):
+        if self._set:
+            self._set = False
+            if self.play:
+                self._frame += self.lands_past
+        elif self.play:
+            self._frame += 1
 
 
 class FakeTop(Op):
