@@ -13,7 +13,8 @@ import sys
 def _root():
     try:
         candidate = me.parent()
-        if candidate is not None and candidate.op('Deforum_UI') is not None:
+        if candidate is not None and (candidate.op('deforum') is not None
+                                      or candidate.op('Deforum_UI') is not None):
             return candidate
     except Exception:
         pass
@@ -56,8 +57,8 @@ def set_par(o, name, value):
 
 
 def main():
-    if ROOT is None or ROOT.op('Deforum_UI') is None:
-        say('Deforum_UI not found; run this from /project1')
+    if ROOT is None or (ROOT.op('deforum') is None and ROOT.op('Deforum_UI') is None):
+        say('neither the deforum COMP nor Deforum_UI found; run this from /project1')
         return
 
     # 1. One callbacks DAT (file-synced) for all three Web Client DATs.
@@ -126,11 +127,18 @@ def main():
         set_par(loader, 'syncfile', True)
 
     # 8. Report (no changes): creative-chain wiring worth a look.
+    comp = ROOT.op('deforum')
+    wave = ROOT.op('wave_generator')
+    if comp is None:
+        say('NOTE no deforum COMP yet: run builder_master_ui (it migrates Deforum_UI)')
+    elif wave is not None and wave not in list(comp.inputs):
+        say('NOTE wave_generator is not wired into the deforum COMP. The bake button no longer '
+            'writes keyframe strings; connect a CHOP whose channels are named after parameters '
+            '(translation_z, zoom, strength_schedule, ...) to the COMP input, one loop long.')
     record = ROOT.op('record1')
     if record is not None and not record.outputs:
-        say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator; '
-            'bake currently reads math1 <- wave3 only. Wire record1 -> math1 if the '
-            'crossfade morph is meant to be baked.')
+        say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator. '
+            'Wire record1 -> math1 if the crossfade morph is meant to modulate Deforum.')
     cross = ROOT.op('cross1')
     if cross is not None and 'len(me.inputs)' in (cross.par.cross.expr or '') \
             and '- 1' not in cross.par.cross.expr:

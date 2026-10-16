@@ -85,6 +85,12 @@ class Op(object):
     def numCols(self):
         return max((len(r) for r in self.rows), default=0)
 
+    def clear(self):
+        self.rows = []
+
+    def appendRow(self, row):
+        self.rows.append(list(row))
+
     def __getitem__(self, index):
         if isinstance(index, tuple):
             return Cell(self.rows[index[0]][index[1]])
@@ -99,8 +105,13 @@ class Op(object):
         return list(self.channels)
 
 
-def make_network(ui_values):
-    """A /project1 with the ops td_controller uses."""
+def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+    """A /project1 with the ops td_controller uses.
+
+    comp=False builds the old Deforum_UI; comp=True the new 'deforum' COMP with its
+    inner prompt_seq / in_mod / schedule_preview / loop_head / loop_tail ops.
+    MOD overrides go in ui_values as "<api>:raw".
+    """
     from tdeforum import schema
 
     root = Op("project1")
@@ -108,7 +119,20 @@ def make_network(ui_values):
     for field in schema.FIELDS:
         if field.api in ui_values:
             ui_pars[field.td_name] = ui_values[field.api]
-    root.add(Op("Deforum_UI", root, **ui_pars))
+        if field.kind == schema.MOD and comp:
+            ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
+    if comp:
+        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate"):
+            ui_pars.setdefault(name, "")
+    ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
+    if comp:
+        seq = ui.add(Op("prompt_seq", ui))
+        seq.rows = [["beat", "prompt", "xfade"]] + [list(r) for r in (prompt_rows or [])]
+        mod = ui.add(Op("in_mod", ui))
+        mod.channels = [Channel(n, v) for n, v in (chop or {}).items()]
+        ui.add(Op("schedule_preview", ui))
+        for name in ("loop_head", "loop_tail"):
+            ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
     for name in ("webclient_deforum", "webclient_progress", "webclient_comfyui"):
         root.add(Op(name, root, callbacks=None))
     root.add(Op("deforum_prompts", root))

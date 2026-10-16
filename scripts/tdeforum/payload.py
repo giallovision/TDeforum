@@ -1,6 +1,6 @@
-"""Build the Deforum batch request from Deforum_UI values.
+"""Build the Deforum batch request from the Deforum COMP's values.
 
-Pure Python: TouchDesigner reads the UI and calls build_request(); tests call
+Pure Python: TouchDesigner reads the COMP and calls build_request(); tests call
 it with plain dicts. Notes from checking Deforum's source (commit 5d63a339):
 
 * The settings loader only applies keys Deforum knows. ``n_prompt`` is not
@@ -11,16 +11,31 @@ it with plain dicts. Notes from checking Deforum's source (commit 5d63a339):
   extract_nth_frame / extract_to_frame to ControlNet guide videos.
 * 2D ``border`` only knows replicate|wrap; 3D ``padding_mode`` knows
   border|reflection|zeros.
+* Every ControlNet unit's schedules are parsed even when the unit is off.
+* Frame interpolation (RIFE/FILM) only runs with store_frames_in_ram off.
+* The anti-blur kernel goes to cv2.GaussianBlur, which rejects even sizes.
+
+Tempo mode (the COMP has a BPM and Length Source = tempo): the render length,
+fps, interpolation, seed schedule, prompt sequence and every MOD schedule come
+from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
 """
 
 import math
 
+from . import modulation
+from . import prompt_seq
 from . import schedules
 from . import schema
+from . import tempo
 
 DEFAULT_PROMPTS = {"0": "A cinematic macro shot of liquid gold morphing, biomorphic shapes"}
 DEFAULT_CHECKPOINT = "angraRealflexLCMV6_v10.safetensors"
 CN_UNITS = 5
+
+
+def raw_key(api):
+    """values[] key holding a MOD field's <Name>raw override."""
+    return api + ":raw"
 
 
 def _text(value):
@@ -51,7 +66,7 @@ def coerce(field, value):
         return schedules.as_schedule(value)
     if kind == schema.INT:
         return int(round(_as_number(value, float)))
-    if kind == schema.FLOAT:
+    if kind in (schema.FLOAT, schema.MOD):
         return _as_number(value, float)
     if kind == schema.SEED:
         text = _text(value)
@@ -60,7 +75,7 @@ def coerce(field, value):
 
 
 def border_modes(choice):
-    """UI border choice -> (2D border, 3D padding_mode)."""
+    """Legacy single border menu -> (2D border, 3D padding_mode)."""
     if choice == "zeros":
         return "replicate", "zeros"
     if choice == "wrap":
@@ -115,35 +130,160 @@ def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
     return plan
 
 
-def build_request(values, prompts=None, models=None, frame_counter=None,
-                  default_checkpoint=DEFAULT_CHECKPOINT):
-    """Return {"request": body, "plan": frame plan, "warnings": [str]}.
+def tempo_plan(values):
+    """tempo.plan() from COMP values, or None when the length is manual / no Tempo page."""
+    if "bpm" not in values or _text(values.get("length_source", "tempo")) != "tempo":
+        return None
+    return tempo.plan(
+        bpm=_as_number(values.get("bpm", 120), float),
+        beats_per_bar=_as_number(values.get("beats_per_bar", 4), float),
+        bars=_as_number(values.get("loop_bars", 1), float),
+        out_fps=_as_number(values.get("out_fps", 60), float),
+        strategy=_text(values.get("render_strategy", "cadence")),
+        render_fps=_as_number(values.get("render_fps", 30), float),
+        engine=_text(values.get("interp_engine", tempo.INTERP_ENGINES[0])),
+        seamless=_as_bool(values.get("seamless_loop", True)),
+        overlap_beats=_as_number(values.get("loop_overlap_beats", 1.0), float),
+    )
 
-    values         {api_name: value} as read from Deforum_UI (missing keys = not on the UI)
-    prompts        {"frame": "prompt"} timeline
+
+def read_slots(values, warnings):
+    """Active Mod Matrix rows -> [modulation.Slot]."""
+    slots = []
+    for n in range(1, schema.MOD_SLOTS + 1):
+        p = "mod%d_" % n
+        if not _as_bool(values.get(p + "active", False)):
+            continue
+        target = _text(values.get(p + "target", ""))
+        if target not in schema.MOD_APIS:
+            warnings.append("slot %d: %r is not a modulatable parameter" % (n, target))
+            continue
+        try:
+            slot = modulation.Slot(
+                target, _text(values.get(p + "shape", "sine")),
+                _as_number(values.get(p + "beats", 1), float),
+                _as_number(values.get(p + "depth", 0), float),
+                _as_number(values.get(p + "phase", 0), float),
+                _as_number(values.get(p + "sharpness", 4), float), index=n)
+        except (TypeError, ValueError) as exc:
+            warnings.append("slot %d ignored: %s" % (n, exc))
+            continue
+        if slot.depth:
+            slots.append(slot)
+    return slots
+
+
+def _chop_by_field(chop, warnings):
+    """{channel name: samples} -> {api: samples}; names may be api or TD names."""
+    lookup = {}
+    for field in schema.MOD_FIELDS:
+        lookup[field.api.lower()] = field.api
+        lookup[field.td_name.lower()] = field.api
+    out, ignored = {}, []
+    for name, samples in (chop or {}).items():
+        api = lookup.get(str(name).lower())
+        if api is None:
+            ignored.append(str(name))
+        elif samples:
+            out[api] = samples
+    if ignored:
+        warnings.append("Mod CHOP channels not named after a parameter, ignored: %s" % ", ".join(sorted(ignored)))
+    return out
+
+
+def build_request(values, prompts=None, models=None, frame_counter=None,
+                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None):
+    """Return {"request", "plan", "tempo", "schedules", "warnings"}.
+
+    values         {api_name: value} as read from the COMP (missing keys = not on the COMP);
+                   MOD overrides under raw_key(api)
+    prompts        {"frame": "prompt"} timeline (prompt.json); used unless a beat sequence applies
     models         {"index": "file.safetensors"} from the available_models table
     frame_counter  callable(container_path) -> int | None, used to cap frame counts
+    prompt_rows    [(beat, prompt, xfade)] from the COMP's prompt_seq table
+    chop           {channel name: [samples]} describing one loop (the Mod CHOP)
     """
     models = models or {}
     warnings = []
-    settings = {"prompts": dict(prompts or DEFAULT_PROMPTS)}
+    settings = {}
     options = {}
+
+    # --- length: tempo or manual, then capped by the videos -------------------------
+    tp = tempo_plan(values)
+    if tp:
+        warnings.extend(tp["warnings"])
+    mode = _text(values.get("animation_mode", "2D"))
+    use_mask_video = _as_bool(values.get("use_mask_video", False))
+    frame_mode = _text(values.get("video_frame_mode", "trim")) or "trim"
+    ui_max = tp["max_frames"] if tp else values.get("max_frames", 240)
+    init_frames = mask_frames = None
+    if frame_counter is not None:
+        if mode == "Video Input":
+            init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
+        if use_mask_video:
+            mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
+    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
+    total = plan["max_frames"]
+    if tp and total < tp["max_frames"]:
+        warnings.append("the %s is shorter than the loop (%d < %d frames); the loop will not close"
+                        % (plan["limited_by"], total, tp["max_frames"]))
+
+    # --- modulation sources ----------------------------------------------------------
+    slots = read_slots(values, warnings)
+    fpb = tp["fpb"] if tp else tempo.frames_per_beat(_as_number(values.get("bpm", 120), float), 15)
+    loop_frames = tp["loop_frames"] if tp else total
+    chop_fields = _chop_by_field(chop, warnings)
+    if tp and tp["seamless"]:
+        warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
+    compiled = {}
 
     for field in schema.FIELDS:
         if field.target is None or field.api.startswith("cn_") or field.api not in values:
             continue
         raw = values[field.api]
         text = _text(raw)
-        if text == "" and field.kind != schema.TOGGLE:
+
+        if field.kind == schema.MOD:
+            override = _text(values.get(raw_key(field.api), ""))
+            if not override and ":" in text:          # legacy string schedule par
+                override = text
+            field_slots = [s for s in slots if s.target == field.api]
+            samples = chop_fields.get(field.api)
+            chop_values = modulation.resample_loop(samples, loop_frames, total) if samples else None
+            try:
+                base = float(field.default) if override or text == "" else coerce(field, raw)
+            except (TypeError, ValueError):
+                warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
+                base = float(field.default)
+            sched, bounds, how = modulation.compile_field(
+                base, field_slots, fpb, total, chop_values,
+                _text(values.get("chop_mode", "add")), override,
+                int(_as_number(values.get("bake_points", 0), float)))
+            settings[field.key] = sched
+            compiled[field.api] = (how, sched)
+            _check_field(field, how, bounds, mode, field_slots, override, warnings)
             continue
 
+        if text == "" and field.kind != schema.TOGGLE:
+            continue
         if field.kind == schema.CHECKPOINT:
             settings["enable_checkpoint_scheduling"] = True
             settings["checkpoint_schedule"] = schedules.checkpoint_schedule(
                 text, models, default_checkpoint)
             continue
-        if field.api == "border":
-            settings["border"], settings["padding_mode"] = border_modes(text)
+        if field.api == "border" and text == "zeros":   # legacy menu value
+            settings["border"], legacy_padding = border_modes(text)
+            settings.setdefault("padding_mode", legacy_padding)
+            continue
+        if field.api == "kernel_schedule":
+            asked = int(round(_as_number(text.split("(")[-1].rstrip(")"), float)))
+            kernel = max(1, asked)
+            if kernel % 2 == 0:
+                kernel += 1
+            if kernel != asked:
+                warnings.append("anti-blur kernel %d sent as %d (OpenCV needs a positive odd size)"
+                                % (asked, kernel))
+            settings["kernel_schedule"] = "0:(%d)" % kernel
             continue
 
         try:
@@ -152,8 +292,11 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             warnings.append("%s: could not read %r, left at Deforum default" % (field.td_name, raw))
             continue
         (options if field.target == "options" else settings)[field.key] = value
+    if "border" in settings and "padding_mode" not in settings and "border" in values \
+            and "padding_mode" not in values:
+        settings["padding_mode"] = border_modes(_text(values["border"]))[1]
 
-    # ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off.
+    # --- ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off --
     for field in schema.cn_fields(1):
         raw = values.get(field.api, field.default)
         try:
@@ -171,23 +314,31 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             settings[key] = coerce(field, field.default)
         settings["cn_%d_enabled" % unit] = False
 
-    # Output handling the TD side relies on (auto-load expects <outdir>/<timestring>.mp4).
-    use_mask_video = _as_bool(values.get("use_mask_video", False))
-    settings.update(store_frames_in_ram=True, skip_video_creation=False,
-                    use_mask=use_mask_video, overlay_mask=False)
+    # --- prompts ------------------------------------------------------------------------
+    sequence = None
+    if tp and prompt_rows and _text(values.get("prompt_source", "sequence")) == "sequence":
+        sequence, prompt_warnings = prompt_seq.compile_sequence(
+            prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
+        warnings.extend(prompt_warnings)
+    settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
 
-    # Frame plan, capped by the real length of the videos on the share.
-    mode = _text(values.get("animation_mode", "2D"))
-    frame_mode = _text(values.get("video_frame_mode", "trim")) or "trim"
-    ui_max = values.get("max_frames", 240)
-    init_frames = mask_frames = None
-    if frame_counter is not None:
-        if mode == "Video Input":
-            init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
-        if use_mask_video:
-            mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
-    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
-    settings["max_frames"] = plan["max_frames"]
+    # --- output: fps / interpolation, and what the TD side relies on -----------------------
+    settings.update(skip_video_creation=False, use_mask=use_mask_video, overlay_mask=False,
+                    store_frames_in_ram=True)
+    if tp:
+        settings["fps"] = tp["render_fps"]
+        if tp["strategy"] == "interpolate":
+            # Deforum only interpolates when frames are written to disk.
+            settings.update(frame_interpolation_engine=tp["engine"],
+                            frame_interpolation_x_amount=tp["interp_x"],
+                            frame_interpolation_keep_imgs=False,
+                            frame_interpolation_slow_mo_enabled=False,
+                            store_frames_in_ram=False)
+        else:
+            settings["frame_interpolation_engine"] = "None"
+        _loop_seeds(values, settings, tp, warnings)
+
+    settings["max_frames"] = total
     for key in ("extract_from_frame", "extract_to_frame", "extract_nth_frame"):
         if plan[key] is not None:
             settings[key] = plan[key]
@@ -195,7 +346,43 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     request = {"deforum_settings": settings}
     if options:
         request["options_overrides"] = options
-    return {"request": request, "plan": plan, "warnings": warnings}
+    return {"request": request, "plan": plan, "tempo": tp, "schedules": compiled,
+            "warnings": warnings}
+
+
+def _loop_seeds(values, settings, tp, warnings):
+    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", True))):
+        return
+    behavior = settings.get("seed_behavior", "iter")
+    if behavior == "iter":
+        # Same seed for frame f and f + loop, so the overlap tail re-diffuses the head's noise.
+        settings["seed_behavior"] = "schedule"
+        settings["seed_schedule"] = "0:(s + t%%%d)" % tp["loop_frames"]
+    elif behavior in ("random", "ladder", "alternate"):
+        warnings.append("seed behaviour %r does not repeat per loop; use Iterate or Fixed for seamless loops"
+                        % behavior)
+
+
+def _is_constant_schedule(text):
+    body = schedules.as_schedule(text)
+    if "," in body or ":" not in body:
+        return False
+    try:
+        float(body.split(":", 1)[1].strip().strip("()"))
+        return True
+    except ValueError:
+        return False
+
+
+def _check_field(field, how, bounds, mode, slots, override, warnings):
+    moving = how in ("expression", "baked") or (bool(override) and not _is_constant_schedule(override))
+    if moving and field.dims and mode in ("2D", "3D") and field.dims != mode:
+        warnings.append("%s is %s-only; Deforum ignores it in %s mode" % (field.api, field.dims, mode))
+    if bounds and field.safe:
+        lo, hi = field.safe
+        if (lo is not None and bounds[0] < lo - 1e-9) or (hi is not None and bounds[1] > hi + 1e-9):
+            warnings.append("%s swings %.4g..%.4g, outside %s..%s" % (
+                field.api, bounds[0], bounds[1], "-inf" if lo is None else lo, "inf" if hi is None else hi))
 
 
 def _count(counter, path, label, warnings):
@@ -216,10 +403,19 @@ def summary(result):
     s = result["request"]["deforum_settings"]
     plan = result["plan"]
     parts = [s.get("animation_mode", "?"), "%s frames" % s.get("max_frames")]
+    tp = result.get("tempo")
+    if tp:
+        parts.append("%g bpm %d beats @ %d fps" % (tp["bpm"], tp["loop_beats"], tp["render_fps"]))
+        if tp["strategy"] == "interpolate":
+            parts.append("%s x%d" % (tp["engine"], tp["interp_x"]))
     if plan.get("extract_nth_frame", 1) not in (None, 1):
         parts.append("stride %d" % plan["extract_nth_frame"])
     if plan.get("limited_by") not in (None, "ui"):
         parts.append("capped by %s" % plan["limited_by"])
     parts.append("%sx%s" % (s.get("W"), s.get("H")))
+    moving = sorted(api for api, (how, sched) in result.get("schedules", {}).items()
+                    if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
+    if moving:
+        parts.append("mod: " + ", ".join(moving))
     parts.append("CN1 %s" % ("on: " + str(s.get("cn_1_model")) if s.get("cn_1_enabled") else "off"))
     return " | ".join(parts)

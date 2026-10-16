@@ -5,7 +5,11 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
 
 * ``config``        endpoints, path bridge (container <-> T:/ share), tunables
 * ``schedules``     keyframe-string helpers (bake, checkpoint schedules)
-* ``schema``        the Deforum_UI parameter list (drives UI *and* payload)
+* ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
+* ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
+* ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
+* ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
+* ``migrate``       old Deforum_UI values -> the COMP's parameters
 * ``payload``       builds the Deforum batch request + frame plan
 * ``comfy``         builds the ComfyUI preprocess request / reads its history
 * ``td_controller`` TouchDesigner glue: Queue -> preprocess -> render -> load
@@ -17,10 +21,11 @@ import this package and forward their callbacks to ``td_controller``.
 import importlib
 import sys
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Leaves first, so dependants pick up reloaded modules.
-_SUBMODULES = ("config", "schedules", "schema", "payload", "comfy", "td_controller")
+_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "schema",
+               "migrate", "payload", "comfy", "td_controller")
 
 
 def reload_all():

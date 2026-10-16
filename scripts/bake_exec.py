@@ -1,10 +1,8 @@
 # CHOP Execute DAT `bake_exec` (chop: null2 / bake button).
-# Bakes wave_generator into Deforum keyframe strings:
-#   * a channel named like a schedule (zoom, translation_z, ...) goes straight
-#     into that Deforum_UI parameter,
-#   * otherwise channel 0 goes to Deforum_UI > Pipeline > "Bake into",
-#   * bake_out always gets a copy. Points come from Pipeline > "Bake points"
-#     (falls back to the quantize_settings CHOP).
+# Preview: compiles everything Queue would send (tempo plan, Mod Matrix, Mod CHOP
+# bake, prompt sequence) WITHOUT sending it, fills deforum/schedule_preview and
+# prints the moving schedules and any warnings. The actual CHOP bake happens at
+# Queue time from the deforum COMP's Mod CHOP input.
 
 
 def _ctl(reload=False):

@@ -5,7 +5,7 @@ Entry points (each called from a thin DAT in scripts/):
     queue(root)             Queue button            deforum_payload_exec.py
     tick(root)              timer1 cycle pulse      chopexec_poll.py
     on_response(root, ...)  all three webclients    webclient2_callbacks.py
-    bake(root)              bake button             bake_exec.py
+    bake(root) / preview    bake button             bake_exec.py  (schedule preview, no POST)
     load_latest(root)       LoadVideo button        loadvideo_exec.py
     export_payload(root)    dry run, no POST        export_deforum_payload.py
     preprocess_only(root)   ComfyUI only            comfy_preprocessor_payload_exec.py
@@ -27,8 +27,8 @@ import traceback
 from . import comfy
 from . import config
 from . import payload
-from . import schedules
 from . import schema
+from . import tempo
 
 STATE_KEY = "tdeforum_pipeline"
 CACHE_KEY = "tdeforum_preproc_cache"
@@ -45,7 +45,8 @@ LOST_CONTACT_S = 120.0
 
 # Operators this controller talks to, relative to root.
 NAMES = {
-    "ui": "Deforum_UI",
+    "ui": "deforum",              # the Deforum Base COMP (build_master_ui.py)
+    "legacy_ui": "Deforum_UI",    # read only when the COMP has not been built yet
     "deforum": "webclient_deforum",
     "progress": "webclient_progress",
     "comfy": "webclient_comfyui",
@@ -53,12 +54,18 @@ NAMES = {
     "models": "available_models",
     "movie": "moviefilein1",
     "folder": "folder_monitor",
-    "wave": "wave_generator",
-    "bake_out": "bake_out",
-    "quantize": "quantize_settings",
+}
+# Inside the Deforum COMP
+INNER = {
+    "prompt_seq": "prompt_seq",       # table: beat | prompt | xfade
+    "mod_in": "in_mod",               # In CHOP = COMP input 1 (the Mod CHOP)
+    "preview": "schedule_preview",    # table written by preview()
+    "head": "loop_head",              # loop player: Movie File In at the playhead
+    "tail": "loop_tail",              # loop player: Movie File In one loop later
 }
 
 RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
+INTERP_FALLBACK_S = 30.0
 
 
 def log(message):
@@ -68,7 +75,23 @@ def log(message):
 # --------------------------------------------------------------------------- state
 
 def _op(root, key):
-    return root.op(NAMES[key])
+    found = root.op(NAMES[key])
+    if found is None and key == "ui":
+        found = root.op(NAMES["legacy_ui"])
+    return found
+
+
+def _inner(ui, key):
+    return ui.op(INNER[key]) if ui is not None and hasattr(ui, "op") else None
+
+
+def _set_par(op_, name, value):
+    par = getattr(op_.par, name, None) if op_ is not None else None
+    if par is not None:
+        try:
+            par.val = value
+        except Exception:
+            pass
 
 
 def _state(root):
@@ -81,13 +104,7 @@ def _save(root, st):
 
 
 def _set_status(root, text):
-    ui = _op(root, "ui")
-    par = getattr(ui.par, "Pipelinestatus", None) if ui is not None else None
-    if par is not None:
-        try:
-            par.val = text
-        except Exception:
-            pass
+    _set_par(_op(root, "ui"), "Pipelinestatus", text)
 
 
 def _finish(root, st, message, error=False):
@@ -130,7 +147,35 @@ def read_ui(ui):
         par = getattr(ui.par, field.td_name, None)
         if par is not None:
             values[field.api] = par.eval()
+        if field.kind == schema.MOD:
+            raw = getattr(ui.par, field.raw_td_name, None)
+            if raw is not None:
+                values[payload.raw_key(field.api)] = raw.eval()
     return values
+
+
+def read_prompt_rows(ui):
+    """prompt_seq table -> [[beat, prompt, xfade], ...] (None when the COMP has no table)."""
+    table = _inner(ui, "prompt_seq")
+    if table is None:
+        return None
+    rows = []
+    for r in range(table.numRows):
+        rows.append([str(table[r, c].val) for c in range(table.numCols)])
+    return rows
+
+
+def read_mod_chop(ui, values):
+    """Mod CHOP channels -> {name: [samples]} (None when there is no CHOP or no channels)."""
+    if ui is None:
+        return None
+    path = str(values.get("chop_path", "") or "").strip()
+    chop = ui.op(path) if path else _inner(ui, "mod_in")
+    if path and chop is None:
+        log("Mod CHOP %s not found" % path)
+    if chop is None or not getattr(chop, "numChans", 0):
+        return None
+    return dict((chan.name, [float(v) for v in chan.vals]) for chan in chop.chans())
 
 
 def read_models(root):
@@ -181,12 +226,25 @@ def _frame_counter(cfg):
 def build(root, cfg):
     ui = _op(root, "ui")
     if ui is None:
-        raise RuntimeError("Deforum_UI not found in %s" % root.path)
+        raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
     values = read_ui(ui)
     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
                                    _frame_counter(cfg), cfg.get("default_checkpoint",
-                                                                payload.DEFAULT_CHECKPOINT))
+                                                                payload.DEFAULT_CHECKPOINT),
+                                   prompt_rows=read_prompt_rows(ui),
+                                   chop=read_mod_chop(ui, values))
+    if result.get("tempo"):
+        _set_par(ui, "Tempoinfo", tempo.describe(result["tempo"]))
     return values, result
+
+
+def _expectation(result):
+    """What the finished render will look like on disk / how to loop it (kept in state)."""
+    tp = result.get("tempo")
+    if not tp:
+        return None
+    return {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
+            "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
 
 
 def _write_runtime_json(cfg, name, data):
@@ -305,7 +363,8 @@ def _submit_deforum(root, cfg, result, st):
     _op(root, "deforum").request(config.deforum_url(cfg, "/deforum_api/batches"), "POST",
                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
     now = time.time()
-    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now})
+    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
+                 "expect": _expectation(result)})
     _set_status(root, "render: submitted")
     log("render submitted: " + payload.summary(result))
 
@@ -382,7 +441,8 @@ def _on_deforum_submit(root, st, code, body, text):
         now = time.time()
         _save(root, {"state": DEFORUM_RUNNING, "job_id": body["job_ids"][0],
                      "batch_id": body.get("batch_id"), "submitted": st.get("submitted", now),
-                     "updated": now, "last_phase": None, "last_pct": -100})
+                     "updated": now, "last_phase": None, "last_pct": -100,
+                     "expect": st.get("expect")})
         _set_status(root, "render: queued")
         log("Deforum accepted job %s" % body["job_ids"][0])
     else:
@@ -413,8 +473,10 @@ def _on_progress(root, cfg, st, code, body):
         if not outdir or not stamp:
             _fail(root, st, "Deforum finished but reported no outdir/timestring")
             return
-        video = "%s/%s.mp4" % (outdir.rstrip("/"), stamp)
+        plain = "%s/%s.mp4" % (outdir.rstrip("/"), stamp)
+        video = render_path(outdir, stamp, st.get("expect"))
         st.update(state=WAITING_FILE, video=video, video_share=config.to_share(cfg, video),
+                  fallback_share=config.to_share(cfg, plain) if video != plain else None,
                   waiting_since=time.time(), last_size=-1)
         _save(root, st)
         log("render done in %.0fs: %s" % (float(body.get("execution_time") or 0),
@@ -475,30 +537,67 @@ def _on_comfy(root, cfg, st, code, body, text):
         _finish(root, st, "preprocessed %s" % filename)
 
 
+def render_path(outdir, stamp, expect):
+    """Container path of the file to load: <ts>_RIFE_xN.mp4 / <ts>_FILM_xN.mp4 or <ts>.mp4.
+
+    Deforum writes interpolated videos next to the plain one in the batch outdir
+    (frame_interpolation.py / rife inference_video.py at 5d63a339).
+    """
+    outdir = outdir.rstrip("/")
+    if expect and expect.get("engine"):
+        tag = "RIFE" if expect["engine"].startswith("RIFE") else "FILM"
+        return "%s/%s_%s_x%d.mp4" % (outdir, stamp, tag, expect["x"])
+    return "%s/%s.mp4" % (outdir, stamp)
+
+
 def _try_load(root, cfg, st):
     path = st.get("video_share")
     if not path:
         _finish(root, st, "render saved to %s (not on the share, not loaded)" % st.get("video"))
         return
+    waited = time.time() - st.get("waiting_since", time.time())
+    fallback = st.get("fallback_share")
+    if fallback and not os.path.isfile(path) and waited > INTERP_FALLBACK_S and os.path.isfile(fallback):
+        log("no interpolated file after %ds; loading the un-interpolated render "
+            "(check the container log for RIFE/FILM errors)" % waited)
+        st.update(video_share=fallback, fallback_share=None, last_size=-1, interp_missing=True)
+        path = fallback
     size = os.path.getsize(path) if os.path.isfile(path) else -1
     # Loaded once the file exists and its size held steady for one poll interval.
     if size > 0 and size == st.get("last_size"):
         ui = _op(root, "ui")
         auto = getattr(ui.par, "Autoload", None) if ui is not None else None
         if auto is None or auto.eval():
-            _load_movie(root, path)
+            expect = st.get("expect")
+            if expect and st.get("interp_missing"):
+                # Plain render: x times fewer frames for the same loop -> play slower.
+                expect = dict(expect, rate=1.0 / max(1, expect["x"]))
+            _load_movie(root, path, expect)
             _finish(root, st, "loaded " + os.path.basename(path))
         else:
             _finish(root, st, "render ready: " + path)
         return
-    if time.time() - st.get("waiting_since", time.time()) > cfg["file_wait_timeout_s"]:
+    if waited > cfg["file_wait_timeout_s"]:
         _fail(root, st, "%s did not appear on the share within %ds" % (path, cfg["file_wait_timeout_s"]))
         return
     st["last_size"] = size
     _save(root, st)
 
 
-def _load_movie(root, path):
+def _video_frames(path):
+    try:
+        import cv2  # bundled with TouchDesigner's Python
+    except Exception:
+        return None
+    capture = cv2.VideoCapture(path)
+    try:
+        frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        capture.release()
+    return frames if frames > 0 else None
+
+
+def _load_movie(root, path, expect=None):
     movie = _op(root, "movie")
     if movie is not None:
         _set_constant(movie.par.file, path)
@@ -506,6 +605,29 @@ def _load_movie(root, path):
     folder = _op(root, "folder")
     if folder is not None:
         folder.par.refresh.pulse()
+    ui = _op(root, "ui")
+    for key in ("head", "tail"):
+        player = _inner(ui, key)
+        if player is not None:
+            _set_constant(player.par.file, path)
+            reload_ = getattr(player.par, "reloadpulse", None)
+            if reload_ is not None:
+                reload_.pulse()
+    if expect and expect.get("out_loop"):
+        loop = int(expect["out_loop"])                 # output frames per loop
+        rate = float(expect.get("rate", 1.0))          # file frames per output frame
+        frames = _video_frames(path)
+        if frames:
+            overlap = int((frames - loop * rate) / rate)
+        else:
+            overlap = int(expect.get("overlap_out", 0))
+        overlap = max(0, min(overlap, loop))
+        _set_par(ui, "Loopoutframes", str(loop))
+        _set_par(ui, "Loopoutoverlap", str(overlap))
+        _set_par(ui, "Loopoutrate", "%g" % rate)
+        log("loop player: %d-frame loop, %d-frame seam crossfade%s%s"
+            % (loop, overlap, "" if rate == 1 else ", file played at %gx" % rate,
+               "" if frames else " (file length unknown, used the plan)"))
 
 
 # --------------------------------------------------------------------------- buttons
@@ -531,42 +653,37 @@ def load_latest(root):
     log("loaded latest render %s" % path)
 
 
-def bake(root):
-    """Bake wave_generator channels into keyframe strings.
+def preview(root):
+    """Compile everything Queue would send, without sending it.
 
-    A channel named like a schedule (translation_z, zoom, ...) is written straight
-    into that Deforum_UI parameter. Otherwise channel 0 goes to the 'Bake into'
-    parameter (Pipeline page). bake_out always gets a copy.
+    Writes the COMP's schedule_preview table (parameter | mode | schedule, moving
+    parameters first, then the prompt keys) and logs the summary and warnings.
     """
-    src, out, ui = _op(root, "wave"), _op(root, "bake_out"), _op(root, "ui")
-    if src is None or out is None or src.numChans == 0:
-        log("bake: wave_generator / bake_out missing or empty")
-        return
-    values = read_ui(ui) if ui is not None else {}
-    points = values.get("bake_points")
-    if points is None:
-        quant = _op(root, "quantize")
-        points = quant[0][0] if quant is not None and quant.numChans else 0
-    target = values.get("bake_target", "none")
+    cfg = config.load()
+    _values, result = build(root, cfg)
+    for warning in result["warnings"]:
+        log("warning: " + warning)
+    order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
+    rows = sorted(result["schedules"].items(), key=lambda kv: (order.get(kv[1][0], 9), kv[0]))
+    table = _inner(_op(root, "ui"), "preview")
+    if table is not None:
+        table.clear()
+        table.appendRow(["parameter", "mode", "schedule"])
+        for api, (how, sched) in rows:
+            table.appendRow([api, how, sched])
+        prompts = result["request"]["deforum_settings"].get("prompts", {})
+        for frame in sorted(prompts, key=lambda k: int(k) if str(k).lstrip("-").isdigit() else 0):
+            table.appendRow(["prompt @%s" % frame, "prompt", prompts[frame]])
+    for api, (how, sched) in rows:
+        if how != "constant":
+            log("%-28s %-10s %s" % (api, how, sched if len(sched) < 160 else sched[:157] + "..."))
+    log("preview: " + payload.summary(result))
+    return result
 
-    lines = []
-    for index, chan in enumerate(src.chans()):
-        keys = schedules.keyframe_string(chan.vals, int(points), 4)
-        dest = chan.name if chan.name in schema.SCHEDULE_APIS else (
-            target if index == 0 and target and target != "none" else None)
-        note = ""
-        par = getattr(ui.par, schema.BY_API[dest].td_name, None) if dest and ui is not None else None
-        if dest and par is None:
-            note = " (Deforum_UI has no %s; run build_master_ui)" % schema.BY_API[dest].td_name
-        elif par is not None:
-            if _is_constant(par):
-                par.val = keys
-                note = " -> %s" % par.name
-            else:
-                note = " (%s is driven by an expression/export; not overwritten)" % par.name
-        lines.append((chan.name, keys))
-        log("baked %s: %d keys%s" % (chan.name, keys.count(":"), note))
-    out.text = lines[0][1] if len(lines) == 1 else "\n".join("%s: %s" % kv for kv in lines)
+
+def bake(root):
+    """Bake button: the CHOP bake now happens at Queue time, so this previews it."""
+    return preview(root)
 
 
 # --------------------------------------------------------------------------- diagnostics
@@ -578,6 +695,28 @@ def doctor(root):
     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
     ui = _op(root, "ui")
     values = read_ui(ui) if ui is not None else {}
+    if ui is None:
+        log("no 'deforum' COMP: run builder_master_ui")
+    elif ui.name != NAMES["ui"]:
+        log("using the old %s; run builder_master_ui to build the 'deforum' COMP" % ui.name)
+    else:
+        try:
+            tp = payload.tempo_plan(values)
+            log("tempo: " + (tempo.describe(tp) if tp else "manual length (%s frames)" % values.get("max_frames")))
+            for warning in (tp or {}).get("warnings", []):
+                log("tempo warning: " + warning)
+        except ValueError as exc:
+            log("tempo settings invalid: %s" % exc)
+        slots = payload.read_slots(values, [])
+        log("mod slots active: %s" % (", ".join("%d->%s" % (s.index, s.target) for s in slots) or "none"))
+        chop = read_mod_chop(ui, values)
+        known = set(a.lower() for a in schema.MOD_APIS) | set(f.td_name.lower() for f in schema.MOD_FIELDS)
+        if chop:
+            used = sorted(n for n in chop if n.lower() in known)
+            log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
+                                                 else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
+        rows = read_prompt_rows(ui)
+        log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
         container_path = str(values.get(api, "") or "")
         if not container_path:

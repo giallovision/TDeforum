@@ -41,6 +41,11 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Queue chains ComfyUI preprocessing → Deforum automatically when CN1 preprocessing is enabled.
 - [x] Reproducible, fast container: pinned sources and torch stack, BuildKit download caches, persistent runtime volumes, `make bake/save/load`.
 - [x] Explicit "Force Re-Render" toggle (*Pipeline › Force ComfyUI re-preprocess*) that bypasses the TD cache and forces ComfyUI to write a new file.
+- [x] `deforum` Base COMP replaces `Deforum_UI`: every schedulable Deforum parameter at its baseline, float base + raw override, migrated automatically.
+- [x] Tempo engine (90/120/150 bpm at 60 fps): 60 fps + cadence or low fps + RIFE/FILM interpolation; render length from bars.
+- [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+- [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+- [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
@@ -49,6 +54,8 @@ This document outlines the macro-architecture for our generative visual performa
 
 ### 🔮 Future Implementations
 - [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5 (payload already reads CN fields generically from `schema.py`; add `cn_2_*` fields there).
-- [ ] OSC Architecture: Map TouchDesigner's `bake_out` data points to Resolume's OSC routing addresses.
+- [ ] OSC Architecture: send the tempo/loop state and Mod Matrix values to Resolume's OSC routing addresses.
+- [ ] Beat clock CHOP inside the `deforum` COMP (beat / bar phase at the COMP's BPM) for driving live TD visuals in sync with the renders.
+- [ ] Parseq-style per-parameter keyframe editor (Animation COMP → Mod CHOP) for hand-drawn curves.
 - [ ] Route Deforum image sequence outputs back into TouchDesigner for real-time playback monitoring (finished `.mp4` already auto-loads; per-frame preview still open).
-- [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator` (bake reads `math1 <- wave3`).
+- [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator`. To use it now, feed it (channels renamed to parameter names) into the `deforum` COMP's Mod CHOP input.

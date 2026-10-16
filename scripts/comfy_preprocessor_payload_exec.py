@@ -1,5 +1,5 @@
 # Text DAT `preproc_payload_exec` (right-click > Run Script).
-# Runs only the ComfyUI preprocess for the current Deforum_UI settings and, when
+# Runs only the ComfyUI preprocess for the current deforum COMP settings and, when
 # it finishes, points Cn1vidpath at the result. Queue does this automatically
 # when ControlNet Unit 1 > "Preprocess via ComfyUI" is on.
 #
