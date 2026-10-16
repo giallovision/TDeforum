@@ -36,6 +36,11 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Fix container boundary path leaks (Replaced symlinks with Docker volume mounts).
 - [x] Lock down TouchDesigner JSON payload serialization to explicitly enforce container paths.
 - [x] Eliminate `delayFrames` cache-clearing bugs in the master execution button.
+- [x] Single source of truth for UI + payload (`scripts/tdeforum/schema.py`); payload checked against the keys Deforum actually reads (negative prompt now reaches renders).
+- [x] Job controller: one batch per Queue, polls only the submitted job, auto-loads the finished render from the correct `td_outputs` path.
+- [x] Queue chains ComfyUI preprocessing → Deforum automatically when CN1 preprocessing is enabled.
+- [x] Reproducible, fast container: pinned sources and torch stack, BuildKit download caches, persistent runtime volumes, `make bake/save/load`.
+- [x] Explicit "Force Re-Render" toggle (*Pipeline › Force ComfyUI re-preprocess*) that bypasses the TD cache and forces ComfyUI to write a new file.
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
@@ -43,7 +48,7 @@ This document outlines the macro-architecture for our generative visual performa
 - [ ] Workflow Drafting: Build the base video-to-video + OpenPose JSON workflow in ComfyUI.
 
 ### 🔮 Future Implementations
-- [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5.
+- [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5 (payload already reads CN fields generically from `schema.py`; add `cn_2_*` fields there).
 - [ ] OSC Architecture: Map TouchDesigner's `bake_out` data points to Resolume's OSC routing addresses.
-- [ ] Implement an explicit "Force Re-Render" toggle to bypass ComfyUI's native execution cache.
-- [ ] Route Deforum image sequence outputs back into TouchDesigner for real-time playback monitoring.
+- [ ] Route Deforum image sequence outputs back into TouchDesigner for real-time playback monitoring (finished `.mp4` already auto-loads; per-frame preview still open).
+- [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator` (bake reads `math1 <- wave3`).

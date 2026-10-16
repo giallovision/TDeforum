@@ -1,0 +1,143 @@
+# One-time wiring for the tdeforum controller. Idempotent: safe to re-run.
+#
+# Run it either way:
+#   * Text DAT in /project1 with File = T:/scripts/setup_network.py, right-click > Run Script
+#   * Textport:  exec(open('T:/scripts/setup_network.py', encoding='utf-8').read())
+#
+# Every change is printed. Nothing is deleted.
+
+import os
+import sys
+
+
+def _root():
+    try:
+        candidate = me.parent()
+        if candidate is not None and candidate.op('Deforum_UI') is not None:
+            return candidate
+    except Exception:
+        pass
+    return op('/project1')
+
+
+ROOT = _root()
+_file = ''
+try:
+    _file = me.par.file.eval()
+except Exception:
+    pass
+SCRIPTS = os.path.dirname(_file) if _file else 'T:/scripts'
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+
+import tdeforum
+tdeforum.reload_all()
+from tdeforum import config
+
+CFG = config.load()
+
+
+def say(msg):
+    print('[TDeforum setup] ' + msg)
+
+
+def set_par(o, name, value):
+    par = getattr(o.par, name, None)
+    if par is None:
+        say('%s has no parameter %s (skipped)' % (o.path, name))
+        return
+    current = par.eval()
+    target = value.path if hasattr(value, 'path') else value
+    current_cmp = current.path if hasattr(current, 'path') else current
+    if par.mode != ParMode.CONSTANT or current_cmp != target:
+        par.mode = ParMode.CONSTANT
+        par.val = value
+        say('%s.%s = %r' % (o.name, name, target))
+
+
+def main():
+    if ROOT is None or ROOT.op('Deforum_UI') is None:
+        say('Deforum_UI not found; run this from /project1')
+        return
+
+    # 1. One callbacks DAT (file-synced) for all three Web Client DATs.
+    callbacks = ROOT.op('webclient2_callbacks')
+    urls = {
+        'webclient_deforum': config.deforum_url(CFG, '/deforum_api/batches'),
+        'webclient_progress': config.deforum_url(CFG, '/deforum_api/jobs'),
+        'webclient_comfyui': config.comfy_url(CFG, '/prompt'),
+    }
+    for name, url in urls.items():
+        dat = ROOT.op(name)
+        if dat is None:
+            say('%s missing' % name)
+            continue
+        if callbacks is not None:
+            set_par(dat, 'callbacks', callbacks)
+        set_par(dat, 'url', url)
+
+    # 2. Prompt DAT pointed at the file the controller reads.
+    prompts = ROOT.op('deforum_prompts')
+    if prompts is not None:
+        set_par(prompts, 'file', SCRIPTS + '/prompt.json')
+        set_par(prompts, 'syncfile', True)
+
+    # 3. Script DATs run as Python.
+    for name in ('export_deforum_payload', 'preproc_payload_exec'):
+        dat = ROOT.op(name)
+        if dat is not None:
+            set_par(dat, 'language', 'python')
+
+    # 4. Poll on the timer's cycle pulse edge.
+    poll = ROOT.op('chopexec_poll')
+    if poll is not None:
+        set_par(poll, 'offtoon', True)
+        set_par(poll, 'whileon', False)
+
+    # 5. moviefilein1 gets an exact path from the controller instead of the
+    #    newest-name-in-folder expression (which also matched _depth / interpolated files).
+    movie = ROOT.op('moviefilein1')
+    if movie is not None and movie.par.file.mode != ParMode.CONSTANT:
+        current = movie.par.file.eval()
+        movie.par.file.mode = ParMode.CONSTANT
+        movie.par.file.val = current
+        say('moviefilein1.file -> constant (%s)' % current)
+
+    # 6. folder_monitor.refresh referenced a channel that does not exist
+    #    (null3 carries "LoadVideo", the expression asked for "Load_Video").
+    folder = ROOT.op('folder_monitor')
+    if folder is not None and folder.par.refresh.mode == ParMode.EXPRESSION:
+        say('folder_monitor.refresh expression %r removed (LoadVideo now has its own exec DAT)'
+            % folder.par.refresh.expr)
+        folder.par.refresh.mode = ParMode.CONSTANT
+
+    # 7. LoadVideo button -> loadvideo_exec.
+    null3 = ROOT.op('null3')
+    loader = ROOT.op('loadvideo_exec')
+    if null3 is not None and loader is None:
+        loader = ROOT.create(chopexecuteDAT, 'loadvideo_exec')
+        loader.nodeX, loader.nodeY = null3.nodeX + 200, null3.nodeY
+        say('created loadvideo_exec')
+    if loader is not None and null3 is not None:
+        set_par(loader, 'chop', null3)
+        set_par(loader, 'offtoon', True)
+        set_par(loader, 'valuechange', False)
+        set_par(loader, 'file', SCRIPTS + '/loadvideo_exec.py')
+        set_par(loader, 'syncfile', True)
+
+    # 8. Report (no changes): creative-chain wiring worth a look.
+    record = ROOT.op('record1')
+    if record is not None and not record.outputs:
+        say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator; '
+            'bake currently reads math1 <- wave3 only. Wire record1 -> math1 if the '
+            'crossfade morph is meant to be baked.')
+    cross = ROOT.op('cross1')
+    if cross is not None and 'len(me.inputs)' in (cross.par.cross.expr or '') \
+            and '- 1' not in cross.par.cross.expr:
+        say('NOTE cross1.cross = %r overshoots: Cross CHOP expects 0..(inputs-1), '
+            'e.g. op(\'crossfade\')[0] * (len(me.inputs) - 1)' % cross.par.cross.expr)
+
+    say('done. Next: run builder_master_ui, then op("deforum_payload_exec").module.doctor()')
+
+
+main()

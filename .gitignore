@@ -21,3 +21,21 @@ scripts/td_console.log
 # Python Caches
 __pycache__/
 *.pyc
+
+# Runtime artifacts written by the TouchDesigner scripts (payload dumps, console log)
+runtime/
+scripts/tdeforum.local.json
+scripts/current_deforum_payload.json
+
+# TouchDesigner DAT exports that are palette boilerplate or HTTP response dumps
+scripts/*_panelexec[0-9]*.py
+scripts/*_parexec[0-9]*.py
+scripts/bake_out.py
+scripts/webclient_deforum.py
+scripts/webclient_progress.py
+
+# Docker image snapshots when SHARED_NVME_MOUNT is not set (make save)
+.images/
+
+# Patch notes: each <name>.patch ships with a local <name>.patch.md
+*.patch.md

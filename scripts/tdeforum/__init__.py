@@ -1,0 +1,34 @@
+"""TDeforum pipeline package.
+
+Everything that decides *what* gets sent to Deforum / ComfyUI lives here as
+plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+
+* ``config``        endpoints, path bridge (container <-> T:/ share), tunables
+* ``schedules``     keyframe-string helpers (bake, checkpoint schedules)
+* ``schema``        the Deforum_UI parameter list (drives UI *and* payload)
+* ``payload``       builds the Deforum batch request + frame plan
+* ``comfy``         builds the ComfyUI preprocess request / reads its history
+* ``td_controller`` TouchDesigner glue: Queue -> preprocess -> render -> load
+
+The DAT scripts in ``scripts/`` stay thin: they put ``scripts/`` on sys.path,
+import this package and forward their callbacks to ``td_controller``.
+"""
+
+import importlib
+import sys
+
+__version__ = "0.2.0"
+
+# Leaves first, so dependants pick up reloaded modules.
+_SUBMODULES = ("config", "schedules", "schema", "payload", "comfy", "td_controller")
+
+
+def reload_all():
+    """Re-import every submodule so edits made in VS Code apply without restarting TD."""
+    for name in _SUBMODULES:
+        full = "%s.%s" % (__name__, name)
+        module = sys.modules.get(full)
+        if module is None:
+            importlib.import_module(full)
+        else:
+            importlib.reload(module)
