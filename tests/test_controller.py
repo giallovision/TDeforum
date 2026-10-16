@@ -68,7 +68,10 @@ class ControllerTest(unittest.TestCase):
 
         self.tick()
         polls = self.root.op("webclient_progress").requests
-        self.assertEqual(polls[-1][:2], ("GET", "http://192.168.1.42:7865/deforum_api/jobs/batch(1)-0"))
+        # Built from the loaded config so a scripts/tdeforum.local.json override
+        # (e.g. server_host) does not break the test.
+        expected = config.deforum_url(config.load(), "/deforum_api/jobs/batch(1)-0")
+        self.assertEqual(polls[-1][:2], ("GET", expected))
 
         respond(self.root, "webclient_progress", 200,
                 {"id": "batch(1)-0", "status": "ACCEPTED", "phase": "GENERATING", "phase_progress": 0.4})
