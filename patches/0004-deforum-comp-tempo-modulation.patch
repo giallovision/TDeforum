@@ -1,0 +1,3319 @@
+From 78644ab785bf8b1a8cdb1a9e7c81165b3785e61b Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 20:50:54 +0000
+Subject: [PATCH] Deforum COMP: tempo-locked modulation, prompt sequence,
+ seamless loops
+
+Replace Deforum_UI with a `deforum` Base COMP built from schema.py:
+every schedulable Deforum parameter at its baseline (float base + raw
+override), on Tempo / Globals / Prompts / Motion / Camera & Depth /
+Diffusion / Noise & Color / Flow & Anti-blur / Mod Matrix / CN / Pipeline
+pages. build_master_ui.py migrates Deforum_UI values on first run.
+
+- tempo.py: bpm/bars/fps -> plan; 60 fps + cadence or low fps + RIFE/FILM
+- modulation.py: 8-slot Mod Matrix compiled to comma-free numexpr
+  expressions (float divisors: numexpr floor-divides int/int inside
+  Deforum); Mod CHOP input baked per frame, loop-normalised
+- prompt_seq.py: beat-indexed prompts with crossfades as weighted AND
+  prompts (Deforum holds prompts, it does not blend them)
+- seamless loops: overlap render, seed schedule s + t%loop, loop player
+  (loop_head/loop_tail -> loop_cross) crossfading the seam
+- interpolated outputs (<ts>_RIFE|FILM_xN.mp4) auto-load, with fallback
+- bake button now previews the compiled schedules (no POST)
+- legacy_colormatch baseline on, matching what the API applied before
+- tests: Deforum schedule/prompt simulator, builder run against a TD mock
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                                  |  84 ++++--
+ ROADMAP.md                                 |  11 +-
+ scripts/bake_exec.py                       |  10 +-
+ scripts/build_master_ui.py                 | 254 +++++++++++++++---
+ scripts/comfy_preprocessor_payload_exec.py |   2 +-
+ scripts/setup_network.py                   |  20 +-
+ scripts/tdeforum/__init__.py               |  11 +-
+ scripts/tdeforum/migrate.py                |  82 ++++++
+ scripts/tdeforum/modulation.py             | 211 +++++++++++++++
+ scripts/tdeforum/payload.py                | 256 ++++++++++++++++---
+ scripts/tdeforum/prompt_seq.py             | 131 ++++++++++
+ scripts/tdeforum/schema.py                 | 283 ++++++++++++++++-----
+ scripts/tdeforum/td_controller.py          | 251 ++++++++++++++----
+ scripts/tdeforum/tempo.py                  | 113 ++++++++
+ tests/_deforum_sim.py                      | 118 +++++++++
+ tests/_fakes.py                            |  30 ++-
+ tests/test_builder.py                      | 272 ++++++++++++++++++++
+ tests/test_controller.py                   | 117 ++++++++-
+ tests/test_payload.py                      | 146 ++++++++++-
+ tests/test_tempo_mod.py                    | 164 ++++++++++++
+ 20 files changed, 2323 insertions(+), 243 deletions(-)
+ create mode 100644 scripts/tdeforum/migrate.py
+ create mode 100644 scripts/tdeforum/modulation.py
+ create mode 100644 scripts/tdeforum/prompt_seq.py
+ create mode 100644 scripts/tdeforum/tempo.py
+ create mode 100644 tests/_deforum_sim.py
+ create mode 100644 tests/test_builder.py
+ create mode 100644 tests/test_tempo_mod.py
+
+diff --git a/README.md b/README.md
+index 2f0282b..7661c47 100644
+--- a/README.md
++++ b/README.md
+@@ -8,7 +8,7 @@ An interactive **TouchDesigner** control surface driving a containerized **AUTOM
+ 
+ | Layer | Runs | Does |
+ |---|---|---|
+-| **Host (Windows)** | TouchDesigner | UI (`Deforum_UI`), audio-reactive CHOP motion, bakes keyframes, submits jobs, polls progress, plays results |
++| **Host (Windows)** | TouchDesigner | the `deforum` COMP (all parameters, tempo, mod matrix, prompt sequence), CHOP modulation, submits jobs, polls progress, loops results |
+ | **GPU host (Linux, `gvispc1`)** | Docker: `tdeforum-a1111` (port 7865), ComfyUI (port 8188) | Stable Diffusion, Deforum rendering, ControlNet, FFmpeg stitching |
+ | **Share** | Repo root exported as `T:/` | The data bridge both sides read and write |
+ 
+@@ -63,8 +63,54 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
+ ### One-time setup after pulling this version
+ 
+ 1. **`setup_network.py`**: make a Text DAT in `/project1` with *File* `T:/scripts/setup_network.py`, then right-click › *Run Script* (or in the textport: `exec(open('T:/scripts/setup_network.py', encoding='utf-8').read())`). It points all three Web Client DATs at `webclient2_callbacks`, fixes the prompt file path, creates `loadvideo_exec` for the LoadVideo button, switches `moviefilein1` to a constant path, and prints notes about the CHOP chain. It is idempotent and prints every change.
+-2. **`builder_master_ui`** › *Run Script*: rebuilds the `Deforum_UI` pages from `scripts/tdeforum/schema.py`. Values, expressions and binds you already set are kept (`RESET_TO_DEFAULTS = True` discards them).
+-3. Textport: `op('deforum_payload_exec').module.doctor()` reports which paths TouchDesigner can see, the server URLs and the wiring.
++2. **`builder_master_ui`** › *Run Script*: builds the **`deforum` Base COMP** from `scripts/tdeforum/schema.py`. On the first run it migrates every value, expression and bind from the old `Deforum_UI` (which is then no longer read; delete it when you are happy). Later runs keep the COMP's values (`RESET_TO_DEFAULTS = True` goes back to the baselines).
++3. Textport: `op('deforum_payload_exec').module.doctor()` reports which paths TouchDesigner can see, the server URLs, the tempo plan, active mod slots and the Mod CHOP channels.
++
++### The `deforum` COMP
++
++Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · Pipeline**.
++
++Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
++
++* a **float base** (`Translationz`, `Strengthschedule`, …): keyframe it in TD, export a CHOP to it or bind it; the value at Queue time is the base;
++* a **`…raw`** string (`Translationzraw`): a hand-written Deforum schedule; when not empty it is sent verbatim and base + modulation are ignored.
++
++On top of the base, three modulation sources, all tempo-locked:
++
++| Source | Where | Sent to Deforum as |
++|---|---|---|
++| **Mod Matrix** (8 slots) | *Mod Matrix* page: target, shape (sine, triangle, saw up/down, soft square, kick decay, bump), cycle in beats, depth, phase, sharpness | one math expression Deforum evaluates every frame, e.g. `0:(1 + 0.04*exp(-6*((t/30.0) % 1)))` |
++| **Mod CHOP** | COMP input 1 (or *Mod CHOP* path). One loop long, any sample rate; channels named after the parameter (`translation_z` or `Translationz`) | baked: every render frame sampled (base + CHOP + slots) |
++| **Prompt sequence** | `deforum/prompt_seq` table, columns *beat*, *prompt*, *xfade* | held prompt keys + beat-length crossfades written as weighted `AND` prompts |
++
++Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
++
++### Tempo
++
++At 60 fps one beat is **40 frames at 90 bpm, 30 at 120, 24 at 150**. *Tempo* sets BPM, beats per bar and loop length in bars; the render length follows (plus an overlap for the seam). Two render strategies:
++
++* **60 fps + cadence**: every frame on your 60 fps beat grid; *Diffusion Cadence* N diffuses every Nth frame and warps between (cost ≈ 60/N diffusions per second).
++* **Low fps + RIFE/FILM**: render at 15/20/30 fps and let Deforum interpolate to 60 (x4/x3/x2). Cheaper; 30 fps gives whole-frame loops at all three tempos, 20 fps does not at 90 bpm (warned).
++
++### Seamless loops
++
++With *Seamless Loop* on:
++
++1. Mod slots whose cycle divides the loop return to their start (others are warned about).
++2. The prompt sequence fades its last prompt back into the first at the loop point.
++3. Deforum renders an extra *Loop Overlap* (beats) past the loop. With *Loop Seeds*, seeds follow `s + t % loop`, so the tail re-diffuses the head's noise.
++4. The **loop player** inside the COMP (`loop_head`, `loop_tail` → `loop_cross` → COMP output 1) plays the loop and crossfades the tail into the head over the overlap, so the wrap is the render's own continuation. *Loop Player Offset* shifts it against your timeline.
++
++Deforum is feed-forward, so the last frame never equals the first; the overlap crossfade is what closes the loop.
++
++### Writing your own schedules (`…raw`)
++
++Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates with numexpr (`t` = frame, `max_f`, `s` = seed):
++
++* no commas inside an expression (no `where(a,b,c)`, `min`, `max`);
++* **write divisors as floats**: numexpr floor-divides `int / int` inside Deforum, so `t/30` steps; use `t/30.0`;
++* in prompt weights (backticks) every letter `t` is replaced by the frame number, so avoid functions containing a `t` (`tanh`, `sqrt`); `sin`, `cos`, `exp`, `abs` are fine;
++* the anti-blur *kernel* must be odd (OpenCV), so it is a plain integer, not modulatable.
+ 
+ ### Network map
+ 
+@@ -73,42 +119,28 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
+ | **Queue** button (`null1`) | `deforum_payload_exec` | `deforum_payload_exec.py` | `td_controller.queue` |
+ | `timer1` cycle pulse | `chopexec_poll` | `chopexec_poll.py` | `td_controller.tick` |
+ | All Web Client DATs | `webclient2_callbacks` | `webclient2_callbacks.py` | `td_controller.on_response` |
+-| **bake** button (`null2`) | `bake_exec` | `bake_exec.py` | `td_controller.bake` |
++| **bake** button (`null2`) | `bake_exec` | `bake_exec.py` | `td_controller.preview` (no POST) |
+ | **LoadVideo** button (`null3`) | `loadvideo_exec` | `loadvideo_exec.py` | `td_controller.load_latest` |
+ | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
+ | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
+-| Run Script | `builder_master_ui` | `build_master_ui.py` | rebuild `Deforum_UI` |
++| Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
+ | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
+ 
+ ### What Queue does
+ 
+-1. Reads `Deforum_UI`, `T:/scripts/prompt.json` and the `available_models` table, and builds **one** batch request (`scripts/tdeforum/payload.py`). Frame counts are capped by the real length of the init / mask videos read through the share.
++1. Reads the `deforum` COMP (parameters, `prompt_seq`, Mod CHOP), `T:/scripts/prompt.json` (when *Prompt Source* is json) and the `available_models` table, and builds **one** batch request (`scripts/tdeforum/payload.py`). Frame counts are capped by the real length of the init / mask videos read through the share.
+ 2. If *ControlNet Unit 1 › Preprocess via ComfyUI* and CN1 are on: posts `scripts/templates/TD_CN_PreProc.json` to ComfyUI, polls `/history`, sets `Cn1vidpath` to the result and caches it per settings (*Pipeline › Force ComfyUI re-preprocess* bypasses the cache).
+ 3. Posts the batch to `/deforum_api/batches`, then polls **that job** (`/deforum_api/jobs/<id>`) on each `timer1` cycle. Idle means no polling.
+-4. When the job finishes and the `.mp4` has stopped growing on the share, loads it into `moviefilein1` (*Pipeline › Auto-load*).
++4. When the job finishes and the video (`<ts>_RIFE_xN.mp4` / `<ts>_FILM_xN.mp4` when interpolating, else `<ts>.mp4`) has stopped growing on the share, loads it into `moviefilein1` **and** the loop player (*Pipeline › Auto-load*). If the interpolated file never appears, the plain render is loaded after 30 s and played at the right speed.
+ 
+ *Pipeline › Status* shows the current step. Textport helpers:
+ 
+ ```python
+ op('deforum_payload_exec').module.status()   # state of the current job
+ op('deforum_payload_exec').module.cancel()   # cancel Deforum job / interrupt ComfyUI
+-op('deforum_payload_exec').module.doctor()   # paths, URLs, wiring
++op('deforum_payload_exec').module.doctor()   # paths, URLs, tempo, mods, wiring
+ ```
+ 
+-### Deforum_UI pages
+-
+-* **Globals**: model (index into `available_models`, a filename, or a schedule such as `0: 0, 75: 1`), VAE (sent as an A1111 option override), size, steps, max frames (bound to the timeline end), sampler, animation mode, seed behaviour / seed, negative prompt, mask video, init / mask paths, frame mode (*Trim* = first N frames; *Stride* = every n-th frame across the whole clip).
+-* **Motion (2D/3D)**: border (2D `border` + 3D `padding_mode`), zoom, angle, translation, 3D rotation, transform centre. Plain numbers are sent as `0:(value)`.
+-* **Schedules**: noise, strength, contrast, CFG.
+-* **Perspective 3D**: *Enable Perspective Flip* (Deforum ignores the flip schedules without it), flip θ/φ/γ/fv, FOV, near, far.
+-* **ControlNet Unit 1**: every Deforum CN1 field (weight / guidance as schedules, resize and control mode as menus) plus the ComfyUI preprocess toggle and preprocessor.
+-* **Advanced Setup**: base strength, diffusion cadence, optical-flow cadence.
+-* **Pipeline**: status, auto-load, force re-preprocess, bake points and bake target.
+-
+-### Bake
+-
+-Bake samples every channel of `wave_generator` at *Bake points* equidistant frames (0 = every frame) into `frame:(value)` keys. A channel named after a schedule (`zoom`, `translation_z`, …) is written straight into that parameter; otherwise channel 0 goes to *Bake into*. `bake_out` always receives a copy. Parameters driven by an expression or CHOP export are never overwritten.
+-
+ ---
+ 
+ ## 💻 Code layout
+@@ -117,7 +149,11 @@ Bake samples every channel of `wave_generator` at *Bake points* equidistant fram
+ scripts/
+   tdeforum/            # all logic; plain Python, unit-tested (make test)
+     config.py          # endpoints, path bridge, timings (+ scripts/tdeforum.local.json overrides)
+-    schema.py          # Deforum_UI fields: drives build_master_ui AND the payload
++    schema.py          # deforum COMP fields: drives build_master_ui AND the payload
++    tempo.py           # bpm / bars / fps -> render plan (cadence or interpolation)
++    modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
++    prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
++    migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+     comfy.py           # ComfyUI request / history parsing
+     schedules.py       # keyframe strings, checkpoint schedules
+@@ -148,7 +184,7 @@ The same applies to the Samba share: a symlink or container-only mount is invisi
+ `doctor()` reports what TouchDesigner can actually see. Rendering does not depend on it; only frame-count capping and browsing do.
+ 
+ ### Deforum only reads keys it knows
+-Deforum's settings loader silently ignores unknown keys. `tests/data/deforum_keys_5d63a339.json` lists the keys of the pinned Deforum commit, and `make test` fails if the payload sends anything else. Notable mappings: negative prompt → `animation_prompts_negative`; A1111 options → top-level `options_overrides`.
++Deforum's settings loader silently ignores unknown keys. `tests/data/deforum_keys_5d63a339.json` lists the keys of the pinned Deforum commit, and `make test` fails if the payload sends anything else. `tests/_deforum_sim.py` replicates how Deforum parses schedules and prompt weights (including numexpr's integer division), so the tests check the values Deforum will compute, not just the strings. Notable mappings: negative prompt → `animation_prompts_negative`; A1111 options → top-level `options_overrides`.
+ 
+ ### TouchDesigner payload execution
+ * Avoid `run(..., delayFrames=X)` for critical state; the controller keeps job state in `/project1` storage and is driven by button edges, the timer pulse and HTTP callbacks.
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 44cf5bc..ba26efb 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -41,6 +41,11 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Queue chains ComfyUI preprocessing → Deforum automatically when CN1 preprocessing is enabled.
+ - [x] Reproducible, fast container: pinned sources and torch stack, BuildKit download caches, persistent runtime volumes, `make bake/save/load`.
+ - [x] Explicit "Force Re-Render" toggle (*Pipeline › Force ComfyUI re-preprocess*) that bypasses the TD cache and forces ComfyUI to write a new file.
++- [x] `deforum` Base COMP replaces `Deforum_UI`: every schedulable Deforum parameter at its baseline, float base + raw override, migrated automatically.
++- [x] Tempo engine (90/120/150 bpm at 60 fps): 60 fps + cadence or low fps + RIFE/FILM interpolation; render length from bars.
++- [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
++- [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
++- [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+ 
+ ### 🚧 In Progress
+ - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
+@@ -49,6 +54,8 @@ This document outlines the macro-architecture for our generative visual performa
+ 
+ ### 🔮 Future Implementations
+ - [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5 (payload already reads CN fields generically from `schema.py`; add `cn_2_*` fields there).
+-- [ ] OSC Architecture: Map TouchDesigner's `bake_out` data points to Resolume's OSC routing addresses.
++- [ ] OSC Architecture: send the tempo/loop state and Mod Matrix values to Resolume's OSC routing addresses.
++- [ ] Beat clock CHOP inside the `deforum` COMP (beat / bar phase at the COMP's BPM) for driving live TD visuals in sync with the renders.
++- [ ] Parseq-style per-parameter keyframe editor (Animation COMP → Mod CHOP) for hand-drawn curves.
+ - [ ] Route Deforum image sequence outputs back into TouchDesigner for real-time playback monitoring (finished `.mp4` already auto-loads; per-frame preview still open).
+-- [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator` (bake reads `math1 <- wave3`).
+\ No newline at end of file
++- [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator`. To use it now, feed it (channels renamed to parameter names) into the `deforum` COMP's Mod CHOP input.
+\ No newline at end of file
+diff --git a/scripts/bake_exec.py b/scripts/bake_exec.py
+index 87b15e2..e83896d 100644
+--- a/scripts/bake_exec.py
++++ b/scripts/bake_exec.py
+@@ -1,10 +1,8 @@
+ # CHOP Execute DAT `bake_exec` (chop: null2 / bake button).
+-# Bakes wave_generator into Deforum keyframe strings:
+-#   * a channel named like a schedule (zoom, translation_z, ...) goes straight
+-#     into that Deforum_UI parameter,
+-#   * otherwise channel 0 goes to Deforum_UI > Pipeline > "Bake into",
+-#   * bake_out always gets a copy. Points come from Pipeline > "Bake points"
+-#     (falls back to the quantize_settings CHOP).
++# Preview: compiles everything Queue would send (tempo plan, Mod Matrix, Mod CHOP
++# bake, prompt sequence) WITHOUT sending it, fills deforum/schedule_preview and
++# prints the moving schedules and any warnings. The actual CHOP bake happens at
++# Queue time from the deforum COMP's Mod CHOP input.
+ 
+ 
+ def _ctl(reload=False):
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 4e2c022..ff70231 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -1,15 +1,28 @@
+ # Text DAT `builder_master_ui` (right-click > Run Script).
+ #
+-# Rebuilds the Deforum_UI custom pages from scripts/tdeforum/schema.py (the
+-# same list the payload builder reads). Values, expressions, binds and export
+-# targets you already set are KEPT, matched by parameter name; set
+-# RESET_TO_DEFAULTS = True to throw them away instead.
++# Builds (or rebuilds) the `deforum` Base COMP in this network from
++# scripts/tdeforum/schema.py -- the same list the payload builder reads -- and
++# replaces the old Deforum_UI:
++#
++#   * first run: values, expressions and binds are MIGRATED from Deforum_UI
++#     (schedules become a float base + a raw override; see tdeforum/migrate.py).
++#     Deforum_UI itself is left untouched and is no longer read; delete it later.
++#   * later runs: the COMP's own values are KEPT, matched by parameter name.
++#     Set RESET_TO_DEFAULTS = True to go back to the schema baselines instead.
++#
++# Inside the COMP it creates (only when missing, never overwriting your edits):
++#   prompt_seq        table DAT  beat | prompt | xfade   (seeded from prompt.json)
++#   in_mod            In CHOP    COMP input 1: the Mod CHOP (channels named after parameters)
++#   schedule_preview  table DAT  filled by the bake button / td_controller.preview()
++#   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
+ 
+ import json
+ import os
+ import sys
+ 
+ RESET_TO_DEFAULTS = False
++COMP_NAME = 'deforum'
++OLD_UI = 'Deforum_UI'
+ 
+ _path = me.par.file.eval()
+ _scripts = os.path.dirname(_path) if _path else 'T:/scripts'
+@@ -18,16 +31,20 @@ if _scripts not in sys.path:
+ 
+ import tdeforum
+ tdeforum.reload_all()
+-from tdeforum import schema
++from tdeforum import migrate, payload, prompt_seq, schema, td_controller
++
++
++def say(text):
++    print('[TDeforum] ' + text)
+ 
+ 
+ def _mode_name(par):
+     return getattr(par.mode, 'name', str(par.mode)).split('.')[-1].upper()
+ 
+ 
+-def snapshot(ui):
++def snapshot(comp):
+     saved = {}
+-    for p in ui.customPars:
++    for p in comp.customPars:
+         saved[p.name] = {
+             'mode': _mode_name(p),
+             'expr': p.expr,
+@@ -63,7 +80,14 @@ def restore(par, saved):
+             par.val = str(value)
+ 
+ 
+-def create(page, field):
++def _help(p, text):
++    try:
++        p.help = text
++    except Exception:
++        pass
++
++
++def create(page, field, section=False):
+     name, label = field.td_name, field.label
+     kind = field.kind
+     if kind == schema.MENU:
+@@ -77,24 +101,132 @@ def create(page, field):
+     elif kind == schema.INT:
+         p = page.appendInt(name, label=label)[0]
+         p.default = int(field.default)
+-    elif kind == schema.FLOAT:
++    elif kind in (schema.FLOAT, schema.MOD):
+         p = page.appendFloat(name, label=label)[0]
+         p.default = float(field.default)
+     else:  # str, schedule, seed, checkpoint, status
+         p = page.appendStr(name, label=label)[0]
+         p.default = str(field.default)
+-    if field.norm and kind in (schema.INT, schema.FLOAT):
++    if field.norm and kind in (schema.INT, schema.FLOAT, schema.MOD):
+         p.normMin, p.normMax = field.norm
+     p.val = p.default
++    if section:
++        try:
++            p.startSection = True
++        except Exception:
++            pass
+     if kind == schema.STATUS:
+         p.readOnly = True
+     if field.expr:
+         p.expr = field.expr
+         p.mode = ParMode.EXPRESSION
+-    return p
++    created = [p]
++    if kind == schema.MOD:
++        _help(p, 'Base value. Keyframe it, export to it or bind it; the Mod Matrix and the Mod CHOP '
++                 'add beat-locked motion on top.')
++        raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
++        raw.default = ''
++        _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
++                   'When not empty it is sent verbatim and the base + modulation are ignored.')
++        created.append(raw)
++    return created
++
++
++# --------------------------------------------------------------------------- inner network
++
++def _set_menu(par, *choices):
++    """Set a built-in menu par to the first choice it knows; report if none fits."""
++    names = list(getattr(par, 'menuNames', []) or [])
++    for choice in choices:
++        if choice in names:
++            par.val = choice
++            return True
++    say('NOTE %s.%s has no %s (menu: %s); set it by hand' % (par.owner.name, par.name, '/'.join(choices), names))
++    return False
++
++
++def _expr(op_, name, expression):
++    par = getattr(op_.par, name, None)
++    if par is None:
++        say('NOTE %s has no parameter %r; loop player needs it set by hand to: %s' % (op_.name, name, expression))
++        return
++    par.expr = expression
++    par.mode = ParMode.EXPRESSION
++
+ 
++def _get(comp, optype, name, x, y):
++    found = comp.op(name)
++    if found is None:
++        found = comp.create(optype, name)
++        found.nodeX, found.nodeY = x, y
++        say('created %s/%s' % (comp.name, name))
++    return found
+ 
+-def ensure_prompt_dat(root, ui):
++
++# Playhead in output frames, wrapped to the loaded loop.
++_LOOP = "int(parent().par.Loopoutframes.eval() or 0)"
++_RATE = "float(parent().par.Loopoutrate.eval() or 1)"
++_P = '((absTime.frame + parent().par.Loopoffset.eval()) %% max(1, %s))' % _LOOP
++
++
++def _blank(table):
++    """New Table DATs may hold one empty cell; treat any all-empty table as empty."""
++    for r in range(table.numRows):
++        for c in range(table.numCols):
++            if str(table[r, c].val).strip():
++                return False
++    return True
++
++
++def build_inner(comp, values):
++    seq = _get(comp, tableDAT, 'prompt_seq', -400, 200)
++    if _blank(seq):
++        seq.clear()
++        seq.appendRow(['beat', 'prompt', 'xfade'])
++        try:
++            with open(_scripts + '/prompt.json', 'r', encoding='utf-8') as fh:
++                prompts = json.load(fh)
++            tp = payload.tempo_plan(values)
++            fpb = tp['fpb'] if tp else 30.0
++            for row in prompt_seq.rows_from_prompts(prompts, fpb):
++                seq.appendRow(list(row))
++            say('prompt_seq seeded from prompt.json (frame keys converted to beats; check them)')
++        except Exception as exc:
++            seq.appendRow(['0', 'A cinematic macro shot of liquid gold morphing, biomorphic shapes', ''])
++            say('prompt_seq seeded with a default prompt (%s)' % exc)
++    seq.viewer = True
++
++    _get(comp, inCHOP, 'in_mod', -400, 0)
++    preview = _get(comp, tableDAT, 'schedule_preview', -400, -200)
++    if _blank(preview):
++        preview.clear()
++        preview.appendRow(['parameter', 'mode', 'schedule'])
++    preview.viewer = True
++
++    head = _get(comp, moviefileinTOP, 'loop_head', 0, 100)
++    tail = _get(comp, moviefileinTOP, 'loop_tail', 0, -100)
++    for player, offset in ((head, ''), (tail, ' + int(%s * %s)' % (_LOOP, _RATE))):
++        playmode = getattr(player.par, 'playmode', None)
++        if playmode is not None:
++            _set_menu(playmode, 'specify', 'specifyindex')
++        unit = getattr(player.par, 'indexunit', None)
++        if unit is not None:
++            _set_menu(unit, 'indices', 'index', 'frames')
++        _expr(player, 'index', 'int(%s * %s)%s' % (_P, _RATE, offset))
++
++    cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
++    cross.inputConnectors[0].connect(head)
++    cross.inputConnectors[1].connect(tail)
++    # Tail weight 1 -> 0 over the overlap at the start of each loop, 0 afterwards.
++    _expr(cross, 'cross', '(lambda p, o: max(0.0, 1.0 - p / o) if 0 < o and p < o else 0.0)'
++                          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
++    out = _get(comp, outTOP, 'out_loop', 400, 0)
++    out.inputConnectors[0].connect(cross)
++
++
++# --------------------------------------------------------------------------- side tables
++
++def ensure_prompt_dat(root, comp):
+     prompt_path = _scripts + '/prompt.json'
+     if not os.path.exists(prompt_path):
+         default_prompt = {"0": "Biomorphic liquid gold morphing", "120": "Bioluminescent neural network blooming"}
+@@ -103,53 +235,91 @@ def ensure_prompt_dat(root, ui):
+     prompt_dat = root.op('deforum_prompts') or root.create(textDAT, 'deforum_prompts')
+     prompt_dat.par.file = prompt_path
+     prompt_dat.par.syncfile = 1
+-    prompt_dat.dock = ui
++    prompt_dat.dock = comp
+     prompt_dat.viewer = True
+-    prompt_dat.nodeX = ui.nodeX
+-    prompt_dat.nodeY = ui.nodeY - 180
+     prompt_dat.expose = False
+ 
+ 
+-def write_map_table(root, ui):
++def write_map_table(root, comp):
+     table = root.op('deforum_api_map') or root.create(tableDAT, 'deforum_api_map')
+     table.clear()
+-    table.appendRow(['td_name', 'api_name', 'sent_as', 'target'])
++    table.appendRow(['td_name', 'api_name', 'sent_as', 'target', 'page'])
+     for field in schema.FIELDS:
+-        table.appendRow([field.td_name, field.api, field.key, field.target or 'td-only'])
+-    table.dock = ui
++        table.appendRow([field.td_name, field.api, field.key, field.target or 'td-only', field.page])
++        if field.kind == schema.MOD:
++            table.appendRow([field.raw_td_name, field.api + ' (raw)', field.key, 'deforum', field.page])
++    table.dock = comp
+     table.viewer = False
+     table.expose = False
+ 
+ 
+-def run_ui_construction():
++# --------------------------------------------------------------------------- main
++
++def run():
+     root = me.parent()
+-    ui = root.op('Deforum_UI') or root.create(baseCOMP, 'Deforum_UI')
+-    saved = {} if RESET_TO_DEFAULTS else snapshot(ui)
++    comp = root.op(COMP_NAME)
++    old = root.op(OLD_UI)
++    first = comp is None
++    if first:
++        comp = root.create(baseCOMP, COMP_NAME)
++        if old is not None:
++            comp.nodeX, comp.nodeY = old.nodeX + 250, old.nodeY
++        say('created %s' % comp.path)
+ 
+-    for page in list(ui.customPages):
++    if RESET_TO_DEFAULTS:
++        saved, from_old = {}, False
++    elif first and old is not None:
++        saved, from_old = snapshot(old), True
++    else:
++        saved, from_old = snapshot(comp), False
++
++    for page in list(comp.customPages):
+         page.destroy()
+-    pages = {}
+-    for name in schema.PAGE_ORDER:
+-        pages[name] = ui.appendCustomPage(name)
++    pages = dict((name, comp.appendCustomPage(name)) for name in schema.PAGE_ORDER)
+ 
+-    kept = []
++    by_name = {}
+     for field in schema.FIELDS:
+-        p = create(pages[field.page], field)
+-        if field.td_name in saved and field.kind != schema.STATUS:
+-            try:
+-                restore(p, saved[field.td_name])
+-                kept.append(field.td_name)
+-            except Exception as exc:
+-                print('[TDeforum] could not restore %s: %s' % (field.td_name, exc))
++        section = field.api.endswith('_active') and field.api.startswith('mod')
++        for p in create(pages[field.page], field, section):
++            by_name[p.name] = p
++
++    kept, notes = [], []
++    for action in migrate.plan(saved, from_old):
++        if action[0] == 'note':
++            notes.append(action[1])
++            continue
++        _kind, name, entry = action
++        par = by_name.get(name)
++        if par is None:
++            continue
++        try:
++            restore(par, entry)
++            kept.append(name)
++        except Exception as exc:
++            say('could not restore %s: %s' % (name, exc))
+ 
+-    write_map_table(root, ui)
+-    ensure_prompt_dat(root, ui)
++    values = td_controller.read_ui(comp)
++    build_inner(comp, values)
++    write_map_table(root, comp)
++    ensure_prompt_dat(root, comp)
+ 
+-    dropped = sorted(set(saved) - set(schema.BY_TD))
+-    print('[TDeforum] Deforum_UI rebuilt: %d parameters, %d previous values kept.'
+-          % (len(schema.FIELDS), len(kept)))
+-    for name in dropped:
+-        print('[TDeforum]   dropped %s (%s)' % (name, schema.RETIRED_TD_NAMES.get(name, 'not in schema')))
++    total = len(schema.all_td_names())
++    say('%s %s: %d parameters on %d pages, %d values %s.' % (
++        'built' if first else 'rebuilt', comp.path, total, len(schema.PAGE_ORDER), len(kept),
++        'migrated from ' + OLD_UI if from_old else 'kept'))
++    for name in migrate.dropped(saved):
++        say('  dropped %s (%s)' % (name, schema.RETIRED_TD_NAMES.get(name, 'not in schema')))
++    for note in notes:
++        say('NOTE ' + note)
++    try:
++        tp = payload.tempo_plan(values)
++        say('tempo: ' + (tdeforum.tempo.describe(tp) if tp else 'manual length'))
++    except ValueError as exc:
++        say('tempo settings invalid: %s' % exc)
++    if first and old is not None:
++        say('%s is no longer read. Delete it once the COMP looks right.' % OLD_UI)
++    say('next: wire your loop CHOP into %s input 1 (channel names = parameter names, e.g. translation_z), '
++        'edit %s/prompt_seq, then press bake to preview the schedules.' % (comp.name, comp.name))
+ 
+ 
+-run_ui_construction()
++run()
+diff --git a/scripts/comfy_preprocessor_payload_exec.py b/scripts/comfy_preprocessor_payload_exec.py
+index e342021..ec304ef 100644
+--- a/scripts/comfy_preprocessor_payload_exec.py
++++ b/scripts/comfy_preprocessor_payload_exec.py
+@@ -1,5 +1,5 @@
+ # Text DAT `preproc_payload_exec` (right-click > Run Script).
+-# Runs only the ComfyUI preprocess for the current Deforum_UI settings and, when
++# Runs only the ComfyUI preprocess for the current deforum COMP settings and, when
+ # it finishes, points Cn1vidpath at the result. Queue does this automatically
+ # when ControlNet Unit 1 > "Preprocess via ComfyUI" is on.
+ #
+diff --git a/scripts/setup_network.py b/scripts/setup_network.py
+index 7c0326e..ee82b30 100644
+--- a/scripts/setup_network.py
++++ b/scripts/setup_network.py
+@@ -13,7 +13,8 @@ import sys
+ def _root():
+     try:
+         candidate = me.parent()
+-        if candidate is not None and candidate.op('Deforum_UI') is not None:
++        if candidate is not None and (candidate.op('deforum') is not None
++                                      or candidate.op('Deforum_UI') is not None):
+             return candidate
+     except Exception:
+         pass
+@@ -56,8 +57,8 @@ def set_par(o, name, value):
+ 
+ 
+ def main():
+-    if ROOT is None or ROOT.op('Deforum_UI') is None:
+-        say('Deforum_UI not found; run this from /project1')
++    if ROOT is None or (ROOT.op('deforum') is None and ROOT.op('Deforum_UI') is None):
++        say('neither the deforum COMP nor Deforum_UI found; run this from /project1')
+         return
+ 
+     # 1. One callbacks DAT (file-synced) for all three Web Client DATs.
+@@ -126,11 +127,18 @@ def main():
+         set_par(loader, 'syncfile', True)
+ 
+     # 8. Report (no changes): creative-chain wiring worth a look.
++    comp = ROOT.op('deforum')
++    wave = ROOT.op('wave_generator')
++    if comp is None:
++        say('NOTE no deforum COMP yet: run builder_master_ui (it migrates Deforum_UI)')
++    elif wave is not None and wave not in list(comp.inputs):
++        say('NOTE wave_generator is not wired into the deforum COMP. The bake button no longer '
++            'writes keyframe strings; connect a CHOP whose channels are named after parameters '
++            '(translation_z, zoom, strength_schedule, ...) to the COMP input, one loop long.')
+     record = ROOT.op('record1')
+     if record is not None and not record.outputs:
+-        say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator; '
+-            'bake currently reads math1 <- wave3 only. Wire record1 -> math1 if the '
+-            'crossfade morph is meant to be baked.')
++        say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator. '
++            'Wire record1 -> math1 if the crossfade morph is meant to modulate Deforum.')
+     cross = ROOT.op('cross1')
+     if cross is not None and 'len(me.inputs)' in (cross.par.cross.expr or '') \
+             and '- 1' not in cross.par.cross.expr:
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 176faa1..45900b1 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -5,7 +5,11 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ 
+ * ``config``        endpoints, path bridge (container <-> T:/ share), tunables
+ * ``schedules``     keyframe-string helpers (bake, checkpoint schedules)
+-* ``schema``        the Deforum_UI parameter list (drives UI *and* payload)
++* ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
++* ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
++* ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
++* ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
++* ``migrate``       old Deforum_UI values -> the COMP's parameters
+ * ``payload``       builds the Deforum batch request + frame plan
+ * ``comfy``         builds the ComfyUI preprocess request / reads its history
+ * ``td_controller`` TouchDesigner glue: Queue -> preprocess -> render -> load
+@@ -17,10 +21,11 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.2.0"
++__version__ = "0.3.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "schema", "payload", "comfy", "td_controller")
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "schema",
++               "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+ def reload_all():
+diff --git a/scripts/tdeforum/migrate.py b/scripts/tdeforum/migrate.py
+new file mode 100644
+index 0000000..df4b904
+--- /dev/null
++++ b/scripts/tdeforum/migrate.py
+@@ -0,0 +1,82 @@
++"""Carry parameter values from the old Deforum_UI (or a previous build) into the COMP.
++
++Pure Python so the rules are unit-tested; build_master_ui.py applies the result.
++
++``saved`` is what build_master_ui.snapshot() records per TD parameter name:
++    {"mode": "CONSTANT" | "EXPRESSION" | "EXPORT" | "BIND", "expr": str, "bind": str, "val": value}
++
++plan() returns a list of actions:
++    ("set", td_name, saved_entry)   restore value / expression / bind as saved
++    ("note", text)                  something the user has to redo by hand
++"""
++
++from . import schema
++from . import schedules
++
++
++def split_schedule(text):
++    """'0:(1.05)' / '1.05' -> (1.05, ''); anything else -> (None, text)."""
++    text = str(text).strip()
++    if text == "":
++        return None, ""
++    body = schedules.as_schedule(text)
++    if "," not in body and body.count(":") == 1:
++        try:
++            return float(body.split(":", 1)[1].strip().strip("()").strip()), ""
++        except ValueError:
++            pass
++    return None, text
++
++
++def _const(value):
++    return {"mode": "CONSTANT", "expr": "", "bind": "", "val": value}
++
++
++def plan(saved, from_old_ui):
++    """Actions that move ``saved`` onto the new COMP's parameters."""
++    actions = []
++    for field in schema.FIELDS:
++        name = field.td_name
++        if field.kind == schema.STATUS or name not in saved:
++            continue
++        entry = saved[name]
++        mode = entry.get("mode", "CONSTANT")
++
++        if field.kind == schema.MOD and from_old_ui:
++            # Old schedules were string pars; the new base is a float + a raw override.
++            if mode == "EXPRESSION" and entry.get("expr"):
++                actions.append(("set", field.raw_td_name, entry))
++                continue
++            if mode == "EXPORT":
++                actions.append(("note", "%s was CHOP-exported on Deforum_UI; feed that channel into the "
++                                        "deforum COMP's Mod CHOP input as '%s' instead" % (name, field.api)))
++                continue
++            base, raw = split_schedule(entry.get("val", ""))
++            if base is not None:
++                actions.append(("set", name, _const(base)))
++            elif raw:
++                actions.append(("set", field.raw_td_name, _const(raw)))
++            continue
++
++        if field.api == "border" and from_old_ui and str(entry.get("val")) == "zeros":
++            actions.append(("set", name, _const("replicate")))
++            if "Paddingmode" not in saved:
++                actions.append(("set", "Paddingmode", _const("zeros")))
++            continue
++
++        if mode == "EXPORT" and from_old_ui:
++            actions.append(("note", "%s was CHOP-exported on Deforum_UI; re-point the export to the deforum COMP"
++                                    % name))
++        actions.append(("set", name, entry))
++
++    if not from_old_ui:
++        for field in schema.MOD_FIELDS:
++            if field.raw_td_name in saved:
++                actions.append(("set", field.raw_td_name, saved[field.raw_td_name]))
++    return actions
++
++
++def dropped(saved):
++    """Saved names the new COMP has no parameter for."""
++    known = set(schema.all_td_names())
++    return sorted(n for n in saved if n not in known)
+diff --git a/scripts/tdeforum/modulation.py b/scripts/tdeforum/modulation.py
+new file mode 100644
+index 0000000..690a4a1
+--- /dev/null
++++ b/scripts/tdeforum/modulation.py
+@@ -0,0 +1,211 @@
++"""Beat-locked modulation for Deforum schedules.
++
++Each modulatable parameter has a *base* value. Modulation slots add
++``depth * shape(t / period + phase)`` on top, where period = beats * frames per
++beat. Two ways to hand that to Deforum:
++
++* **Expression** (no CHOP input for the field): one keyframe ``0:(base + ...)``
++  that Deforum evaluates with numexpr at every frame ``t``. Exact and tiny.
++* **Bake** (a CHOP channel named after the field is present): every frame is
++  sampled here (base + CHOP + the same slot shapes in Python) and sent as
++  ``0:(v), 1:(v), ...``.
++
++Deforum's keyframe parser splits on ``,`` and ``:`` *before* evaluating, so the
++expressions below never use a comma (no where(), min(), max(), arctan2()).
++numexpr has no ``pi`` constant, so it is written out. numexpr.evaluate() only
++does true division when the *calling* module imported __future__.division,
++which Deforum's do not, so ``t/30`` would floor-divide: every divisor is
++written as a float literal (``t/30.0``). The Python twin of every
++shape uses the same arithmetic so the tests can check expression == sample.
++"""
++
++import math
++
++from . import schedules
++
++PI = "3.141592653589793"
++
++# name -> (label, unipolar, default sharpness)
++SHAPES = [
++    ("sine", "Sine", False),
++    ("triangle", "Triangle", False),
++    ("saw_up", "Saw up (ramp)", False),
++    ("saw_down", "Saw down", False),
++    ("square", "Square (soft, Sharpness = edge)", False),
++    ("decay", "Kick decay 1 -> 0 (Sharpness = speed)", True),
++    ("bump", "Bump 0 -> 1 -> 0 (Sharpness = narrowness)", True),
++]
++SHAPE_NAMES = [s[0] for s in SHAPES]
++SHAPE_LABELS = [s[1] for s in SHAPES]
++UNIPOLAR = set(s[0] for s in SHAPES if s[2])
++BEAT_CHOICES = ["0.25", "0.5", "1", "2", "4", "8", "16", "32", "64"]
++BEAT_LABELS = ["1/16 note", "1/8 note", "1 beat", "2 beats", "1 bar (4)", "2 bars", "4 bars",
++               "8 bars", "16 bars"]
++CHOP_MODES = ["add", "replace"]
++
++
++def fmt(value):
++    """Compact number for an expression; never scientific for normal ranges."""
++    value = float(value)
++    if value == int(value) and abs(value) < 1e12:
++        return "%d" % int(value)
++    text = "%.10f" % value
++    return text.rstrip("0").rstrip(".")
++
++
++def fmt_float(value):
++    """Like fmt() but always a float literal ("30.0"): numexpr floor-divides int / int."""
++    text = fmt(value)
++    return text if ("." in text or "e" in text) else text + ".0"
++
++
++def _shape_expr(shape, x, k):
++    two_pi_x = "2*%s*%s" % (PI, x)
++    if shape == "sine":
++        return "sin(%s)" % two_pi_x
++    if shape == "triangle":
++        return "(4*abs(((%s + 0.75) %% 1) - 0.5) - 1)" % x
++    if shape == "saw_up":
++        return "(2*(%s %% 1) - 1)" % x
++    if shape == "saw_down":
++        return "(1 - 2*(%s %% 1))" % x
++    if shape == "square":
++        return "tanh(%s*sin(%s))" % (fmt(k), two_pi_x)
++    if shape == "decay":
++        return "exp(-%s*(%s %% 1))" % (fmt(k), x)
++    if shape == "bump":
++        return "abs(0.5 - 0.5*cos(%s))**%s" % (two_pi_x, fmt(k))
++    raise ValueError("unknown shape %r" % shape)
++
++
++def _shape_value(shape, x, k):
++    two_pi_x = 2 * math.pi * x
++    if shape == "sine":
++        return math.sin(two_pi_x)
++    if shape == "triangle":
++        return 4 * abs(((x + 0.75) % 1) - 0.5) - 1
++    if shape == "saw_up":
++        return 2 * (x % 1) - 1
++    if shape == "saw_down":
++        return 1 - 2 * (x % 1)
++    if shape == "square":
++        return math.tanh(k * math.sin(two_pi_x))
++    if shape == "decay":
++        return math.exp(-k * (x % 1))
++    if shape == "bump":
++        return abs(0.5 - 0.5 * math.cos(two_pi_x)) ** k
++    raise ValueError("unknown shape %r" % shape)
++
++
++class Slot(object):
++    """One row of the modulation matrix."""
++    __slots__ = ("index", "target", "shape", "beats", "depth", "phase", "sharpness")
++
++    def __init__(self, target, shape="sine", beats=1.0, depth=0.0, phase=0.0,
++                 sharpness=4.0, index=0):
++        if shape not in SHAPE_NAMES:
++            raise ValueError("unknown shape %r" % shape)
++        beats = float(beats)
++        if beats <= 0:
++            raise ValueError("slot %d: beats must be > 0" % index)
++        self.index = index
++        self.target = target
++        self.shape = shape
++        self.beats = beats
++        self.depth = float(depth)
++        self.phase = float(phase) % 1.0
++        self.sharpness = max(0.01, float(sharpness))
++
++    def period(self, fpb):
++        return self.beats * fpb
++
++    def _x_expr(self, fpb):
++        period = fmt_float(self.period(fpb))
++        if self.phase:
++            return "(t/%s + %s)" % (period, fmt(self.phase))
++        return "(t/%s)" % period
++
++    def term_expr(self, fpb):
++        return "%s*%s" % (fmt(abs(self.depth)), _shape_expr(self.shape, self._x_expr(fpb), self.sharpness))
++
++    def value(self, t, fpb):
++        x = t / self.period(fpb) + self.phase
++        return self.depth * _shape_value(self.shape, x, self.sharpness)
++
++
++def expression(base, slots, fpb):
++    """Deforum expression (without the 0: key) for base + slots."""
++    text = fmt(base)
++    for slot in slots:
++        if slot.depth == 0:
++            continue
++        sign = "-" if slot.depth < 0 else "+"
++        text += " %s %s" % (sign, slot.term_expr(fpb))
++    return text
++
++
++def evaluate(base, slots, fpb, t, chop_value=None, chop_mode="add"):
++    """Python value at render frame t (what the expression / bake produces)."""
++    value = float(base)
++    if chop_value is not None:
++        value = chop_value if chop_mode == "replace" else value + chop_value
++    for slot in slots:
++        if slot.depth:
++            value += slot.value(t, fpb)
++    return value
++
++
++def resample_loop(samples, loop_frames, total_frames):
++    """Map a CHOP that describes ONE loop onto render frames 0..total-1.
++
++    The CHOP may have any sample count (e.g. recorded at 60 fps while rendering
++    at 15); it is stretched to loop_frames and wraps for the overlap tail, with
++    linear interpolation that also wraps last -> first sample.
++    """
++    samples = [float(v) for v in samples]
++    n = len(samples)
++    if n == 0:
++        return None
++    if n == 1:
++        return [samples[0]] * total_frames
++    out = []
++    for f in range(total_frames):
++        pos = (f % loop_frames) * n / float(loop_frames)
++        i = int(math.floor(pos))
++        frac = pos - i
++        a, b = samples[i % n], samples[(i + 1) % n]
++        out.append(a + (b - a) * frac)
++    return out
++
++
++def compile_field(base, slots, fpb, total_frames, chop=None, chop_mode="add",
++                  raw="", points=0, precision=5):
++    """Return (schedule string, (min, max) over the render, mode).
++
++    mode is "raw", "constant", "expression" or "baked".
++    """
++    raw = str(raw or "").strip()
++    if raw:
++        return schedules.as_schedule(raw), None, "raw"
++    active = [s for s in slots if s.depth]
++    if chop is None:
++        values = [evaluate(base, active, fpb, t) for t in range(total_frames)] or [float(base)]
++        bounds = (min(values), max(values))
++        if not active:
++            return "0:(%s)" % fmt(base), bounds, "constant"
++        return "0:(%s)" % expression(base, active, fpb), bounds, "expression"
++    values = [evaluate(base, active, fpb, t, chop[t], chop_mode) for t in range(total_frames)]
++    return schedules.keyframe_string(values, points, precision), (min(values), max(values)), "baked"
++
++
++def loop_warnings(slots, loop_beats):
++    """Slots whose period does not divide the loop jump at the seam."""
++    out = []
++    for slot in slots:
++        if not slot.depth:
++            continue
++        cycles = loop_beats / slot.beats
++        if abs(cycles - round(cycles)) > 1e-6:
++            out.append("slot %d (%s, %g beats) does not divide the %d-beat loop; it will jump at the seam"
++                       % (slot.index, slot.target, slot.beats, loop_beats))
++    return out
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index bc6916d..7f5e17f 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -1,6 +1,6 @@
+-"""Build the Deforum batch request from Deforum_UI values.
++"""Build the Deforum batch request from the Deforum COMP's values.
+ 
+-Pure Python: TouchDesigner reads the UI and calls build_request(); tests call
++Pure Python: TouchDesigner reads the COMP and calls build_request(); tests call
+ it with plain dicts. Notes from checking Deforum's source (commit 5d63a339):
+ 
+ * The settings loader only applies keys Deforum knows. ``n_prompt`` is not
+@@ -11,18 +11,33 @@ it with plain dicts. Notes from checking Deforum's source (commit 5d63a339):
+   extract_nth_frame / extract_to_frame to ControlNet guide videos.
+ * 2D ``border`` only knows replicate|wrap; 3D ``padding_mode`` knows
+   border|reflection|zeros.
++* Every ControlNet unit's schedules are parsed even when the unit is off.
++* Frame interpolation (RIFE/FILM) only runs with store_frames_in_ram off.
++* The anti-blur kernel goes to cv2.GaussianBlur, which rejects even sizes.
++
++Tempo mode (the COMP has a BPM and Length Source = tempo): the render length,
++fps, interpolation, seed schedule, prompt sequence and every MOD schedule come
++from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
+ """
+ 
+ import math
+ 
++from . import modulation
++from . import prompt_seq
+ from . import schedules
+ from . import schema
++from . import tempo
+ 
+ DEFAULT_PROMPTS = {"0": "A cinematic macro shot of liquid gold morphing, biomorphic shapes"}
+ DEFAULT_CHECKPOINT = "angraRealflexLCMV6_v10.safetensors"
+ CN_UNITS = 5
+ 
+ 
++def raw_key(api):
++    """values[] key holding a MOD field's <Name>raw override."""
++    return api + ":raw"
++
++
+ def _text(value):
+     return str(value).strip()
+ 
+@@ -51,7 +66,7 @@ def coerce(field, value):
+         return schedules.as_schedule(value)
+     if kind == schema.INT:
+         return int(round(_as_number(value, float)))
+-    if kind == schema.FLOAT:
++    if kind in (schema.FLOAT, schema.MOD):
+         return _as_number(value, float)
+     if kind == schema.SEED:
+         text = _text(value)
+@@ -60,7 +75,7 @@ def coerce(field, value):
+ 
+ 
+ def border_modes(choice):
+-    """UI border choice -> (2D border, 3D padding_mode)."""
++    """Legacy single border menu -> (2D border, 3D padding_mode)."""
+     if choice == "zeros":
+         return "replicate", "zeros"
+     if choice == "wrap":
+@@ -115,35 +130,160 @@ def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
+     return plan
+ 
+ 
++def tempo_plan(values):
++    """tempo.plan() from COMP values, or None when the length is manual / no Tempo page."""
++    if "bpm" not in values or _text(values.get("length_source", "tempo")) != "tempo":
++        return None
++    return tempo.plan(
++        bpm=_as_number(values.get("bpm", 120), float),
++        beats_per_bar=_as_number(values.get("beats_per_bar", 4), float),
++        bars=_as_number(values.get("loop_bars", 1), float),
++        out_fps=_as_number(values.get("out_fps", 60), float),
++        strategy=_text(values.get("render_strategy", "cadence")),
++        render_fps=_as_number(values.get("render_fps", 30), float),
++        engine=_text(values.get("interp_engine", tempo.INTERP_ENGINES[0])),
++        seamless=_as_bool(values.get("seamless_loop", True)),
++        overlap_beats=_as_number(values.get("loop_overlap_beats", 1.0), float),
++    )
++
++
++def read_slots(values, warnings):
++    """Active Mod Matrix rows -> [modulation.Slot]."""
++    slots = []
++    for n in range(1, schema.MOD_SLOTS + 1):
++        p = "mod%d_" % n
++        if not _as_bool(values.get(p + "active", False)):
++            continue
++        target = _text(values.get(p + "target", ""))
++        if target not in schema.MOD_APIS:
++            warnings.append("slot %d: %r is not a modulatable parameter" % (n, target))
++            continue
++        try:
++            slot = modulation.Slot(
++                target, _text(values.get(p + "shape", "sine")),
++                _as_number(values.get(p + "beats", 1), float),
++                _as_number(values.get(p + "depth", 0), float),
++                _as_number(values.get(p + "phase", 0), float),
++                _as_number(values.get(p + "sharpness", 4), float), index=n)
++        except (TypeError, ValueError) as exc:
++            warnings.append("slot %d ignored: %s" % (n, exc))
++            continue
++        if slot.depth:
++            slots.append(slot)
++    return slots
++
++
++def _chop_by_field(chop, warnings):
++    """{channel name: samples} -> {api: samples}; names may be api or TD names."""
++    lookup = {}
++    for field in schema.MOD_FIELDS:
++        lookup[field.api.lower()] = field.api
++        lookup[field.td_name.lower()] = field.api
++    out, ignored = {}, []
++    for name, samples in (chop or {}).items():
++        api = lookup.get(str(name).lower())
++        if api is None:
++            ignored.append(str(name))
++        elif samples:
++            out[api] = samples
++    if ignored:
++        warnings.append("Mod CHOP channels not named after a parameter, ignored: %s" % ", ".join(sorted(ignored)))
++    return out
++
++
+ def build_request(values, prompts=None, models=None, frame_counter=None,
+-                  default_checkpoint=DEFAULT_CHECKPOINT):
+-    """Return {"request": body, "plan": frame plan, "warnings": [str]}.
++                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None):
++    """Return {"request", "plan", "tempo", "schedules", "warnings"}.
+ 
+-    values         {api_name: value} as read from Deforum_UI (missing keys = not on the UI)
+-    prompts        {"frame": "prompt"} timeline
++    values         {api_name: value} as read from the COMP (missing keys = not on the COMP);
++                   MOD overrides under raw_key(api)
++    prompts        {"frame": "prompt"} timeline (prompt.json); used unless a beat sequence applies
+     models         {"index": "file.safetensors"} from the available_models table
+     frame_counter  callable(container_path) -> int | None, used to cap frame counts
++    prompt_rows    [(beat, prompt, xfade)] from the COMP's prompt_seq table
++    chop           {channel name: [samples]} describing one loop (the Mod CHOP)
+     """
+     models = models or {}
+     warnings = []
+-    settings = {"prompts": dict(prompts or DEFAULT_PROMPTS)}
++    settings = {}
+     options = {}
+ 
++    # --- length: tempo or manual, then capped by the videos -------------------------
++    tp = tempo_plan(values)
++    if tp:
++        warnings.extend(tp["warnings"])
++    mode = _text(values.get("animation_mode", "2D"))
++    use_mask_video = _as_bool(values.get("use_mask_video", False))
++    frame_mode = _text(values.get("video_frame_mode", "trim")) or "trim"
++    ui_max = tp["max_frames"] if tp else values.get("max_frames", 240)
++    init_frames = mask_frames = None
++    if frame_counter is not None:
++        if mode == "Video Input":
++            init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
++        if use_mask_video:
++            mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
++    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
++    total = plan["max_frames"]
++    if tp and total < tp["max_frames"]:
++        warnings.append("the %s is shorter than the loop (%d < %d frames); the loop will not close"
++                        % (plan["limited_by"], total, tp["max_frames"]))
++
++    # --- modulation sources ----------------------------------------------------------
++    slots = read_slots(values, warnings)
++    fpb = tp["fpb"] if tp else tempo.frames_per_beat(_as_number(values.get("bpm", 120), float), 15)
++    loop_frames = tp["loop_frames"] if tp else total
++    chop_fields = _chop_by_field(chop, warnings)
++    if tp and tp["seamless"]:
++        warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
++    compiled = {}
++
+     for field in schema.FIELDS:
+         if field.target is None or field.api.startswith("cn_") or field.api not in values:
+             continue
+         raw = values[field.api]
+         text = _text(raw)
+-        if text == "" and field.kind != schema.TOGGLE:
++
++        if field.kind == schema.MOD:
++            override = _text(values.get(raw_key(field.api), ""))
++            if not override and ":" in text:          # legacy string schedule par
++                override = text
++            field_slots = [s for s in slots if s.target == field.api]
++            samples = chop_fields.get(field.api)
++            chop_values = modulation.resample_loop(samples, loop_frames, total) if samples else None
++            try:
++                base = float(field.default) if override or text == "" else coerce(field, raw)
++            except (TypeError, ValueError):
++                warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
++                base = float(field.default)
++            sched, bounds, how = modulation.compile_field(
++                base, field_slots, fpb, total, chop_values,
++                _text(values.get("chop_mode", "add")), override,
++                int(_as_number(values.get("bake_points", 0), float)))
++            settings[field.key] = sched
++            compiled[field.api] = (how, sched)
++            _check_field(field, how, bounds, mode, field_slots, override, warnings)
+             continue
+ 
++        if text == "" and field.kind != schema.TOGGLE:
++            continue
+         if field.kind == schema.CHECKPOINT:
+             settings["enable_checkpoint_scheduling"] = True
+             settings["checkpoint_schedule"] = schedules.checkpoint_schedule(
+                 text, models, default_checkpoint)
+             continue
+-        if field.api == "border":
+-            settings["border"], settings["padding_mode"] = border_modes(text)
++        if field.api == "border" and text == "zeros":   # legacy menu value
++            settings["border"], legacy_padding = border_modes(text)
++            settings.setdefault("padding_mode", legacy_padding)
++            continue
++        if field.api == "kernel_schedule":
++            asked = int(round(_as_number(text.split("(")[-1].rstrip(")"), float)))
++            kernel = max(1, asked)
++            if kernel % 2 == 0:
++                kernel += 1
++            if kernel != asked:
++                warnings.append("anti-blur kernel %d sent as %d (OpenCV needs a positive odd size)"
++                                % (asked, kernel))
++            settings["kernel_schedule"] = "0:(%d)" % kernel
+             continue
+ 
+         try:
+@@ -152,8 +292,11 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             warnings.append("%s: could not read %r, left at Deforum default" % (field.td_name, raw))
+             continue
+         (options if field.target == "options" else settings)[field.key] = value
++    if "border" in settings and "padding_mode" not in settings and "border" in values \
++            and "padding_mode" not in values:
++        settings["padding_mode"] = border_modes(_text(values["border"]))[1]
+ 
+-    # ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off.
++    # --- ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off --
+     for field in schema.cn_fields(1):
+         raw = values.get(field.api, field.default)
+         try:
+@@ -171,23 +314,31 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             settings[key] = coerce(field, field.default)
+         settings["cn_%d_enabled" % unit] = False
+ 
+-    # Output handling the TD side relies on (auto-load expects <outdir>/<timestring>.mp4).
+-    use_mask_video = _as_bool(values.get("use_mask_video", False))
+-    settings.update(store_frames_in_ram=True, skip_video_creation=False,
+-                    use_mask=use_mask_video, overlay_mask=False)
++    # --- prompts ------------------------------------------------------------------------
++    sequence = None
++    if tp and prompt_rows and _text(values.get("prompt_source", "sequence")) == "sequence":
++        sequence, prompt_warnings = prompt_seq.compile_sequence(
++            prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
++        warnings.extend(prompt_warnings)
++    settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
++
++    # --- output: fps / interpolation, and what the TD side relies on -----------------------
++    settings.update(skip_video_creation=False, use_mask=use_mask_video, overlay_mask=False,
++                    store_frames_in_ram=True)
++    if tp:
++        settings["fps"] = tp["render_fps"]
++        if tp["strategy"] == "interpolate":
++            # Deforum only interpolates when frames are written to disk.
++            settings.update(frame_interpolation_engine=tp["engine"],
++                            frame_interpolation_x_amount=tp["interp_x"],
++                            frame_interpolation_keep_imgs=False,
++                            frame_interpolation_slow_mo_enabled=False,
++                            store_frames_in_ram=False)
++        else:
++            settings["frame_interpolation_engine"] = "None"
++        _loop_seeds(values, settings, tp, warnings)
+ 
+-    # Frame plan, capped by the real length of the videos on the share.
+-    mode = _text(values.get("animation_mode", "2D"))
+-    frame_mode = _text(values.get("video_frame_mode", "trim")) or "trim"
+-    ui_max = values.get("max_frames", 240)
+-    init_frames = mask_frames = None
+-    if frame_counter is not None:
+-        if mode == "Video Input":
+-            init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
+-        if use_mask_video:
+-            mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
+-    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
+-    settings["max_frames"] = plan["max_frames"]
++    settings["max_frames"] = total
+     for key in ("extract_from_frame", "extract_to_frame", "extract_nth_frame"):
+         if plan[key] is not None:
+             settings[key] = plan[key]
+@@ -195,7 +346,43 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     request = {"deforum_settings": settings}
+     if options:
+         request["options_overrides"] = options
+-    return {"request": request, "plan": plan, "warnings": warnings}
++    return {"request": request, "plan": plan, "tempo": tp, "schedules": compiled,
++            "warnings": warnings}
++
++
++def _loop_seeds(values, settings, tp, warnings):
++    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", True))):
++        return
++    behavior = settings.get("seed_behavior", "iter")
++    if behavior == "iter":
++        # Same seed for frame f and f + loop, so the overlap tail re-diffuses the head's noise.
++        settings["seed_behavior"] = "schedule"
++        settings["seed_schedule"] = "0:(s + t%%%d)" % tp["loop_frames"]
++    elif behavior in ("random", "ladder", "alternate"):
++        warnings.append("seed behaviour %r does not repeat per loop; use Iterate or Fixed for seamless loops"
++                        % behavior)
++
++
++def _is_constant_schedule(text):
++    body = schedules.as_schedule(text)
++    if "," in body or ":" not in body:
++        return False
++    try:
++        float(body.split(":", 1)[1].strip().strip("()"))
++        return True
++    except ValueError:
++        return False
++
++
++def _check_field(field, how, bounds, mode, slots, override, warnings):
++    moving = how in ("expression", "baked") or (bool(override) and not _is_constant_schedule(override))
++    if moving and field.dims and mode in ("2D", "3D") and field.dims != mode:
++        warnings.append("%s is %s-only; Deforum ignores it in %s mode" % (field.api, field.dims, mode))
++    if bounds and field.safe:
++        lo, hi = field.safe
++        if (lo is not None and bounds[0] < lo - 1e-9) or (hi is not None and bounds[1] > hi + 1e-9):
++            warnings.append("%s swings %.4g..%.4g, outside %s..%s" % (
++                field.api, bounds[0], bounds[1], "-inf" if lo is None else lo, "inf" if hi is None else hi))
+ 
+ 
+ def _count(counter, path, label, warnings):
+@@ -216,10 +403,19 @@ def summary(result):
+     s = result["request"]["deforum_settings"]
+     plan = result["plan"]
+     parts = [s.get("animation_mode", "?"), "%s frames" % s.get("max_frames")]
++    tp = result.get("tempo")
++    if tp:
++        parts.append("%g bpm %d beats @ %d fps" % (tp["bpm"], tp["loop_beats"], tp["render_fps"]))
++        if tp["strategy"] == "interpolate":
++            parts.append("%s x%d" % (tp["engine"], tp["interp_x"]))
+     if plan.get("extract_nth_frame", 1) not in (None, 1):
+         parts.append("stride %d" % plan["extract_nth_frame"])
+     if plan.get("limited_by") not in (None, "ui"):
+         parts.append("capped by %s" % plan["limited_by"])
+     parts.append("%sx%s" % (s.get("W"), s.get("H")))
++    moving = sorted(api for api, (how, sched) in result.get("schedules", {}).items()
++                    if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
++    if moving:
++        parts.append("mod: " + ", ".join(moving))
+     parts.append("CN1 %s" % ("on: " + str(s.get("cn_1_model")) if s.get("cn_1_enabled") else "off"))
+     return " | ".join(parts)
+diff --git a/scripts/tdeforum/prompt_seq.py b/scripts/tdeforum/prompt_seq.py
+new file mode 100644
+index 0000000..8789100
+--- /dev/null
++++ b/scripts/tdeforum/prompt_seq.py
+@@ -0,0 +1,131 @@
++"""Beat-indexed prompt sequence -> Deforum ``prompts`` dict.
++
++Deforum (no Parseq) *holds* each prompt until the next keyframe; it does not
++blend between them. A crossfade is therefore written as a composable-diffusion
++prompt with frame-dependent weights, active only during the fade window:
++
++    "<A> :`(E - t)/X.0` AND <B> :`(t - S)/X.0`"     for S <= t < E,  X = E - S
++
++Deforum replaces every letter ``t`` inside backticks with the frame number and
++evaluates the result, so these weights use only digits, t and + - * / ( ).
++A1111 then reads "text :weight AND text :weight". During a fade each frame is
++conditioned on both prompts (roughly doubles the UNet cost for those frames).
++
++With a seamless loop the last prompt fades back into the first one at the loop
++point, and the overlap tail past the loop repeats the head's keys, so the tail
++the loop player crossfades from looks like the start it fades into.
++"""
++
++from . import modulation
++
++
++def _clean(prompt, index, warnings):
++    text = " ".join(str(prompt).split())
++    if "`" in text:
++        warnings.append("prompt row %d: backticks removed (Deforum evaluates them as math)" % index)
++        text = text.replace("`", "")
++    if " AND " in text:
++        warnings.append("prompt row %d uses AND; crossfades into or out of it will misweight" % index)
++    return text
++
++
++def parse_rows(rows, default_xfade):
++    """rows: iterable of (beat, prompt, xfade) with strings or numbers; header/blank rows skipped."""
++    out, warnings = [], []
++    for i, row in enumerate(rows):
++        row = list(row) + ["", "", ""]
++        beat, prompt, xfade = str(row[0]).strip(), str(row[1]).strip(), str(row[2]).strip()
++        if not prompt:
++            continue
++        try:
++            beat = float(beat)
++        except ValueError:
++            continue  # header row ("beat | prompt | xfade") or junk
++        try:
++            xfade = float(xfade) if xfade else float(default_xfade)
++        except ValueError:
++            warnings.append("prompt row %d: crossfade %r is not a number; using %g" % (i, xfade, default_xfade))
++            xfade = float(default_xfade)
++        out.append((beat, _clean(prompt, i, warnings), max(0.0, xfade)))
++    out.sort(key=lambda r: r[0])
++    return out, warnings
++
++
++def _blend(a, b, start, end):
++    width = end - start
++    # %d.0: numexpr floor-divides int / int inside Deforum (see modulation.py).
++    return "%s :`(%d - t)/%d.0` AND %s :`(t - %d)/%d.0`" % (a, end, width, b, start, width)
++
++
++def compile_sequence(rows, plan, default_xfade=1.0):
++    """Return (prompts dict, warnings). rows as for parse_rows; plan from tempo.plan()."""
++    entries, warnings = parse_rows(rows, default_xfade)
++    if not entries:
++        return None, warnings
++    fpb, loop = plan["fpb"], plan["loop_frames"]
++    total, seamless = plan["max_frames"], plan["seamless"]
++
++    keyed = []
++    for beat, prompt, xfade in entries:
++        frame = int(round(beat * fpb))
++        if frame >= loop:
++            warnings.append("prompt at beat %g starts after the %d-beat loop; ignored" % (beat, plan["loop_beats"]))
++            continue
++        if keyed and keyed[-1][0] == frame:
++            warnings.append("two prompts on frame %d (beat %g); the later row wins" % (frame, beat))
++            keyed[-1] = (frame, prompt, xfade)
++            continue
++        keyed.append((frame, prompt, xfade))
++    if not keyed:
++        return None, warnings
++    if keyed[0][0] != 0:
++        lead = keyed[-1] if seamless else keyed[0]
++        keyed.insert(0, (0, lead[1], lead[2]))
++
++    # One loop worth of keys: {frame: (prompt,) | (a, b, width)}
++    head = {}
++    for i, (start, prompt, xfade) in enumerate(keyed):
++        head[start] = (prompt,)
++        if i + 1 < len(keyed):
++            end, nxt = keyed[i + 1][0], keyed[i + 1][1]
++        elif seamless:
++            end, nxt = loop, keyed[0][1]
++        else:
++            continue
++        width = min(int(round(xfade * fpb)), end - start)
++        if width > 0 and nxt != prompt:
++            head[end - width] = (prompt, nxt, width)
++
++    def render(frame, entry):
++        if len(entry) == 1:
++            return entry[0]
++        a, b, width = entry
++        return _blend(a, b, frame, frame + width)
++
++    prompts = dict((f, render(f, e)) for f, e in head.items())
++    if seamless:
++        # The tail past the loop repeats the head (fade windows re-anchored).
++        prompts[loop] = keyed[0][1]
++        for frame, entry in sorted(head.items()):
++            shifted = frame + loop
++            if shifted >= total:
++                break
++            prompts[shifted] = render(shifted, entry)
++    return dict((str(f), prompts[f]) for f in sorted(prompts)), warnings
++
++
++def rows_from_prompts(prompts, fpb):
++    """Seed rows from a legacy {"frame": "prompt"} dict (prompt.json)."""
++    rows = []
++    for key, prompt in sorted(prompts.items(), key=lambda kv: float(kv[0]) if _num(kv[0]) else 0):
++        frame = float(key) if _num(key) else 0.0
++        rows.append((modulation.fmt(round(frame / fpb * 4) / 4.0), prompt, ""))
++    return rows
++
++
++def _num(text):
++    try:
++        float(text)
++        return True
++    except (TypeError, ValueError):
++        return False
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 57aa67f..75f0137 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -1,37 +1,60 @@
+-"""Single source of truth for the Deforum_UI custom parameters.
++"""Single source of truth for the Deforum COMP's custom parameters.
+ 
+-build_master_ui.py builds the TouchDesigner pages from FIELDS, and payload.py
+-reads the same FIELDS to decide what is sent to Deforum and under which key.
+-Add a field here once and it appears in both places.
++build_master_ui.py builds the TouchDesigner pages of the ``deforum`` Base COMP
++from FIELDS, and payload.py reads the same FIELDS to decide what is sent to
++Deforum and under which key. Add a field here once and it appears in both.
+ 
+ Field.target:
+     "deforum"  -> deforum_settings[<key>]          (Deforum only reads keys it knows)
+     "options"  -> options_overrides[<key>]         (A1111 opts for the batch)
+-    None       -> TouchDesigner-only (pipeline controls, status, ...)
++    None       -> TouchDesigner-only (tempo, pipeline controls, mod matrix, ...)
++
++Kinds:
++    MOD       modulatable schedule. TD gets a float <Name> (the base value, which
++              you can keyframe, export to or bind) and a string <Name>raw (a
++              hand-written Deforum schedule that, when not empty, is sent verbatim).
++              payload.py adds the Mod Matrix and the Mod CHOP on top of the base.
++    SCHEDULE  plain string schedule; numbers are wrapped as 0:(v).
+ 
+ TD parameter names are derived from the API name exactly as the original
+-build_master_ui.py did (``translation_z`` -> ``Translationz``), so existing
+-CHOP exports and expressions keep working.
++build_master_ui.py did (``translation_z`` -> ``Translationz``), so values and
++expressions from the old Deforum_UI migrate by name.
++
++Defaults ("baselines"): motion is neutral (no camera movement); every other
++value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
++CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ """
+ 
++from . import modulation, tempo
++
++PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+-PAGE_MOTION = "Motion (2D/3D)"
+-PAGE_SCHEDULES = "Schedules"
+-PAGE_PERSPECTIVE = "Perspective 3D"
++PAGE_PROMPTS = "Prompts"
++PAGE_MOTION2D = "Motion 2D"
++PAGE_MOTION3D = "Motion 3D"
++PAGE_CAMERA = "Camera & Depth"
++PAGE_DIFFUSION = "Diffusion"
++PAGE_NOISE = "Noise & Color"
++PAGE_FLOW = "Flow & Anti-blur"
++PAGE_MODS = "Mod Matrix"
+ PAGE_CN1 = "ControlNet Unit 1"
+-PAGE_ADVANCED = "Advanced Setup"
+ PAGE_PIPELINE = "Pipeline"
+ 
+-PAGE_ORDER = [PAGE_GLOBALS, PAGE_MOTION, PAGE_SCHEDULES, PAGE_PERSPECTIVE,
+-              PAGE_CN1, PAGE_ADVANCED, PAGE_PIPELINE]
++PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
++              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
++              PAGE_CN1, PAGE_PIPELINE]
+ 
+ # Kinds understood by build_master_ui.py and payload.py
+ STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
+ SCHEDULE = "schedule"      # string par; plain numbers are wrapped as 0:(v)
++MOD = "mod"                # float base + <Name>raw override; modulated by the Mod Matrix / CHOP
+ SEED = "seed"              # string par (seeds overflow TD int pars); sent as int
+ CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
+ STATUS = "status"          # read-only string written by the controller
+ 
++RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
++MOD_SLOTS = 8
++
+ 
+ def td_name(api_name):
+     """API name -> TouchDesigner custom parameter name (original naming rule)."""
+@@ -51,7 +74,7 @@ def _default_label(api_name):
+         return "Width"
+     if api_name == "H":
+         return "Height"
+-    label = api_name.replace("_", " ").title()
++    label = api_name.replace("_schedule", "").replace("_", " ").title()
+     if label.startswith("Cn 1 "):
+         label = label[len("Cn 1 "):]
+     return label
+@@ -59,10 +82,11 @@ def _default_label(api_name):
+ 
+ class Field(object):
+     __slots__ = ("api", "default", "page", "kind", "menu", "labels", "label",
+-                 "target", "key", "expr", "norm", "as_schedule")
++                 "target", "key", "expr", "norm", "as_schedule", "safe", "dims")
+ 
+     def __init__(self, api, default, page, kind, menu=None, labels=None, label=None,
+-                 target="deforum", key=None, expr=None, norm=None, as_schedule=False):
++                 target="deforum", key=None, expr=None, norm=None, as_schedule=False,
++                 safe=None, dims=None):
+         self.api = api
+         self.default = default
+         self.page = page
+@@ -75,75 +99,206 @@ class Field(object):
+         self.expr = expr
+         self.norm = norm
+         self.as_schedule = as_schedule   # numeric par sent as a 0:(v) schedule
++        self.safe = safe                 # (lo, hi) Deforum-sane range for warnings; None = open
++        self.dims = dims                 # "2D" / "3D" when Deforum only uses it in that mode
+ 
+     @property
+     def td_name(self):
+         return td_name(self.api)
+ 
++    @property
++    def raw_td_name(self):
++        return self.td_name + RAW_SUFFIX
++
+     def __repr__(self):
+         return "Field(%s -> %s)" % (self.api, self.td_name)
+ 
+ 
+ F = Field
+-G, MO, SC, PE, CN, AD, PL = (PAGE_GLOBALS, PAGE_MOTION, PAGE_SCHEDULES,
+-                             PAGE_PERSPECTIVE, PAGE_CN1, PAGE_ADVANCED, PAGE_PIPELINE)
++TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
++    PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
++    PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
+ 
+ COMFY_PREPROCESSORS = [
+     "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
+     "LineArtPreprocessor", "CannyEdgePreprocessor", "HEDPreprocessor",
+     "PiDiNetPreprocessor", "M-LSDPreprocessor",
+ ]
++FLOW_METHODS = ["None", "RAFT", "DIS Medium", "DIS Fine", "Farneback"]
++DEPTH_ALGORITHMS = ["Midas-3-Hybrid", "Midas+AdaBins (old)", "Zoe+AdaBins (old)", "AdaBins", "Zoe", "Leres"]
++
+ 
+-_SCHEDULE_FIELDS = [
+-    # (api, default, page)
+-    ("zoom", "0:(1.0)", MO), ("angle", "0:(0)", MO),
+-    ("translation_x", "0:(0)", MO), ("translation_y", "0:(0)", MO), ("translation_z", "0:(0)", MO),
+-    ("rotation_3d_x", "0:(0)", MO), ("rotation_3d_y", "0:(0)", MO), ("rotation_3d_z", "0:(0)", MO),
+-    ("transform_center_x", "0:(0.5)", MO), ("transform_center_y", "0:(0.5)", MO),
+-    ("noise_schedule", "0: (0.065)", SC), ("strength_schedule", "0: (0.8)", SC),
+-    ("contrast_schedule", "0: (1.0)", SC), ("cfg_scale_schedule", "0: (2.0)", SC),
+-    ("perspective_flip_theta", "0:(0)", PE), ("perspective_flip_phi", "0:(0)", PE),
+-    ("perspective_flip_gamma", "0:(0)", PE), ("perspective_flip_fv", "0:(50)", PE),
+-    ("fov_schedule", "0: (70)", PE), ("near_schedule", "0: (200)", PE),
+-    ("far_schedule", "0: (10000)", PE),
++def _mod(api, default, page, norm, label=None, safe=None, dims=None):
++    return F(api, default, page, MOD, norm=norm, label=label, safe=safe, dims=dims)
++
++
++# (api, baseline, page, slider range, label, safe range, dims)
++_MODS = [
++    # Motion 2D (zoom/angle/centre are 2D-only; translation x/y move the camera in 2D and 3D)
++    _mod("zoom", 1.0, M2, (0.9, 1.1), "Zoom (2D, 1 = still)", (0.01, None), "2D"),
++    _mod("angle", 0.0, M2, (-10, 10), "Angle (2D, deg/frame)", None, "2D"),
++    _mod("transform_center_x", 0.5, M2, (0, 1), "Transform Center X (2D)", None, "2D"),
++    _mod("transform_center_y", 0.5, M2, (0, 1), "Transform Center Y (2D)", None, "2D"),
++    _mod("translation_x", 0.0, M2, (-10, 10), "Translation X (2D + 3D)"),
++    _mod("translation_y", 0.0, M2, (-10, 10), "Translation Y (2D + 3D)"),
++    # Motion 3D
++    _mod("translation_z", 0.0, M3, (-10, 10), "Translation Z (3D push)", None, "3D"),
++    _mod("rotation_3d_x", 0.0, M3, (-3, 3), "Rotation 3D X (tilt, deg/frame)", None, "3D"),
++    _mod("rotation_3d_y", 0.0, M3, (-3, 3), "Rotation 3D Y (pan, deg/frame)", None, "3D"),
++    _mod("rotation_3d_z", 0.0, M3, (-3, 3), "Rotation 3D Z (roll, deg/frame)", None, "3D"),
++    # Camera & Depth
++    _mod("fov_schedule", 70.0, CA, (20, 120), "FOV (3D)", (1, 179), "3D"),
++    _mod("near_schedule", 200.0, CA, (1, 1000), "Near (3D)", (0.001, None), "3D"),
++    _mod("far_schedule", 10000.0, CA, (1000, 20000), "Far (3D)", (0.001, None), "3D"),
++    _mod("aspect_ratio_schedule", 1.0, CA, (0.5, 2), "Aspect Ratio (3D)", (0.01, None), "3D"),
++    _mod("perspective_flip_theta", 0.0, CA, (-90, 90), "Flip Theta"),
++    _mod("perspective_flip_phi", 0.0, CA, (-90, 90), "Flip Phi"),
++    _mod("perspective_flip_gamma", 0.0, CA, (-90, 90), "Flip Gamma"),
++    _mod("perspective_flip_fv", 53.0, CA, (10, 120), "Flip FV", (0.001, None)),
++    # Diffusion
++    _mod("strength_schedule", 0.65, DI, (0, 1), "Strength (keep of previous frame)", (0, 1)),
++    _mod("noise_schedule", 0.065, DI, (0, 0.2), "Noise", (0, 1)),
++    _mod("contrast_schedule", 1.0, DI, (0.8, 1.2), "Contrast", (0, None)),
++    _mod("cfg_scale_schedule", 7.0, DI, (1, 15), "CFG Scale", (0, None)),
++    _mod("steps_schedule", 25.0, DI, (1, 50), "Steps (needs Enable Steps Scheduling)", (1, None)),
++    _mod("noise_multiplier_schedule", 1.05, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
++    _mod("subseed_strength_schedule", 0.0, DI, (0, 1), "Subseed Strength (needs Enable Subseed)", (0, 1)),
++    _mod("ddim_eta_schedule", 0.0, DI, (0, 1), "DDIM Eta (needs Enable)", (0, None)),
++    _mod("ancestral_eta_schedule", 1.0, DI, (0, 1.5), "Ancestral Eta (needs Enable)", (0, None)),
++    _mod("clipskip_schedule", 2.0, DI, (1, 4), "CLIP Skip (needs Enable)", (1, 12)),
++    # Flow & anti-blur (kernel is a plain odd INT: OpenCV rejects even blur sizes)
++    _mod("cadence_flow_factor_schedule", 1.0, FL, (0, 2), "Cadence Flow Factor", (0, None)),
++    _mod("redo_flow_factor_schedule", 1.0, FL, (0, 2), "Redo Flow Factor", (0, None)),
++    _mod("amount_schedule", 0.1, FL, (0, 1), "Anti-blur Amount", (0, None)),
++    _mod("sigma_schedule", 1.0, FL, (0.1, 5), "Anti-blur Sigma", (0, None)),
++    _mod("threshold_schedule", 0.0, FL, (0, 1), "Anti-blur Threshold", (0, None)),
+ ]
+-SCHEDULE_APIS = [api for api, _d, _p in _SCHEDULE_FIELDS]
++MOD_APIS = [f.api for f in _MODS]
++MOD_LABELS = [f.label for f in _MODS]
++SCHEDULE_APIS = MOD_APIS   # bake / preview targets (kept for older callers)
++
++_SLOT_TARGETS = ["zoom", "translation_z", "strength_schedule", "noise_schedule",
++                 "rotation_3d_y", "angle", "cfg_scale_schedule", "translation_x"]
++
++
++def _slot_fields(n):
++    p = "mod%d_" % n
++    return [
++        F(p + "active", False, MM, TOGGLE, label="Slot %d On" % n, target=None),
++        F(p + "target", _SLOT_TARGETS[(n - 1) % len(_SLOT_TARGETS)], MM, MENU, menu=MOD_APIS,
++          labels=MOD_LABELS, label="Slot %d Target" % n, target=None),
++        F(p + "shape", "sine", MM, MENU, menu=modulation.SHAPE_NAMES, labels=modulation.SHAPE_LABELS,
++          label="Slot %d Shape" % n, target=None),
++        F(p + "beats", 1.0, MM, FLOAT, norm=(0.25, 16), label="Slot %d Cycle (beats)" % n, target=None),
++        F(p + "depth", 0.0, MM, FLOAT, norm=(-1, 1), label="Slot %d Depth" % n, target=None),
++        F(p + "phase", 0.0, MM, FLOAT, norm=(0, 1), label="Slot %d Phase (cycles)" % n, target=None),
++        F(p + "sharpness", 4.0, MM, FLOAT, norm=(0.5, 16), label="Slot %d Sharpness" % n, target=None),
++    ]
++
+ 
+ FIELDS = [
+-    # --- Globals --------------------------------------------------------------
++    # --- Tempo -----------------------------------------------------------------
++    F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
++    F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
++    F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
++    F("out_fps", 60, TE, INT, norm=(24, 60), label="Output FPS", target=None),
++    F("render_strategy", "cadence", TE, MENU, menu=tempo.STRATEGIES, labels=tempo.STRATEGY_LABELS,
++      label="Render Strategy", target=None),
++    F("render_fps", "30", TE, MENU, menu=tempo.RENDER_FPS_CHOICES, label="Render FPS (interpolate)",
++      target=None),
++    F("interp_engine", "RIFE v4.6", TE, MENU, menu=tempo.INTERP_ENGINES, label="Interpolation Engine",
++      target=None),
++    F("diffusion_cadence", 4, TE, INT, norm=(1, 8), label="Diffusion Cadence (diffuse every Nth frame)"),
++    F("seamless_loop", True, TE, TOGGLE, label="Seamless Loop", target=None),
++    F("loop_overlap_beats", 1.0, TE, FLOAT, norm=(0, 4), label="Loop Overlap (beats, crossfaded)", target=None),
++    F("loop_seeds", True, TE, TOGGLE, label="Loop Seeds (repeat seeds each loop)", target=None),
++    F("length_source", "tempo", TE, MENU, menu=["tempo", "manual"],
++      labels=["Tempo (loop length)", "Manual (Max Frames)"], target=None),
++    F("max_frames", 240, TE, INT, norm=(1, 1000), label="Max Frames (manual)"),
++    F("tempo_info", "", TE, STATUS, label="Plan", target=None),
++
++    # --- Globals ---------------------------------------------------------------
+     F("sd_model_checkpoint", "0", G, CHECKPOINT, label="Model (index / schedule)"),
+     F("sd_vae", "Automatic", G, STR, label="VAE", target="options"),
+     F("W", 1024, G, INT, norm=(0, 1920)),
+     F("H", 576, G, INT, norm=(0, 1920)),
+     F("steps", 10, G, INT, norm=(1, 50)),
+-    F("max_frames", 240, G, INT, norm=(0, 1000), expr="me.time.end"),
+     F("sampler", "LCM", G, STR),
+-    F("animation_mode", "Video Input", G, MENU, menu=["2D", "3D", "Video Input", "Interpolation"]),
+-    F("seed_behavior", "fixed", G, MENU,
++    F("scheduler", "Automatic", G, STR),
++    F("animation_mode", "3D", G, MENU, menu=["2D", "3D", "Video Input", "Interpolation"]),
++    F("seed_behavior", "iter", G, MENU,
+       menu=["iter", "fixed", "random", "ladder", "alternate", "schedule"],
+       labels=["Iterate (+1)", "Fixed", "Random", "Ladder", "Alternate", "Schedule"]),
+-    F("seed", "8675309", G, SEED),
++    F("seed", "-1", G, SEED),
+     # Deforum ignores "n_prompt"; the API reads animation_prompts_negative.
+     F("n_prompt", "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark",
+       G, STR, label="Negative Prompt", key="animation_prompts_negative"),
+-    F("use_mask_video", True, G, TOGGLE),
++    F("strength", 0.8, G, FLOAT, norm=(0, 1), label="Init Strength (first frame)"),
++    F("use_mask_video", False, G, TOGGLE),
+     F("video_init_path", "/opt/a1111/td_inputs/comfy_videos/archive/taichi_portrait.mp4", G, STR),
+     F("video_mask_path", "/opt/a1111/td_masks/mask_01.mov", G, STR),
+     F("video_frame_mode", "trim", G, MENU, menu=["trim", "stride"],
+       labels=["Trim (Normal Speed)", "Stride (Timelapse)"], target=None),
+ 
+-    # --- Motion -------------------------------------------------------------------
+-    F("border", "replicate", MO, MENU, menu=["replicate", "wrap", "zeros"],
+-      labels=["Clamp / Hold (Replicate)", "Wrap / Tile", "Black (Zeros)"]),
+-] + [F(api, d, p, SCHEDULE) for api, d, p in _SCHEDULE_FIELDS if p == MO] + [
++    # --- Prompts ---------------------------------------------------------------
++    F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
++      labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
++    F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
++
++    # --- Motion 2D -------------------------------------------------------------
++    F("border", "replicate", M2, MENU, menu=["replicate", "wrap"],
++      labels=["Clamp / Hold (Replicate)", "Wrap / Tile"]),
++] + [f for f in _MODS if f.page == M2] + [
++
++    # --- Motion 3D -------------------------------------------------------------
++    F("padding_mode", "border", M3, MENU, menu=["border", "reflection", "zeros"],
++      labels=["Border (smear)", "Reflection (mirror)", "Zeros (black)"]),
++    F("sampling_mode", "bicubic", M3, MENU, menu=["bicubic", "bilinear", "nearest"]),
++] + [f for f in _MODS if f.page == M3] + [
++
++    # --- Camera & Depth ---------------------------------------------------------
++    F("use_depth_warping", True, CA, TOGGLE),
++    F("depth_algorithm", "Midas-3-Hybrid", CA, MENU, menu=DEPTH_ALGORITHMS),
++    F("midas_weight", 0.2, CA, FLOAT, norm=(0, 1)),
++    # Without this toggle Deforum ignores every perspective_flip_* schedule (2D and 3D).
++    F("enable_perspective_flip", False, CA, TOGGLE),
++] + [f for f in _MODS if f.page == CA] + [
++
++    # --- Diffusion ---------------------------------------------------------------
++    F("enable_steps_scheduling", False, DI, TOGGLE),
++    F("enable_noise_multiplier_scheduling", True, DI, TOGGLE),
++    F("enable_subseed_scheduling", False, DI, TOGGLE),
++    F("subseed_schedule", "0:(1)", DI, SCHEDULE),
++    F("enable_ddim_eta_scheduling", False, DI, TOGGLE, label="Enable DDIM Eta Scheduling"),
++    F("enable_ancestral_eta_scheduling", False, DI, TOGGLE),
++    F("enable_clipskip_scheduling", False, DI, TOGGLE, label="Enable CLIP Skip Scheduling"),
++] + [f for f in _MODS if f.page == DI] + [
++
++    # --- Noise & Color -----------------------------------------------------------
++    F("noise_type", "perlin", NO, MENU, menu=["perlin", "uniform"]),
++    F("perlin_w", 8, NO, INT, norm=(1, 16), label="Perlin W"),
++    F("perlin_h", 8, NO, INT, norm=(1, 16), label="Perlin H"),
++    F("perlin_octaves", 4, NO, INT, norm=(1, 7)),
++    F("perlin_persistence", 0.5, NO, FLOAT, norm=(0, 1)),
++    F("color_coherence", "LAB", NO, MENU, menu=["None", "HSV", "LAB", "RGB", "Video Input", "Image"]),
++    F("color_force_grayscale", False, NO, TOGGLE),
++    # Deforum's API turns this ON whenever the key is missing (deprecation_utils), which it
++    # was in every earlier payload; kept on so existing looks don't shift. Deforum's UI
++    # default (and recommendation for coherence) is off.
++    F("legacy_colormatch", True, NO, TOGGLE, label="Legacy Colormatch (earlier renders used it)"),
+ 
+-    # --- Schedules -----------------------------------------------------------------
+-] + [F(api, d, p, SCHEDULE) for api, d, p in _SCHEDULE_FIELDS if p == SC] + [
++    # --- Flow & Anti-blur ----------------------------------------------------------
++    F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),
++    F("optical_flow_redo_generation", "None", FL, MENU, menu=FLOW_METHODS),
++    F("kernel_schedule", 5, FL, INT, norm=(1, 15), label="Anti-blur Kernel (odd)", as_schedule=True),
++] + [f for f in _MODS if f.page == FL] + [
+ 
+-    # --- Perspective 3D ----------------------------------------------------------
+-    # Without this toggle Deforum ignores every perspective_flip_* schedule.
+-    F("enable_perspective_flip", False, PE, TOGGLE),
+-] + [F(api, d, p, SCHEDULE) for api, d, p in _SCHEDULE_FIELDS if p == PE] + [
++    # --- Mod Matrix ----------------------------------------------------------------
++    F("chop_mode", "add", MM, MENU, menu=modulation.CHOP_MODES,
++      labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
++    F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
++    F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
++] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
+ 
+     # --- ControlNet Unit 1 ---------------------------------------------------------
+     F("cn_1_enabled", False, CN, TOGGLE),
+@@ -169,34 +324,44 @@ FIELDS = [
+     F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),
+     F("comfy_preprocessor", "PiDiNetPreprocessor", CN, MENU, menu=COMFY_PREPROCESSORS, target=None),
+ 
+-    # --- Advanced -------------------------------------------------------------------
+-    F("strength", 0.8, AD, FLOAT, norm=(0, 1)),
+-    F("diffusion_cadence", 2, AD, INT, norm=(1, 8)),
+-    F("optical_flow_cadence", "RAFT", AD, MENU,
+-      menu=["None", "RAFT", "DIS Medium", "DIS Fine", "Farneback"]),
+-
+     # --- Pipeline (TouchDesigner only) ----------------------------------------------
+     F("pipeline_status", "idle", PL, STATUS, label="Status", target=None),
+     F("auto_load", True, PL, TOGGLE, label="Auto-load finished render", target=None),
+     F("force_preprocess", False, PL, TOGGLE, label="Force ComfyUI re-preprocess", target=None),
+-    F("bake_points", 32, PL, INT, label="Bake points (0 = every frame)", norm=(0, 256), target=None),
+-    F("bake_target", "none", PL, MENU, label="Bake into",
+-      menu=["none"] + SCHEDULE_APIS,
+-      labels=["bake_out DAT only"] + [a.replace("_", " ").title() for a in SCHEDULE_APIS],
+-      target=None),
++    F("loop_out_frames", "0", PL, STATUS, label="Loaded loop length (frames)", target=None),
++    F("loop_out_overlap", "0", PL, STATUS, label="Loaded loop overlap (frames)", target=None),
++    F("loop_out_rate", "1", PL, STATUS, label="Loaded file frames per output frame", target=None),
++    F("loop_offset", 0, PL, INT, norm=(0, 480), label="Loop Player Offset (frames)", target=None),
+ ]
+ 
+ BY_API = dict((f.api, f) for f in FIELDS)
+ BY_TD = dict((f.td_name, f) for f in FIELDS)
++MOD_FIELDS = [f for f in FIELDS if f.kind == MOD]
+ 
+-# TD parameter names that older builds created but which do nothing in Deforum.
++# TD parameter names that older builds created but which do nothing now.
+ # build_master_ui.py drops them; listed so the rebuild report can mention them.
+ RETIRED_TD_NAMES = {
+     "Scale": "not a Deforum key (CFG comes from cfg_scale_schedule)",
+     "Cfgscale": "not a Deforum key (CFG comes from cfg_scale_schedule)",
++    "Baketarget": "replaced by the Mod CHOP: a channel named after a parameter modulates it",
+ }
+ 
+ 
+ def cn_fields(unit):
+     prefix = "cn_%d_" % unit
+     return [f for f in FIELDS if f.api.startswith(prefix)]
++
++
++def slot_fields(n):
++    prefix = "mod%d_" % n
++    return [f for f in FIELDS if f.api.startswith(prefix)]
++
++
++def all_td_names():
++    """Every TD parameter the COMP has (MOD fields contribute two)."""
++    names = []
++    for f in FIELDS:
++        names.append(f.td_name)
++        if f.kind == MOD:
++            names.append(f.raw_td_name)
++    return names
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 69533e1..acfccee 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -5,7 +5,7 @@ Entry points (each called from a thin DAT in scripts/):
+     queue(root)             Queue button            deforum_payload_exec.py
+     tick(root)              timer1 cycle pulse      chopexec_poll.py
+     on_response(root, ...)  all three webclients    webclient2_callbacks.py
+-    bake(root)              bake button             bake_exec.py
++    bake(root) / preview    bake button             bake_exec.py  (schedule preview, no POST)
+     load_latest(root)       LoadVideo button        loadvideo_exec.py
+     export_payload(root)    dry run, no POST        export_deforum_payload.py
+     preprocess_only(root)   ComfyUI only            comfy_preprocessor_payload_exec.py
+@@ -27,8 +27,8 @@ import traceback
+ from . import comfy
+ from . import config
+ from . import payload
+-from . import schedules
+ from . import schema
++from . import tempo
+ 
+ STATE_KEY = "tdeforum_pipeline"
+ CACHE_KEY = "tdeforum_preproc_cache"
+@@ -45,7 +45,8 @@ LOST_CONTACT_S = 120.0
+ 
+ # Operators this controller talks to, relative to root.
+ NAMES = {
+-    "ui": "Deforum_UI",
++    "ui": "deforum",              # the Deforum Base COMP (build_master_ui.py)
++    "legacy_ui": "Deforum_UI",    # read only when the COMP has not been built yet
+     "deforum": "webclient_deforum",
+     "progress": "webclient_progress",
+     "comfy": "webclient_comfyui",
+@@ -53,12 +54,18 @@ NAMES = {
+     "models": "available_models",
+     "movie": "moviefilein1",
+     "folder": "folder_monitor",
+-    "wave": "wave_generator",
+-    "bake_out": "bake_out",
+-    "quantize": "quantize_settings",
++}
++# Inside the Deforum COMP
++INNER = {
++    "prompt_seq": "prompt_seq",       # table: beat | prompt | xfade
++    "mod_in": "in_mod",               # In CHOP = COMP input 1 (the Mod CHOP)
++    "preview": "schedule_preview",    # table written by preview()
++    "head": "loop_head",              # loop player: Movie File In at the playhead
++    "tail": "loop_tail",              # loop player: Movie File In one loop later
+ }
+ 
+ RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
++INTERP_FALLBACK_S = 30.0
+ 
+ 
+ def log(message):
+@@ -68,7 +75,23 @@ def log(message):
+ # --------------------------------------------------------------------------- state
+ 
+ def _op(root, key):
+-    return root.op(NAMES[key])
++    found = root.op(NAMES[key])
++    if found is None and key == "ui":
++        found = root.op(NAMES["legacy_ui"])
++    return found
++
++
++def _inner(ui, key):
++    return ui.op(INNER[key]) if ui is not None and hasattr(ui, "op") else None
++
++
++def _set_par(op_, name, value):
++    par = getattr(op_.par, name, None) if op_ is not None else None
++    if par is not None:
++        try:
++            par.val = value
++        except Exception:
++            pass
+ 
+ 
+ def _state(root):
+@@ -81,13 +104,7 @@ def _save(root, st):
+ 
+ 
+ def _set_status(root, text):
+-    ui = _op(root, "ui")
+-    par = getattr(ui.par, "Pipelinestatus", None) if ui is not None else None
+-    if par is not None:
+-        try:
+-            par.val = text
+-        except Exception:
+-            pass
++    _set_par(_op(root, "ui"), "Pipelinestatus", text)
+ 
+ 
+ def _finish(root, st, message, error=False):
+@@ -130,9 +147,37 @@ def read_ui(ui):
+         par = getattr(ui.par, field.td_name, None)
+         if par is not None:
+             values[field.api] = par.eval()
++        if field.kind == schema.MOD:
++            raw = getattr(ui.par, field.raw_td_name, None)
++            if raw is not None:
++                values[payload.raw_key(field.api)] = raw.eval()
+     return values
+ 
+ 
++def read_prompt_rows(ui):
++    """prompt_seq table -> [[beat, prompt, xfade], ...] (None when the COMP has no table)."""
++    table = _inner(ui, "prompt_seq")
++    if table is None:
++        return None
++    rows = []
++    for r in range(table.numRows):
++        rows.append([str(table[r, c].val) for c in range(table.numCols)])
++    return rows
++
++
++def read_mod_chop(ui, values):
++    """Mod CHOP channels -> {name: [samples]} (None when there is no CHOP or no channels)."""
++    if ui is None:
++        return None
++    path = str(values.get("chop_path", "") or "").strip()
++    chop = ui.op(path) if path else _inner(ui, "mod_in")
++    if path and chop is None:
++        log("Mod CHOP %s not found" % path)
++    if chop is None or not getattr(chop, "numChans", 0):
++        return None
++    return dict((chan.name, [float(v) for v in chan.vals]) for chan in chop.chans())
++
++
+ def read_models(root):
+     table = _op(root, "models")
+     models = {}
+@@ -181,14 +226,27 @@ def _frame_counter(cfg):
+ def build(root, cfg):
+     ui = _op(root, "ui")
+     if ui is None:
+-        raise RuntimeError("Deforum_UI not found in %s" % root.path)
++        raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
+     values = read_ui(ui)
+     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
+                                    _frame_counter(cfg), cfg.get("default_checkpoint",
+-                                                                payload.DEFAULT_CHECKPOINT))
++                                                                payload.DEFAULT_CHECKPOINT),
++                                   prompt_rows=read_prompt_rows(ui),
++                                   chop=read_mod_chop(ui, values))
++    if result.get("tempo"):
++        _set_par(ui, "Tempoinfo", tempo.describe(result["tempo"]))
+     return values, result
+ 
+ 
++def _expectation(result):
++    """What the finished render will look like on disk / how to loop it (kept in state)."""
++    tp = result.get("tempo")
++    if not tp:
++        return None
++    return {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
++            "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
++
++
+ def _write_runtime_json(cfg, name, data):
+     try:
+         os.makedirs(cfg["runtime_dir"], exist_ok=True)
+@@ -305,7 +363,8 @@ def _submit_deforum(root, cfg, result, st):
+     _op(root, "deforum").request(config.deforum_url(cfg, "/deforum_api/batches"), "POST",
+                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
+     now = time.time()
+-    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now})
++    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
++                 "expect": _expectation(result)})
+     _set_status(root, "render: submitted")
+     log("render submitted: " + payload.summary(result))
+ 
+@@ -382,7 +441,8 @@ def _on_deforum_submit(root, st, code, body, text):
+         now = time.time()
+         _save(root, {"state": DEFORUM_RUNNING, "job_id": body["job_ids"][0],
+                      "batch_id": body.get("batch_id"), "submitted": st.get("submitted", now),
+-                     "updated": now, "last_phase": None, "last_pct": -100})
++                     "updated": now, "last_phase": None, "last_pct": -100,
++                     "expect": st.get("expect")})
+         _set_status(root, "render: queued")
+         log("Deforum accepted job %s" % body["job_ids"][0])
+     else:
+@@ -413,8 +473,10 @@ def _on_progress(root, cfg, st, code, body):
+         if not outdir or not stamp:
+             _fail(root, st, "Deforum finished but reported no outdir/timestring")
+             return
+-        video = "%s/%s.mp4" % (outdir.rstrip("/"), stamp)
++        plain = "%s/%s.mp4" % (outdir.rstrip("/"), stamp)
++        video = render_path(outdir, stamp, st.get("expect"))
+         st.update(state=WAITING_FILE, video=video, video_share=config.to_share(cfg, video),
++                  fallback_share=config.to_share(cfg, plain) if video != plain else None,
+                   waiting_since=time.time(), last_size=-1)
+         _save(root, st)
+         log("render done in %.0fs: %s" % (float(body.get("execution_time") or 0),
+@@ -475,30 +537,67 @@ def _on_comfy(root, cfg, st, code, body, text):
+         _finish(root, st, "preprocessed %s" % filename)
+ 
+ 
++def render_path(outdir, stamp, expect):
++    """Container path of the file to load: <ts>_RIFE_xN.mp4 / <ts>_FILM_xN.mp4 or <ts>.mp4.
++
++    Deforum writes interpolated videos next to the plain one in the batch outdir
++    (frame_interpolation.py / rife inference_video.py at 5d63a339).
++    """
++    outdir = outdir.rstrip("/")
++    if expect and expect.get("engine"):
++        tag = "RIFE" if expect["engine"].startswith("RIFE") else "FILM"
++        return "%s/%s_%s_x%d.mp4" % (outdir, stamp, tag, expect["x"])
++    return "%s/%s.mp4" % (outdir, stamp)
++
++
+ def _try_load(root, cfg, st):
+     path = st.get("video_share")
+     if not path:
+         _finish(root, st, "render saved to %s (not on the share, not loaded)" % st.get("video"))
+         return
++    waited = time.time() - st.get("waiting_since", time.time())
++    fallback = st.get("fallback_share")
++    if fallback and not os.path.isfile(path) and waited > INTERP_FALLBACK_S and os.path.isfile(fallback):
++        log("no interpolated file after %ds; loading the un-interpolated render "
++            "(check the container log for RIFE/FILM errors)" % waited)
++        st.update(video_share=fallback, fallback_share=None, last_size=-1, interp_missing=True)
++        path = fallback
+     size = os.path.getsize(path) if os.path.isfile(path) else -1
+     # Loaded once the file exists and its size held steady for one poll interval.
+     if size > 0 and size == st.get("last_size"):
+         ui = _op(root, "ui")
+         auto = getattr(ui.par, "Autoload", None) if ui is not None else None
+         if auto is None or auto.eval():
+-            _load_movie(root, path)
++            expect = st.get("expect")
++            if expect and st.get("interp_missing"):
++                # Plain render: x times fewer frames for the same loop -> play slower.
++                expect = dict(expect, rate=1.0 / max(1, expect["x"]))
++            _load_movie(root, path, expect)
+             _finish(root, st, "loaded " + os.path.basename(path))
+         else:
+             _finish(root, st, "render ready: " + path)
+         return
+-    if time.time() - st.get("waiting_since", time.time()) > cfg["file_wait_timeout_s"]:
++    if waited > cfg["file_wait_timeout_s"]:
+         _fail(root, st, "%s did not appear on the share within %ds" % (path, cfg["file_wait_timeout_s"]))
+         return
+     st["last_size"] = size
+     _save(root, st)
+ 
+ 
+-def _load_movie(root, path):
++def _video_frames(path):
++    try:
++        import cv2  # bundled with TouchDesigner's Python
++    except Exception:
++        return None
++    capture = cv2.VideoCapture(path)
++    try:
++        frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
++    finally:
++        capture.release()
++    return frames if frames > 0 else None
++
++
++def _load_movie(root, path, expect=None):
+     movie = _op(root, "movie")
+     if movie is not None:
+         _set_constant(movie.par.file, path)
+@@ -506,6 +605,29 @@ def _load_movie(root, path):
+     folder = _op(root, "folder")
+     if folder is not None:
+         folder.par.refresh.pulse()
++    ui = _op(root, "ui")
++    for key in ("head", "tail"):
++        player = _inner(ui, key)
++        if player is not None:
++            _set_constant(player.par.file, path)
++            reload_ = getattr(player.par, "reloadpulse", None)
++            if reload_ is not None:
++                reload_.pulse()
++    if expect and expect.get("out_loop"):
++        loop = int(expect["out_loop"])                 # output frames per loop
++        rate = float(expect.get("rate", 1.0))          # file frames per output frame
++        frames = _video_frames(path)
++        if frames:
++            overlap = int((frames - loop * rate) / rate)
++        else:
++            overlap = int(expect.get("overlap_out", 0))
++        overlap = max(0, min(overlap, loop))
++        _set_par(ui, "Loopoutframes", str(loop))
++        _set_par(ui, "Loopoutoverlap", str(overlap))
++        _set_par(ui, "Loopoutrate", "%g" % rate)
++        log("loop player: %d-frame loop, %d-frame seam crossfade%s%s"
++            % (loop, overlap, "" if rate == 1 else ", file played at %gx" % rate,
++               "" if frames else " (file length unknown, used the plan)"))
+ 
+ 
+ # --------------------------------------------------------------------------- buttons
+@@ -531,42 +653,37 @@ def load_latest(root):
+     log("loaded latest render %s" % path)
+ 
+ 
+-def bake(root):
+-    """Bake wave_generator channels into keyframe strings.
++def preview(root):
++    """Compile everything Queue would send, without sending it.
+ 
+-    A channel named like a schedule (translation_z, zoom, ...) is written straight
+-    into that Deforum_UI parameter. Otherwise channel 0 goes to the 'Bake into'
+-    parameter (Pipeline page). bake_out always gets a copy.
++    Writes the COMP's schedule_preview table (parameter | mode | schedule, moving
++    parameters first, then the prompt keys) and logs the summary and warnings.
+     """
+-    src, out, ui = _op(root, "wave"), _op(root, "bake_out"), _op(root, "ui")
+-    if src is None or out is None or src.numChans == 0:
+-        log("bake: wave_generator / bake_out missing or empty")
+-        return
+-    values = read_ui(ui) if ui is not None else {}
+-    points = values.get("bake_points")
+-    if points is None:
+-        quant = _op(root, "quantize")
+-        points = quant[0][0] if quant is not None and quant.numChans else 0
+-    target = values.get("bake_target", "none")
+-
+-    lines = []
+-    for index, chan in enumerate(src.chans()):
+-        keys = schedules.keyframe_string(chan.vals, int(points), 4)
+-        dest = chan.name if chan.name in schema.SCHEDULE_APIS else (
+-            target if index == 0 and target and target != "none" else None)
+-        note = ""
+-        par = getattr(ui.par, schema.BY_API[dest].td_name, None) if dest and ui is not None else None
+-        if dest and par is None:
+-            note = " (Deforum_UI has no %s; run build_master_ui)" % schema.BY_API[dest].td_name
+-        elif par is not None:
+-            if _is_constant(par):
+-                par.val = keys
+-                note = " -> %s" % par.name
+-            else:
+-                note = " (%s is driven by an expression/export; not overwritten)" % par.name
+-        lines.append((chan.name, keys))
+-        log("baked %s: %d keys%s" % (chan.name, keys.count(":"), note))
+-    out.text = lines[0][1] if len(lines) == 1 else "\n".join("%s: %s" % kv for kv in lines)
++    cfg = config.load()
++    _values, result = build(root, cfg)
++    for warning in result["warnings"]:
++        log("warning: " + warning)
++    order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
++    rows = sorted(result["schedules"].items(), key=lambda kv: (order.get(kv[1][0], 9), kv[0]))
++    table = _inner(_op(root, "ui"), "preview")
++    if table is not None:
++        table.clear()
++        table.appendRow(["parameter", "mode", "schedule"])
++        for api, (how, sched) in rows:
++            table.appendRow([api, how, sched])
++        prompts = result["request"]["deforum_settings"].get("prompts", {})
++        for frame in sorted(prompts, key=lambda k: int(k) if str(k).lstrip("-").isdigit() else 0):
++            table.appendRow(["prompt @%s" % frame, "prompt", prompts[frame]])
++    for api, (how, sched) in rows:
++        if how != "constant":
++            log("%-28s %-10s %s" % (api, how, sched if len(sched) < 160 else sched[:157] + "..."))
++    log("preview: " + payload.summary(result))
++    return result
++
++
++def bake(root):
++    """Bake button: the CHOP bake now happens at Queue time, so this previews it."""
++    return preview(root)
+ 
+ 
+ # --------------------------------------------------------------------------- diagnostics
+@@ -578,6 +695,28 @@ def doctor(root):
+     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
+     ui = _op(root, "ui")
+     values = read_ui(ui) if ui is not None else {}
++    if ui is None:
++        log("no 'deforum' COMP: run builder_master_ui")
++    elif ui.name != NAMES["ui"]:
++        log("using the old %s; run builder_master_ui to build the 'deforum' COMP" % ui.name)
++    else:
++        try:
++            tp = payload.tempo_plan(values)
++            log("tempo: " + (tempo.describe(tp) if tp else "manual length (%s frames)" % values.get("max_frames")))
++            for warning in (tp or {}).get("warnings", []):
++                log("tempo warning: " + warning)
++        except ValueError as exc:
++            log("tempo settings invalid: %s" % exc)
++        slots = payload.read_slots(values, [])
++        log("mod slots active: %s" % (", ".join("%d->%s" % (s.index, s.target) for s in slots) or "none"))
++        chop = read_mod_chop(ui, values)
++        known = set(a.lower() for a in schema.MOD_APIS) | set(f.td_name.lower() for f in schema.MOD_FIELDS)
++        if chop:
++            used = sorted(n for n in chop if n.lower() in known)
++            log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
++                                                 else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
++        rows = read_prompt_rows(ui)
++        log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
+     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
+         container_path = str(values.get(api, "") or "")
+         if not container_path:
+diff --git a/scripts/tdeforum/tempo.py b/scripts/tdeforum/tempo.py
+new file mode 100644
+index 0000000..e229ce2
+--- /dev/null
++++ b/scripts/tdeforum/tempo.py
+@@ -0,0 +1,113 @@
++"""Tempo -> frame plan for beat-locked Deforum renders.
++
++Everything is expressed in *render frames* (the frames Deforum diffuses or
++warps), because that is the ``t`` Deforum puts into schedule expressions.
++
++Two strategies (Tempo page, *Render strategy*):
++
++``cadence``      render at the output rate (60 fps). ``diffusion_cadence`` diffuses
++                 every Nth frame and warps the frames in between, so the cost is
++                 ~60/N diffusions per second while motion stays on the 60 fps grid.
++``interpolate``  render at a lower rate (15/20/30 fps) and let Deforum's RIFE or FILM
++                 interpolation bring it up to the output rate (x = out / render).
++
++At 60 fps one beat is 40 frames at 90 bpm, 30 at 120 and 24 at 150. Lower
++render rates must still give a whole number of frames per *loop*, otherwise the
++seam drifts; plan() reports that as a warning (e.g. 90 bpm at 20 fps).
++"""
++
++STRATEGIES = ["cadence", "interpolate"]
++STRATEGY_LABELS = ["60 fps + cadence (every frame on the beat grid)",
++                   "Low fps + RIFE/FILM interpolation"]
++RENDER_FPS_CHOICES = ["15", "20", "30"]
++INTERP_ENGINES = ["RIFE v4.6", "FILM"]
++_EPS = 1e-6
++
++
++def frames_per_beat(bpm, fps):
++    """Frames per beat (float). 120 bpm at 60 fps -> 30.0."""
++    bpm = float(bpm)
++    if bpm <= 0:
++        raise ValueError("bpm must be > 0")
++    return float(fps) * 60.0 / bpm
++
++
++def beats_to_frames(beats, bpm, fps):
++    return float(beats) * frames_per_beat(bpm, fps)
++
++
++def _whole(value):
++    return abs(value - round(value)) < _EPS
++
++
++def plan(bpm=120.0, beats_per_bar=4, bars=1, out_fps=60, strategy="cadence",
++         render_fps=15, engine="RIFE v4.6", seamless=True, overlap_beats=1.0):
++    """Return the render plan for a tempo-locked loop.
++
++    Keys:
++      bpm, loop_beats, out_fps, render_fps, interp_x, engine (None when cadence)
++      fpb            render frames per beat (float)
++      loop_frames    render frames in one loop (int)
++      overlap_frames extra render frames rendered past the loop for the seam crossfade
++      max_frames     loop_frames + overlap_frames (what Deforum renders)
++      out_loop_frames  loop length in output frames (what the loop player wraps at)
++      warnings       list of str
++    """
++    warnings = []
++    bpm = float(bpm)
++    beats_per_bar = max(1, int(beats_per_bar))
++    bars = max(1, int(bars))
++    out_fps = int(out_fps)
++    loop_beats = beats_per_bar * bars
++
++    if strategy == "interpolate":
++        render_fps = int(render_fps)
++        if render_fps <= 0 or out_fps % render_fps:
++            raise ValueError("output fps %d is not a whole multiple of render fps %d" % (out_fps, render_fps))
++        interp_x = out_fps // render_fps
++        if not 2 <= interp_x <= 10:
++            raise ValueError("interpolation x%d out of Deforum's 2..10 range" % interp_x)
++        if engine not in INTERP_ENGINES:
++            raise ValueError("unknown interpolation engine %r" % engine)
++    else:
++        strategy, render_fps, interp_x, engine = "cadence", out_fps, 1, None
++
++    fpb = frames_per_beat(bpm, render_fps)
++    exact_loop = loop_beats * fpb
++    loop_frames = int(round(exact_loop))
++    if not _whole(exact_loop):
++        warnings.append(
++            "%g bpm x %d beats at %d fps is %.3f frames, rounded to %d; the loop will drift. "
++            "Use a render fps where one loop is a whole number of frames (30 fps works for 90/120/150 bpm)."
++            % (bpm, loop_beats, render_fps, exact_loop, loop_frames))
++    loop_frames = max(1, loop_frames)
++
++    overlap_frames = 0
++    if seamless:
++        overlap_frames = int(round(max(0.0, float(overlap_beats)) * fpb))
++        overlap_frames = min(overlap_frames, loop_frames)
++
++    out_exact = loop_beats * frames_per_beat(bpm, out_fps)
++    if not _whole(out_exact):
++        warnings.append("%g bpm does not give a whole number of %d fps frames per loop (%.3f)"
++                        % (bpm, out_fps, out_exact))
++
++    return {
++        "bpm": bpm, "beats_per_bar": beats_per_bar, "bars": bars, "loop_beats": loop_beats,
++        "strategy": strategy, "out_fps": out_fps, "render_fps": render_fps,
++        "interp_x": interp_x, "engine": engine, "fpb": fpb,
++        "loop_frames": loop_frames, "overlap_frames": overlap_frames,
++        "max_frames": loop_frames + overlap_frames,
++        "out_loop_frames": int(round(out_exact)), "seamless": bool(seamless),
++        "warnings": warnings,
++    }
++
++
++def describe(p):
++    """One-line summary for the Tempo page status field."""
++    text = "%g bpm | %d beats | loop %d f @ %d fps" % (p["bpm"], p["loop_beats"], p["loop_frames"], p["render_fps"])
++    if p["overlap_frames"]:
++        text += " + %d overlap" % p["overlap_frames"]
++    if p["strategy"] == "interpolate":
++        text += " | %s x%d -> %d fps" % (p["engine"], p["interp_x"], p["out_fps"])
++    return text
+diff --git a/tests/_deforum_sim.py b/tests/_deforum_sim.py
+new file mode 100644
+index 0000000..61f7f2a
+--- /dev/null
++++ b/tests/_deforum_sim.py
+@@ -0,0 +1,118 @@
++"""Test-only replica of how Deforum 5d63a339 turns strings into per-frame values.
++
++Mirrors scripts/deforum_helpers/animation_key_frames.py (parse_key_frames,
++get_inbetweens) and prompt.py (prepare_prompt). numexpr is replaced by a
++restricted Python eval with the same function names; for the operators and
++functions the generated expressions use (+ - * / ** %, sin cos tanh exp abs)
++the results are identical for the non-negative arguments we produce.
++"""
++
++import ast
++import math
++import re
++
++_FUNCS = {"sin": math.sin, "cos": math.cos, "tan": math.tan, "tanh": math.tanh,
++          "exp": math.exp, "abs": abs, "sqrt": math.sqrt, "log": math.log}
++
++
++def _div(a, b):
++    # numexpr.evaluate(truediv='auto') only uses true division when the *caller's*
++    # module did `from __future__ import division`; Deforum's modules do not, so
++    # int / int floor-divides there. Reproduce that so tests catch t/30 vs t/30.0.
++    if isinstance(a, int) and isinstance(b, int):
++        return a // b
++    return a / b
++
++
++class _DivToCall(ast.NodeTransformer):
++    def visit_BinOp(self, node):
++        self.generic_visit(node)
++        if isinstance(node.op, ast.Div):
++            return ast.copy_location(
++                ast.Call(func=ast.Name(id="_div", ctx=ast.Load()), args=[node.left, node.right], keywords=[]),
++                node)
++        return node
++
++
++def _numexpr(expr, **names):
++    tree = ast.fix_missing_locations(_DivToCall().visit(ast.parse(expr.strip(), mode="eval")))
++    scope = dict(_FUNCS, _div=_div)
++    scope.update(names)
++    return float(eval(compile(tree, "<numexpr>", "eval"), {"__builtins__": {}}, scope))  # noqa: S307
++
++
++def _sanitize(value):
++    return value.replace("'", "").replace('"', "").replace("(", "").replace(")", "")
++
++
++def _is_number(value):
++    try:
++        float(value)
++        return True
++    except ValueError:
++        return False
++
++
++def parse_key_frames(string, max_frames, seed=0):
++    frames = {}
++    for part in string.split(","):
++        param = part.split(":")
++        key = _sanitize(param[0]).strip()
++        if _is_number(key):
++            frame = int(key)
++        else:
++            frame = int(_numexpr(param[0].strip().strip("'\""), max_f=max_frames - 1, s=seed))
++        frames[frame] = param[1].strip()   # NB: anything after a 2nd ':' is lost, like Deforum
++    if not frames and string:
++        raise RuntimeError("Key Frame string not correctly formatted")
++    return frames
++
++
++def series(string, max_frames, seed=0):
++    """Per-frame float values exactly as get_inbetweens(Linear) builds them."""
++    keys = parse_key_frames(string, max_frames, seed)
++    values = [None] * max_frames
++    value_is_number = False
++    value = None
++    for i in range(max_frames):
++        if i in keys:
++            value = keys[i]
++            value_is_number = _is_number(_sanitize(value))
++            if value_is_number:
++                values[i] = float(_sanitize(value))
++        if not value_is_number and value is not None:
++            values[i] = _numexpr(value, t=i, max_f=max_frames - 1, s=seed)
++    known = [i for i, v in enumerate(values) if v is not None]
++    values[0] = values[known[0]]
++    values[-1] = values[known[-1]]
++    known = [i for i, v in enumerate(values) if v is not None]
++    for i in range(max_frames):  # linear interpolation, limit_direction both
++        if values[i] is None:
++            lo = max(k for k in known if k < i)
++            hi = min(k for k in known if k > i)
++            values[i] = values[lo] + (values[hi] - values[lo]) * (i - lo) / float(hi - lo)
++    return values
++
++
++def prompt_at(prompts, frame, max_frames):
++    """Prompt text Deforum hands to A1111 at a frame (held keys + backtick math)."""
++    held = None
++    for key in sorted(prompts, key=lambda k: int(k)):
++        if int(key) <= frame:
++            held = prompts[key]
++    if held is None:
++        held = prompts[sorted(prompts, key=lambda k: int(k))[0]]
++    out = held
++    for match in re.finditer(r"`.*?`", held):
++        expr = match.group(0).replace("t", str(frame)).replace("max_f", str(max_frames - 1)).replace("`", "")
++        out = out.replace(match.group(0), str(_numexpr(expr)))
++    return out
++
++
++def composable_weights(prompt):
++    """'a :0.25 AND b :0.75' -> [('a', 0.25), ('b', 0.75)] (A1111 composable syntax)."""
++    parts = []
++    for chunk in prompt.split(" AND "):
++        m = re.match(r"^(.*?)\s*:\s*([-+]?(?:\d+\.?\d*|\d*\.\d+))\s*$", chunk.strip())
++        parts.append((m.group(1), float(m.group(2))) if m else (chunk.strip(), 1.0))
++    return parts
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index 9c3af97..a3dbfc6 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -85,6 +85,12 @@ class Op(object):
+     def numCols(self):
+         return max((len(r) for r in self.rows), default=0)
+ 
++    def clear(self):
++        self.rows = []
++
++    def appendRow(self, row):
++        self.rows.append(list(row))
++
+     def __getitem__(self, index):
+         if isinstance(index, tuple):
+             return Cell(self.rows[index[0]][index[1]])
+@@ -99,8 +105,13 @@ class Op(object):
+         return list(self.channels)
+ 
+ 
+-def make_network(ui_values):
+-    """A /project1 with the ops td_controller uses."""
++def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
++    """A /project1 with the ops td_controller uses.
++
++    comp=False builds the old Deforum_UI; comp=True the new 'deforum' COMP with its
++    inner prompt_seq / in_mod / schedule_preview / loop_head / loop_tail ops.
++    MOD overrides go in ui_values as "<api>:raw".
++    """
+     from tdeforum import schema
+ 
+     root = Op("project1")
+@@ -108,7 +119,20 @@ def make_network(ui_values):
+     for field in schema.FIELDS:
+         if field.api in ui_values:
+             ui_pars[field.td_name] = ui_values[field.api]
+-    root.add(Op("Deforum_UI", root, **ui_pars))
++        if field.kind == schema.MOD and comp:
++            ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
++    if comp:
++        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate"):
++            ui_pars.setdefault(name, "")
++    ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
++    if comp:
++        seq = ui.add(Op("prompt_seq", ui))
++        seq.rows = [["beat", "prompt", "xfade"]] + [list(r) for r in (prompt_rows or [])]
++        mod = ui.add(Op("in_mod", ui))
++        mod.channels = [Channel(n, v) for n, v in (chop or {}).items()]
++        ui.add(Op("schedule_preview", ui))
++        for name in ("loop_head", "loop_tail"):
++            ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
+     for name in ("webclient_deforum", "webclient_progress", "webclient_comfyui"):
+         root.add(Op(name, root, callbacks=None))
+     root.add(Op("deforum_prompts", root))
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+new file mode 100644
+index 0000000..1ffa9f4
+--- /dev/null
++++ b/tests/test_builder.py
+@@ -0,0 +1,272 @@
++"""Run scripts/build_master_ui.py against a mock of the TouchDesigner API it uses.
++
++This checks the builder's own logic (pages, migration from Deforum_UI, rebuild
++keeping values, inner network, loop-player wiring) and that the controller can
++read the result. It cannot check TouchDesigner's own parameter names; the build
++log prints a NOTE for any built-in parameter it could not find.
++"""
++
++import enum
++import json
++import os
++import shutil
++import tempfile
++import unittest
++from unittest import mock
++
++from _fakes import ROOT_DIR
++from tdeforum import config, payload, td_controller as ctl
++
++BUILDER = os.path.join(ROOT_DIR, "scripts", "build_master_ui.py")
++
++
++class ParMode(enum.Enum):
++    CONSTANT = 0
++    EXPRESSION = 1
++    EXPORT = 2
++    BIND = 3
++
++
++class Par(object):
++    def __init__(self, owner, name, style="Str", val=""):
++        self.owner, self.name, self.style = owner, name, style
++        self.val, self.default, self.expr, self.bindExpr = val, val, "", ""
++        self.mode = ParMode.CONSTANT
++        self.menuNames, self.menuLabels = [], []
++        self.normMin = self.normMax = None
++        self.readOnly = self.startSection = False
++        self.help = ""
++
++    @property
++    def isMenu(self):
++        return self.style == "Menu"
++
++    def eval(self):
++        return self.val
++
++    def pulse(self):
++        pass
++
++
++class Pars(object):
++    pass
++
++
++class Page(object):
++    def __init__(self, comp, name):
++        self.comp, self.name = comp, name
++
++    def _add(self, name, style, val):
++        p = Par(self.comp, name, style, val)
++        setattr(self.comp.par, name, p)
++        self.comp.customPars.append(p)
++        return [p]
++
++    def appendFloat(self, name, label=""):
++        return self._add(name, "Float", 0.0)
++
++    def appendInt(self, name, label=""):
++        return self._add(name, "Int", 0)
++
++    def appendStr(self, name, label=""):
++        return self._add(name, "Str", "")
++
++    def appendToggle(self, name, label=""):
++        return self._add(name, "Toggle", False)
++
++    def appendMenu(self, name, label=""):
++        return self._add(name, "Menu", "")
++
++    def destroy(self):
++        self.comp.customPages.remove(self)
++        for p in [p for p in self.comp.customPars]:
++            delattr(self.comp.par, p.name)
++        self.comp.customPars[:] = []
++
++
++class Connector(object):
++    def __init__(self):
++        self.source = None
++
++    def connect(self, other):
++        self.source = other
++
++
++class Node(object):
++    def __init__(self, kind, name, parent=None, builtins=()):
++        self.kind, self.name, self.parent_ = kind, name, parent
++        self.path = (parent.path if parent else "") + "/" + name
++        self.par = Pars()
++        self.customPars, self.customPages, self.children = [], [], {}
++        self.rows = []
++        self.inputConnectors = [Connector(), Connector()]
++        self.inputs = []
++        self.outputs = []
++        self.channels = []
++        self.numChans = 0
++        self.nodeX = self.nodeY = 0
++        self.viewer = self.expose = False
++        self.dock = None
++        self.storage = {}
++        for bname, style, val, menu in builtins:
++            p = Par(self, bname, style, val)
++            p.menuNames = list(menu)
++            setattr(self.par, bname, p)
++
++    def parent(self):
++        return self.parent_
++
++    def op(self, name):
++        return self.children.get(name)
++
++    def create(self, kind, name):
++        builtins = BUILTINS.get(kind, ())
++        node = Node(kind, name, self, builtins)
++        if kind == "tableDAT":
++            node.rows = [[""]]          # TD's new Table DAT: one empty cell
++        self.children[name] = node
++        return node
++
++    def appendCustomPage(self, name):
++        page = Page(self, name)
++        self.customPages.append(page)
++        return page
++
++    # table
++    @property
++    def numRows(self):
++        return len(self.rows)
++
++    @property
++    def numCols(self):
++        return max((len(r) for r in self.rows), default=0)
++
++    def appendRow(self, row):
++        self.rows.append([str(c) for c in row])
++
++    def clear(self):
++        self.rows = []
++
++    def __getitem__(self, rc):
++        return type("Cell", (), {"val": self.rows[rc[0]][rc[1]]})()
++
++    def fetch(self, key, default=None, search=True):
++        return self.storage.get(key, default)
++
++    def store(self, key, value):
++        self.storage[key] = value
++
++
++BUILTINS = {
++    "moviefileinTOP": [("file", "Str", "", ()), ("index", "Float", 0, ()),
++                       ("playmode", "Menu", "locked", ("locked", "specify", "sequential")),
++                       ("indexunit", "Menu", "frames", ("indices", "frames", "seconds", "fraction")),
++                       ("reloadpulse", "Pulse", 0, ())],
++    "crossTOP": [("cross", "Float", 0, ())],
++    "textDAT": [("file", "Str", "", ()), ("syncfile", "Toggle", False, ())],
++}
++
++
++def run_builder(root, scripts_dir, out):
++    me = Node("textDAT", "builder_master_ui", root, BUILTINS["textDAT"])
++    me.par.file.val = scripts_dir + "/build_master_ui.py"
++    env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
++    for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP"):
++        env[kind] = kind
++    with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
++        with open(BUILDER, encoding="utf-8") as fh:
++            code = fh.read()
++        exec(compile(code, BUILDER, "exec"), env)
++
++
++def old_ui(root):
++    """A Deforum_UI as the previous build_master_ui left it (string schedules)."""
++    ui = root.create("baseCOMP", "Deforum_UI")
++    page = ui.appendCustomPage("Motion (2D/3D)")
++    for name, val in (("Zoom", "0:(1.05)"), ("Translationz", "0:(0), 299:(6)"), ("Border", "zeros"),
++                      ("Strengthschedule", "0: (0.5)"), ("Cfgscalescheduleval", "x"),
++                      ("Cfgscaleschedule", "0: (2.0)"), ("Diffusioncadence", 4),
++                      ("Sampler", "LCM"), ("Baketarget", "translation_z")):
++        page.appendStr(name)[0].val = val
++    rot = page.appendStr("Rotation3dy")[0]
++    rot.val, rot.mode = "0:(0)", ParMode.EXPORT
++    return ui
++
++
++class BuilderTest(unittest.TestCase):
++    def setUp(self):
++        self.share = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, self.share)
++        self.scripts = self.share + "/scripts"
++        os.makedirs(self.scripts)
++        with open(self.scripts + "/prompt.json", "w") as fh:
++            json.dump({"0": "gold", "60": "ice"}, fh)
++        self.root = Node("baseCOMP", "project1")
++        self.log = []
++
++    def build(self):
++        run_builder(self.root, self.scripts, self.log)
++        return self.root.op("deforum")
++
++    def test_first_build_migrates_old_ui(self):
++        old_ui(self.root)
++        comp = self.build()
++        self.assertEqual([p.name for p in comp.customPages][:3], ["Tempo", "Globals", "Prompts"])
++        self.assertEqual(comp.par.Zoom.val, 1.05)
++        self.assertEqual(comp.par.Zoomraw.val, "")
++        self.assertEqual(comp.par.Translationzraw.val, "0:(0), 299:(6)")
++        self.assertEqual(comp.par.Strengthschedule.val, 0.5)
++        self.assertEqual(comp.par.Cfgscaleschedule.val, 2.0)
++        self.assertEqual((comp.par.Border.val, comp.par.Paddingmode.val), ("replicate", "zeros"))
++        self.assertEqual(comp.par.Diffusioncadence.val, 4)
++        self.assertEqual(comp.par.Pipelinestatus.readOnly, True)
++        text = "\n".join(self.log)
++        self.assertIn("migrated from Deforum_UI", text)
++        self.assertIn("Rotation3dy was CHOP-exported", text)
++        self.assertIn("dropped Baketarget", text)
++
++    def test_inner_network_and_loop_player(self):
++        comp = self.build()
++        seq = comp.op("prompt_seq")
++        self.assertEqual(seq.rows[0], ["beat", "prompt", "xfade"])
++        self.assertEqual(len(seq.rows), 3)                       # seeded from prompt.json
++        head, tail, cross = comp.op("loop_head"), comp.op("loop_tail"), comp.op("loop_cross")
++        self.assertEqual((head.par.playmode.val, head.par.indexunit.val), ("specify", "indices"))
++        self.assertEqual(head.par.index.mode, ParMode.EXPRESSION)
++        self.assertIn("Loopoutrate", tail.par.index.expr)
++        self.assertEqual(cross.par.cross.mode, ParMode.EXPRESSION)
++        self.assertIs(cross.inputConnectors[0].source, head)
++        self.assertIs(cross.inputConnectors[1].source, tail)
++        self.assertIs(comp.op("out_loop").inputConnectors[0].source, cross)
++        self.assertIsNotNone(comp.op("in_mod"))
++        self.assertFalse(any("NOTE loop_" in line for line in self.log))
++
++    def test_rebuild_keeps_values_and_tables(self):
++        comp = self.build()
++        comp.par.Bpm.val = 150.0
++        comp.par.Mod1active.val = True
++        comp.par.Angleraw.val = "0:(0), 24:(5)"
++        comp.op("prompt_seq").appendRow(["8", "fire", "2"])
++        comp = self.build()
++        self.assertEqual(comp.par.Bpm.val, 150.0)
++        self.assertIs(comp.par.Mod1active.val, True)
++        self.assertEqual(comp.par.Angleraw.val, "0:(0), 24:(5)")
++        self.assertEqual(comp.op("prompt_seq").rows[-1], ["8", "fire", "2"])
++        self.assertIn("values kept", "\n".join(self.log))
++
++    def test_controller_reads_the_built_comp(self):
++        comp = self.build()
++        comp.par.Mod1active.val = True
++        comp.par.Mod1depth.val = 0.5
++        values = ctl.read_ui(comp)
++        self.assertEqual(values[payload.raw_key("zoom")], "")
++        result = payload.build_request(values, {"0": "x"}, {}, prompt_rows=ctl.read_prompt_rows(comp),
++                                       chop=ctl.read_mod_chop(comp, values))
++        s = result["request"]["deforum_settings"]
++        self.assertEqual((s["fps"], s["max_frames"]), (60, 270))
++        self.assertIn("sin(", s["zoom"])                         # slot 1 default target = zoom
++        self.assertEqual(s["prompts"]["0"], "gold")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index e82dff7..f36783e 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -153,20 +153,119 @@ class ControllerTest(unittest.TestCase):
+         self.assertEqual(self.root.op("webclient_progress").requests[-1][0], "DELETE")
+         self.assertEqual(self.state(), ctl.IDLE)
+ 
+-    def test_bake_routes_by_channel_name_and_target(self):
+-        wave = self.root.op("wave_generator")
+-        wave.channels = [Channel("wave3", [0, 1, 2, 3, 4]), Channel("zoom", [1, 1.1, 1.2, 1.3, 1.4])]
+-        ctl.bake(self.root)
+-        ui = self.root.op("Deforum_UI")
+-        self.assertEqual(ui.par.Translationz.val, "0:(0.0000), 2:(2.0000), 4:(4.0000)")
+-        self.assertEqual(ui.par.Zoom.val, "0:(1.0000), 2:(1.2000), 4:(1.4000)")
+-        self.assertIn("wave3:", self.root.op("bake_out").text)
+-
+     def test_latest_render(self):
+         paths = ["x/Deforum_1/20260101000000.mp4", "x/Deforum_2/20260301000000_depth.mp4",
+                  "x/Deforum_2/20260201000000.mp4"]
+         self.assertEqual(ctl.latest_render(paths), "x/Deforum_2/20260201000000.mp4")
+ 
+ 
++TEMPO_UI = dict(UI, **{
++    "bpm": 120.0, "beats_per_bar": 4, "loop_bars": 1, "out_fps": 60,
++    "render_strategy": "interpolate", "render_fps": "30", "interp_engine": "RIFE v4.6",
++    "seamless_loop": True, "loop_overlap_beats": 1.0, "loop_seeds": True, "length_source": "tempo",
++    "seed_behavior": "iter", "prompt_source": "sequence", "prompt_xfade_beats": 1.0,
++    "translation_z": 0.0, "zoom": 1.0, "rotation_3d_y": 0.0, "strength_schedule": 0.6,
++    "mod1_active": True, "mod1_target": "translation_z", "mod1_shape": "decay", "mod1_beats": 1.0,
++    "mod1_depth": 2.0, "mod1_phase": 0.0, "mod1_sharpness": 6.0,
++    "chop_mode": "add", "chop_path": "", "bake_points": 0,
++})
++STAMP = "20261016120000"
++OUTDIR = "/opt/a1111/outputs/img2img-images/Deforum_" + STAMP
++
++
++class TempoCompTest(ControllerTest.__bases__[0]):
++    """The 'deforum' COMP: tempo plan, mod matrix, Mod CHOP, prompt sequence, loop player."""
++
++    setUp = ControllerTest.setUp
++    state = ControllerTest.state
++    tick = ControllerTest.tick
++
++    def make(self, **overrides):
++        self.root = make_network(dict(TEMPO_UI, **overrides), comp=True,
++                                 prompt_rows=[("0", "gold", ""), ("2", "ice", "")],
++                                 chop={"rotation_3d_y": [0.0, 1.0], "wave3": [5.0]})
++        return self.root.op("deforum")
++
++    def finish(self):
++        respond(self.root, "webclient_deforum", 202, {"batch_id": "b", "job_ids": ["b-0"]})
++        respond(self.root, "webclient_progress", 200,
++                {"id": "b-0", "status": "SUCCEEDED", "phase": "DONE", "phase_progress": 1.0,
++                 "outdir": OUTDIR, "timestring": STAMP, "execution_time": 60})
++
++    def write(self, name):
++        path = self.share + "/td_outputs/img2img-images/Deforum_%s/%s" % (STAMP, name)
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "wb") as fh:
++            fh.write(b"x" * 100)
++        return path
++
++    def test_tempo_request(self):
++        ui = self.make()
++        ctl.queue(self.root)
++        s = json.loads(self.root.op("webclient_deforum").requests[0][2])["deforum_settings"]
++        # 120 bpm at 30 fps: 15 frames/beat, 4-beat loop + 1 beat overlap
++        self.assertEqual((s["fps"], s["max_frames"]), (30, 75))
++        self.assertEqual((s["frame_interpolation_engine"], s["frame_interpolation_x_amount"]), ("RIFE v4.6", 2))
++        self.assertIs(s["store_frames_in_ram"], False)
++        self.assertEqual((s["seed_behavior"], s["seed_schedule"]), ("schedule", "0:(s + t%60)"))
++        self.assertIn("exp(-6*((t/15.0) % 1))", s["translation_z"])
++        self.assertTrue(s["rotation_3d_y"].startswith("0:(0.00000), 1:("))   # baked from the CHOP
++        self.assertEqual(s["strength_schedule"], "0:(0.6)")
++        self.assertIn("gold :`(30 - t)/15.0` AND ice", s["prompts"]["15"])
++        self.assertEqual(s["prompts"]["60"], "gold")
++        self.assertIn("120 bpm", ui.par.Tempoinfo.val)
++
++    def test_interpolated_file_and_loop_player(self):
++        ui = self.make()
++        ctl.queue(self.root)
++        self.finish()
++        st = self.root.storage[ctl.STATE_KEY]
++        self.assertTrue(st["video_share"].endswith("/%s_RIFE_x2.mp4" % STAMP))
++        path = self.write("%s_RIFE_x2.mp4" % STAMP)
++        self.tick()
++        self.tick()
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertEqual(ui.op("loop_head").par.file.val, path)
++        self.assertEqual(ui.op("loop_tail").par.file.val, path)
++        self.assertEqual(ui.par.Loopoutframes.val, "120")      # 4 beats at 60 fps
++        self.assertEqual(ui.par.Loopoutoverlap.val, "30")      # 15 render frames x2
++        self.assertEqual(ui.par.Loopoutrate.val, "1")
++
++    def test_missing_interpolation_falls_back_to_plain_render(self):
++        ui = self.make()
++        ctl.queue(self.root)
++        self.finish()
++        plain = self.write(STAMP + ".mp4")
++        self.root.storage[ctl.STATE_KEY]["waiting_since"] = time.time() - ctl.INTERP_FALLBACK_S - 1
++        self.tick()
++        self.tick()
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertEqual(ui.op("loop_head").par.file.val, plain)
++        self.assertEqual(ui.par.Loopoutrate.val, "0.5")        # 30 fps file on a 60 fps loop
++
++    def test_cadence_mode_loads_plain_file(self):
++        ui = self.make(render_strategy="cadence")
++        ctl.queue(self.root)
++        s = json.loads(self.root.op("webclient_deforum").requests[0][2])["deforum_settings"]
++        self.assertEqual((s["fps"], s["max_frames"], s["frame_interpolation_engine"]), (60, 150, "None"))
++        self.finish()
++        self.assertTrue(self.root.storage[ctl.STATE_KEY]["video_share"].endswith("/%s.mp4" % STAMP))
++
++    def test_preview_table(self):
++        ui = self.make()
++        result = ctl.preview(self.root)
++        rows = ui.op("schedule_preview").rows
++        self.assertEqual(rows[0], ["parameter", "mode", "schedule"])
++        self.assertEqual(rows[1][:2], ["translation_z", "expression"])
++        self.assertEqual(rows[2][:2], ["rotation_3d_y", "baked"])
++        self.assertTrue(any(r[0] == "prompt @15" for r in rows))
++        self.assertTrue(any("wave3" in w for w in result["warnings"]))
++        self.assertEqual(self.root.op("webclient_deforum").requests, [])   # nothing sent
++
++    def test_old_ui_still_renders_without_the_comp(self):
++        root = make_network(dict(UI))
++        self.assertEqual(ctl._op(root, "ui").name, "Deforum_UI")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index f5ca095..07b4027 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -1,9 +1,11 @@
+ import json
++import math
+ import os
+ import unittest
+ 
+ from _fakes import ROOT_DIR  # noqa: F401  (puts scripts/ on sys.path)
+-from tdeforum import comfy, config, payload, schedules, schema
++import _deforum_sim as sim
++from tdeforum import comfy, config, migrate, payload, schedules, schema
+ 
+ KNOWN_KEYS = set(json.load(open(os.path.join(ROOT_DIR, "tests", "data", "deforum_keys_5d63a339.json"))))
+ 
+@@ -30,9 +32,20 @@ class SchemaTest(unittest.TestCase):
+         self.assertEqual(schema.td_name("rotation_3d_x"), "Rotation3dx")
+ 
+     def test_td_names_unique(self):
+-        names = [f.td_name for f in schema.FIELDS]
++        names = schema.all_td_names()
+         self.assertEqual(len(names), len(set(names)))
+ 
++    def test_mod_fields_are_deforum_schedules(self):
++        for field in schema.MOD_FIELDS:
++            self.assertIn(field.key, KNOWN_KEYS, field.api)
++        self.assertNotIn("kernel_schedule", schema.MOD_APIS)   # odd-only, not modulatable
++
++    def test_slot_target_menus_list_every_mod(self):
++        for n in range(1, schema.MOD_SLOTS + 1):
++            target = schema.BY_API["mod%d_target" % n]
++            self.assertEqual(target.menu, schema.MOD_APIS)
++            self.assertIn(target.default, schema.MOD_APIS)
++
+     def test_every_deforum_key_is_known_to_deforum(self):
+         for field in schema.FIELDS:
+             if field.target == "deforum" and field.kind != schema.CHECKPOINT and field.api != "border":
+@@ -212,3 +225,132 @@ class ComfyTest(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++def _comp_values(**overrides):
++    """Every COMP field at its schema default, plus overrides (what read_ui returns)."""
++    values = dict((f.api, f.default) for f in schema.FIELDS)
++    for f in schema.MOD_FIELDS:
++        values[payload.raw_key(f.api)] = ""
++    values.update(overrides)
++    return values
++
++
++class TempoPayloadTest(unittest.TestCase):
++    def build(self, rows=None, chop=None, **overrides):
++        return payload.build_request(_comp_values(**overrides), {"0": "json prompt"}, MODELS,
++                                     prompt_rows=rows, chop=chop)
++
++    def test_defaults_send_only_known_keys(self):
++        for strategy in ("cadence", "interpolate"):
++            s = self.build(render_strategy=strategy)["request"]["deforum_settings"]
++            self.assertEqual(sorted(k for k in s if k not in KNOWN_KEYS), [], strategy)
++
++    def test_every_mod_baseline_is_a_constant_schedule(self):
++        result = self.build()
++        for field in schema.MOD_FIELDS:
++            how, sched = result["schedules"][field.api]
++            self.assertEqual(how, "constant", field.api)
++            self.assertEqual(sim.series(sched, 5), [float(field.default)] * 5, field.api)
++
++    def test_default_tempo_plan(self):
++        r = self.build()
++        s = r["request"]["deforum_settings"]
++        # 120 bpm, 2 bars at 60 fps + 1 beat overlap
++        self.assertEqual((s["fps"], s["max_frames"], s["diffusion_cadence"]), (60, 270, 4))
++        self.assertEqual(s["seed_schedule"], "0:(s + t%240)")
++        self.assertEqual(s["prompts"], {"0": "json prompt"})        # no rows -> prompt.json
++
++    def test_slots_and_chop_compile_to_what_deforum_evaluates(self):
++        r = self.build(chop={"Translationz": [0.0, 2.0]},
++                       mod1_active=True, mod1_target="translation_z", mod1_shape="sine",
++                       mod1_beats=4.0, mod1_depth=1.5, mod1_phase=0.0)
++        s = r["request"]["deforum_settings"]
++        z = sim.series(s["translation_z"], s["max_frames"])
++        # CHOP [0, 2] stretched over the 240-frame loop (wrapping 2 -> 0), + a 4-beat sine
++        for t in (0, 37, 119, 240, 269):
++            phase = (t % 240) / 240.0
++            expect_chop = 4 * phase if phase <= 0.5 else 4 * (1 - phase)
++            expect = expect_chop + 1.5 * math.sin(2 * math.pi * t / 120.0)
++            self.assertAlmostEqual(z[t], expect, 4)
++        self.assertEqual(r["schedules"]["translation_z"][0], "baked")
++
++    def test_raw_override_wins(self):
++        r = self.build(**{"zoom": 1.2, payload.raw_key("zoom"): "0:(1), 60:(1.1)"})
++        self.assertEqual(r["request"]["deforum_settings"]["zoom"], "0:(1), 60:(1.1)")
++
++    def test_prompt_sequence_used_in_tempo_mode(self):
++        r = self.build(rows=[["beat", "prompt", "xfade"], ["0", "gold", ""], ["4", "ice", ""]])
++        prompts = r["request"]["deforum_settings"]["prompts"]
++        self.assertEqual(prompts["0"], "gold")
++        self.assertEqual(prompts["120"], "ice")
++        r = self.build(rows=[["0", "gold", ""]], prompt_source="json")
++        self.assertEqual(r["request"]["deforum_settings"]["prompts"], {"0": "json prompt"})
++
++    def test_manual_length(self):
++        s = self.build(length_source="manual", max_frames=99)["request"]["deforum_settings"]
++        self.assertEqual(s["max_frames"], 99)
++        self.assertNotIn("fps", s)
++
++    def test_kernel_forced_odd(self):
++        r = self.build(kernel_schedule=4)
++        self.assertEqual(r["request"]["deforum_settings"]["kernel_schedule"], "0:(5)")
++        self.assertTrue(any("kernel" in w for w in r["warnings"]))
++
++    def test_dims_and_range_warnings(self):
++        r = self.build(animation_mode="3D", mod1_active=True, mod1_target="zoom", mod1_depth=0.1,
++                       mod2_active=True, mod2_target="strength_schedule", mod2_depth=0.6)
++        joined = " | ".join(r["warnings"])
++        self.assertIn("zoom is 2D-only", joined)
++        self.assertIn("strength_schedule swings", joined)
++
++    def test_loop_seam_warning(self):
++        r = self.build(mod1_active=True, mod1_target="angle", mod1_beats=3.0, mod1_depth=1.0)
++        self.assertTrue(any("does not divide" in w for w in r["warnings"]))
++
++    def test_non_looping_seed_behaviour_warns(self):
++        r = self.build(seed_behavior="random")
++        s = r["request"]["deforum_settings"]
++        self.assertEqual(s["seed_behavior"], "random")
++        self.assertNotIn("seed_schedule", s)
++        self.assertTrue(any("does not repeat" in w for w in r["warnings"]))
++
++    def test_padding_and_border_are_separate(self):
++        s = self.build(border="wrap", padding_mode="zeros")["request"]["deforum_settings"]
++        self.assertEqual((s["border"], s["padding_mode"]), ("wrap", "zeros"))
++
++
++class MigrateTest(unittest.TestCase):
++    def test_split_schedule(self):
++        self.assertEqual(migrate.split_schedule("0:(1.05)"), (1.05, ""))
++        self.assertEqual(migrate.split_schedule("0.065"), (0.065, ""))
++        self.assertEqual(migrate.split_schedule("0: (0.5)"), (0.5, ""))
++        self.assertEqual(migrate.split_schedule("0:(0), 299:(6)"), (None, "0:(0), 299:(6)"))
++        self.assertEqual(migrate.split_schedule("0:(1+sin(t/9))"), (None, "0:(1+sin(t/9))"))
++
++    def test_old_ui_values_move_to_base_or_raw(self):
++        c = lambda v: {"mode": "CONSTANT", "expr": "", "bind": "", "val": v}
++        saved = {"Zoom": c("0:(1.05)"), "Translationz": c("0:(0), 299:(6)"), "Border": c("zeros"),
++                 "Strengthschedule": c("0: (0.5)"), "Diffusioncadence": c(4),
++                 "Rotation3dy": {"mode": "EXPORT", "expr": "", "bind": "", "val": "0:(0)"},
++                 "Noiseschedule": {"mode": "EXPRESSION", "expr": "op('x')[0]", "bind": "", "val": ""},
++                 "Baketarget": c("translation_z"), "Pipelinestatus": c("busy")}
++        actions = migrate.plan(saved, from_old_ui=True)
++        sets = dict((a[1], a[2]["val"] if a[2]["mode"] == "CONSTANT" else a[2]["expr"])
++                    for a in actions if a[0] == "set")
++        self.assertEqual(sets["Zoom"], 1.05)
++        self.assertEqual(sets["Translationzraw"], "0:(0), 299:(6)")
++        self.assertEqual(sets["Strengthschedule"], 0.5)
++        self.assertEqual((sets["Border"], sets["Paddingmode"]), ("replicate", "zeros"))
++        self.assertEqual(sets["Diffusioncadence"], 4)
++        self.assertEqual(sets["Noisescheduleraw"], "op('x')[0]")
++        self.assertNotIn("Pipelinestatus", sets)
++        notes = [a[1] for a in actions if a[0] == "note"]
++        self.assertTrue(any("Rotation3dy" in n for n in notes))
++        self.assertEqual(migrate.dropped(saved), ["Baketarget"])
++
++    def test_rebuild_keeps_raw_overrides(self):
++        c = lambda v: {"mode": "CONSTANT", "expr": "", "bind": "", "val": v}
++        actions = migrate.plan({"Zoom": c(1.1), "Zoomraw": c("0:(1), 9:(2)")}, from_old_ui=False)
++        sets = dict((a[1], a[2]["val"]) for a in actions if a[0] == "set")
++        self.assertEqual(sets, {"Zoom": 1.1, "Zoomraw": "0:(1), 9:(2)"})
+diff --git a/tests/test_tempo_mod.py b/tests/test_tempo_mod.py
+new file mode 100644
+index 0000000..9c1316d
+--- /dev/null
++++ b/tests/test_tempo_mod.py
+@@ -0,0 +1,164 @@
++import os
++import sys
++import unittest
++
++sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
++
++import _deforum_sim as sim
++from tdeforum import modulation, prompt_seq, tempo
++from tdeforum.modulation import Slot
++
++
++class TempoTest(unittest.TestCase):
++    def test_frames_per_beat_at_60(self):
++        self.assertEqual(tempo.frames_per_beat(90, 60), 40)
++        self.assertEqual(tempo.frames_per_beat(120, 60), 30)
++        self.assertEqual(tempo.frames_per_beat(150, 60), 24)
++
++    def test_cadence_plan(self):
++        p = tempo.plan(bpm=120, bars=2, strategy="cadence", overlap_beats=1)
++        self.assertEqual((p["render_fps"], p["interp_x"], p["engine"]), (60, 1, None))
++        self.assertEqual(p["loop_frames"], 240)
++        self.assertEqual(p["overlap_frames"], 30)
++        self.assertEqual(p["max_frames"], 270)
++        self.assertEqual(p["out_loop_frames"], 240)
++        self.assertEqual(p["warnings"], [])
++
++    def test_interpolate_plan(self):
++        p = tempo.plan(bpm=150, bars=1, strategy="interpolate", render_fps=15, engine="FILM")
++        self.assertEqual((p["render_fps"], p["interp_x"]), (15, 4))
++        self.assertEqual(p["loop_frames"], 24)       # 4 beats * 6 frames
++        self.assertEqual(p["out_loop_frames"], 96)   # 4 beats * 24 frames at 60
++
++    def test_all_three_tempos_whole_loops_at_30_and_60(self):
++        for bpm in (90, 120, 150):
++            for strategy, fps in (("cadence", 60), ("interpolate", 30)):
++                p = tempo.plan(bpm=bpm, bars=1, strategy=strategy, render_fps=fps)
++                self.assertEqual(p["warnings"], [], (bpm, fps))
++
++    def test_drifting_loop_warns(self):
++        p = tempo.plan(bpm=90, bars=1, beats_per_bar=1, strategy="interpolate", render_fps=20)
++        self.assertTrue(p["warnings"])               # 13.333 frames per beat
++
++    def test_bad_interpolation_rejected(self):
++        with self.assertRaises(ValueError):
++            tempo.plan(strategy="interpolate", out_fps=60, render_fps=25)
++
++    def test_no_overlap_without_seamless(self):
++        p = tempo.plan(bpm=120, seamless=False, overlap_beats=2)
++        self.assertEqual(p["overlap_frames"], 0)
++
++
++class ModulationTest(unittest.TestCase):
++    FPB = 30.0
++
++    def test_every_shape_expression_matches_python(self):
++        for shape in modulation.SHAPE_NAMES:
++            slot = Slot("zoom", shape, beats=1, depth=0.03, phase=0.1, sharpness=5)
++            sched, _bounds, mode = modulation.compile_field(1.0, [slot], self.FPB, 150)
++            self.assertEqual(mode, "expression")
++            got = sim.series(sched, 150)
++            for t in range(150):
++                self.assertAlmostEqual(got[t], modulation.evaluate(1.0, [slot], self.FPB, t), 9, (shape, t))
++
++    def test_expression_survives_deforums_comma_colon_split(self):
++        slots = [Slot("x", s, beats=b, depth=d) for s, b, d in
++                 (("square", 2, 0.5), ("bump", 0.5, -1.25), ("decay", 0.25, 2.0))]
++        sched, _b, _m = modulation.compile_field(0.0, slots, self.FPB, 10)
++        body = sched.split(":", 1)[1]
++        self.assertNotIn(",", body)
++        self.assertNotIn(":", body)
++
++    def test_constant_and_raw(self):
++        self.assertEqual(modulation.compile_field(0.065, [], 30, 10)[0], "0:(0.065)")
++        self.assertEqual(modulation.compile_field(1, [], 30, 10, raw="0:(1), 30:(2)")[0], "0:(1), 30:(2)")
++        self.assertEqual(modulation.compile_field(1, [], 30, 10, raw="1.5")[0], "0:(1.5)")
++
++    def test_periodic_slots_loop(self):
++        slot = Slot("translation_z", "saw_up", beats=2, depth=3)
++        sched, _b, _m = modulation.compile_field(0, [slot], self.FPB, 300)
++        v = sim.series(sched, 300)
++        for t in range(120):          # 4-beat loop = 120 frames
++            self.assertAlmostEqual(v[t], v[t + 120], 9)
++
++    def test_loop_warnings(self):
++        ok = Slot("zoom", beats=2, depth=0.1, index=1)
++        bad = Slot("zoom", beats=3, depth=0.1, index=2)
++        self.assertEqual(modulation.loop_warnings([ok], 16), [])
++        self.assertEqual(len(modulation.loop_warnings([ok, bad], 16)), 1)
++
++    def test_chop_bake_add_and_replace(self):
++        chop = modulation.resample_loop([0.0, 1.0], loop_frames=4, total_frames=6)
++        self.assertEqual(chop, [0.0, 0.5, 1.0, 0.5, 0.0, 0.5])   # wraps last -> first, tail repeats
++        sched, bounds, mode = modulation.compile_field(2.0, [], 30, 6, chop=chop)
++        self.assertEqual(mode, "baked")
++        self.assertEqual(sim.series(sched, 6), [2.0, 2.5, 3.0, 2.5, 2.0, 2.5])
++        sched, _b, _m = modulation.compile_field(2.0, [], 30, 6, chop=chop, chop_mode="replace")
++        self.assertEqual(sim.series(sched, 6)[2], 1.0)
++        self.assertEqual(bounds, (2.0, 3.0))
++
++    def test_chop_plus_slots(self):
++        slot = Slot("angle", "sine", beats=1, depth=10)
++        chop = [1.0] * 60
++        sched, _b, _m = modulation.compile_field(0, [slot], self.FPB, 60, chop=chop)
++        v = sim.series(sched, 60)
++        self.assertAlmostEqual(v[7], 1.0 + 10 * __import__("math").sin(2 * __import__("math").pi * 7 / 30), 4)
++
++    def test_resample_60fps_chop_to_15fps_render(self):
++        samples = list(range(120))                 # one 120 bpm bar recorded at 60 fps
++        out = modulation.resample_loop(samples, loop_frames=30, total_frames=30)   # rendered at 15 fps
++        self.assertEqual(out[:3], [0.0, 4.0, 8.0])
++
++
++class PromptSeqTest(unittest.TestCase):
++    def plan(self, **kw):
++        args = dict(bpm=120, bars=2, strategy="cadence", overlap_beats=1)
++        args.update(kw)
++        return tempo.plan(**args)      # fpb 30, loop 240, overlap 30, max 270
++
++    def test_single_prompt(self):
++        prompts, _w = prompt_seq.compile_sequence([("0", "gold", "")], self.plan(seamless=False))
++        self.assertEqual(prompts, {"0": "gold"})
++
++    def test_crossfade_weights(self):
++        rows = [("beat", "prompt", "xfade"), ("0", "gold", "1"), ("4", "ice", "2")]
++        prompts, _w = prompt_seq.compile_sequence(rows, self.plan(seamless=False))
++        self.assertEqual(prompts["0"], "gold")
++        self.assertEqual(prompts["120"], "ice")
++        self.assertIn("90", prompts)                  # fade gold->ice over beat 3..4
++        mid = sim.composable_weights(sim.prompt_at(prompts, 105, 240))
++        self.assertEqual([p for p, _w in mid], ["gold", "ice"])
++        self.assertAlmostEqual(mid[0][1], 0.5)
++        self.assertAlmostEqual(mid[0][1] + mid[1][1], 1.0)
++        self.assertEqual(sim.prompt_at(prompts, 89, 240), "gold")
++        self.assertEqual(sim.prompt_at(prompts, 200, 240), "ice")   # no loop fade
++
++    def test_weights_stay_in_unit_range_through_fade(self):
++        rows = [("0", "a", "1"), ("4", "b", "1")]
++        prompts, _w = prompt_seq.compile_sequence(rows, self.plan())
++        for f in range(270):
++            for _p, w in sim.composable_weights(sim.prompt_at(prompts, f, 270)):
++                self.assertTrue(-1e-9 <= w <= 1 + 1e-9, (f, w))
++
++    def test_seamless_loop_fades_back_and_tail_repeats_head(self):
++        rows = [("0", "a", "1"), ("4", "b", "1")]
++        prompts, _w = prompt_seq.compile_sequence(rows, self.plan())
++        self.assertEqual(sim.prompt_at(prompts, 240, 270), "a")          # loop point = first prompt
++        end = sim.composable_weights(sim.prompt_at(prompts, 225, 270))   # b -> a during the last beat
++        self.assertEqual([p for p, _w in end], ["b", "a"])
++        for f in range(30):                                              # overlap tail == head
++            self.assertEqual(sim.prompt_at(prompts, 240 + f, 270), sim.prompt_at(prompts, f, 270))
++
++    def test_backticks_and_rows_past_loop(self):
++        rows = [("0", "a `x`", ""), ("99", "late", "")]
++        prompts, warnings = prompt_seq.compile_sequence(rows, self.plan(seamless=False))
++        self.assertEqual(prompts, {"0": "a x"})
++        self.assertEqual(len(warnings), 2)
++
++    def test_seed_rows_from_prompt_json(self):
++        rows = prompt_seq.rows_from_prompts({"0": "a", "60": "b"}, 30.0)
++        self.assertEqual(rows, [("0", "a", ""), ("2", "b", "")])
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+
