@@ -161,7 +161,14 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
         except (TypeError, ValueError):
             settings[field.key] = coerce(field, field.default)
             warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
+    # Deforum parses every unit's schedules even when the unit is off, so units 2-5
+    # get unit 1's defaults with the unit number swapped; only `enabled` is False.
     for unit in range(2, CN_UNITS + 1):
+        for field in schema.cn_fields(1):
+            if field.api == "cn_1_enabled":
+                continue
+            key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
+            settings[key] = coerce(field, field.default)
         settings["cn_%d_enabled" % unit] = False
 
     # Output handling the TD side relies on (auto-load expects <outdir>/<timestring>.mp4).

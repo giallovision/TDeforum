@@ -75,6 +75,20 @@ class PayloadTest(unittest.TestCase):
         for unit in range(2, 6):
             self.assertIs(s["cn_%d_enabled" % unit], False)
 
+    def test_disabled_cn_units_send_full_schedules(self):
+        # Deforum crashes on a None schedule even for a disabled unit (gvispc1 log:
+        # "'NoneType' object has no attribute 'split'"), so every unit needs them all.
+        s = self.build()["request"]["deforum_settings"]
+        for unit in range(2, 6):
+            for field in schema.cn_fields(1):
+                if field.api == "cn_1_enabled":
+                    continue
+                key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
+                self.assertIn(key, s)
+                self.assertIsNotNone(s[key], key)
+            self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
+            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(1.0)")
+
     def test_td_only_fields_not_sent(self):
         s = self.build()["request"]["deforum_settings"]
         for key in ("comfy_preproc_enable", "comfy_preprocessor", "video_frame_mode",
