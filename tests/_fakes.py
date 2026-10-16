@@ -113,8 +113,9 @@ class Timeline(object):
     a script set the frame since the last advance (then it shows the set value plus `lands_past`,
     0 or 1, modelling whether a frame set inside a callback lands on the target or one past)."""
 
-    def __init__(self, frame=1, play=True, rate=60.0, start=1, lands_past=0):
+    def __init__(self, frame=1, play=True, rate=60.0, start=1, lands_past=0, end=100000):
         self._frame, self.play, self.rate, self.start = frame, play, rate, start
+        self.end = self.rangeEnd = end
         self.lands_past, self._set = lands_past, False
 
     @property
@@ -132,6 +133,8 @@ class Timeline(object):
                 self._frame += self.lands_past
         elif self.play:
             self._frame += 1
+        if self._frame > self.rangeEnd:           # a playing timeline wraps at its end
+            self._frame = self.start
 
 
 class FakeTop(Op):

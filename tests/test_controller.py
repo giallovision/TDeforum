@@ -388,6 +388,15 @@ class FeedTest(ControllerTest.__bases__[0]):
         self.assertEqual(self.state(), ctl.IDLE)
         self.assertIn("did not appear", self.root.storage[ctl.STATE_KEY]["last_result"])
 
+    def test_short_timeline_is_extended_and_restored(self):
+        self.make()
+        self.timeline.end = self.timeline.rangeEnd = 60
+        ctl.queue(self.root)
+        self.assertEqual(self.timeline.rangeEnd, 119)
+        self.record_all()
+        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
+        self.assertEqual((self.timeline.end, self.timeline.rangeEnd), (60, 60))
+
     def test_stray_jump_is_corrected(self):
         self.make()
         self.timeline.frame, self.timeline.play = 47, True

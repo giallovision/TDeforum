@@ -576,6 +576,15 @@ def _begin_loop_capture(root, cfg, values, result, loops):
     st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
           "j": 0, "since_set": 0, "submitted": now, "updated": now,
           "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
+    # The timeline wraps at its end (a 120 frame project would jump back to 1 at frame 121),
+    # so lengthen it for the recording and give it back afterwards.
+    need = max(plan["frames"])
+    for name in ("end", "rangeEnd"):
+        have = getattr(timeline, name, None)
+        if have is not None and have < need:
+            st["restore"][name] = have
+            setattr(timeline, name, need)
+            log("timeline %s %s -> %d for the recording (restored afterwards)" % (name, have, need))
     _save(root, st)
     # The timeline keeps PLAYING: a paused TouchDesigner cooks no frames, so no Frame End
     # callback (or timer) would ever arrive. realTime is off, so every cooked frame is one
@@ -713,6 +722,9 @@ def _restore_timeline(root, restore):
         return
     try:
         timeline = _timeline(root)
+        for name in ("end", "rangeEnd"):
+            if name in restore:
+                setattr(timeline, name, restore[name])
         timeline.frame = restore["frame"]
         timeline.play = restore["play"]
     except Exception as exc:
