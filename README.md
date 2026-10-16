@@ -68,7 +68,7 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
 
 ### The `deforum` COMP
 
-Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
+Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages (the first one has the *Example Preset* drop-down): **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
 
 Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
 
@@ -103,6 +103,31 @@ Notes:
 * ComfyUI preprocessing is skipped for TOP feeds; use ControlNet's own module (`depth_midas`, `canny`, ...) or leave it at `none` for ready-made masks or QR images.
 * `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
 * Units 1-3 have pages; units 4-5 stay available through the payload only.
+
+### Example presets
+
+*Tempo › Example Preset* (first page of the COMP) lays one of 12 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+
+* Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+* A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+* Motion (2D/3D camera) and the Mod Matrix slots a preset does not mention are set to the baseline, so each example starts from a neutral camera.
+* The values a preset replaced are remembered: pick another preset, or **None**, and press bake to get them back first. Your own tweaks after applying stay until the selection changes.
+* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts and ControlNet are never touched.
+
+| id | name | what it does |
+|---|---|---|
+| `3d_tunnel_roll` | 3D - Tunnel roll (good) | Steady forward push with a slow roll; high keep so it flows like a QR tunnel. |
+| `3d_slow_orbit` | 3D - Slow orbit (good) | Gentle pan around the scene with mirrored edges so nothing smears at the border. |
+| `3d_kick_push` | 3D - Kick push (good) | Slow drift forward plus a push on every beat (Mod slot 1) that also loosens Strength on the hit (slot 2), so the kick regenerates detail. |
+| `3d_warp_drive` | 3D - Warp drive (extreme) | Fast push, wide FOV and a surge every 4 beats. Expect stretching; cadence 2 keeps up. |
+| `3d_vortex` | 3D - Vortex (extreme) | Fast roll while pushing in and tilting; the picture spirals and re-forms. |
+| `3d_strobe_push` | 3D - Strobe push (extreme) | Hard pushes on every half beat, a contrast flash and a Strength dip on the beat. |
+| `2d_zoom_drift` | 2D - Zoom drift (good) | Slow zoom in with a hint of rotation; the classic smooth Deforum roll. |
+| `2d_scroll` | 2D - Scroll (good) | Sideways scroll with wrapped edges, so the picture tiles instead of smearing. |
+| `2d_spiral_crash` | 2D - Spiral crash (extreme) | Fast zoom and spin with low keep: the image keeps collapsing into new structure. |
+| `2d_twirl` | 2D - Twirl (extreme) | Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2). |
+| `video_soft_restyle` | Video Input - Soft restyle (good) | Keeps most of the init video's structure and colour; frames follow the video (needs Globals > Video Init Path). |
+| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video: heavy restyle, extra noise, no colour matching. |
 
 ### Tempo
 
@@ -173,6 +198,7 @@ scripts/
     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+    presets.py         # 12 example configurations (Example Preset drop-down)
     migrate.py         # Deforum_UI -> deforum COMP value migration
     payload.py         # batch request + frame plan
     comfy.py           # ComfyUI request / history parsing

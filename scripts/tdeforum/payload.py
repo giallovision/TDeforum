@@ -356,7 +356,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
 
 
 def _loop_seeds(values, settings, tp, warnings):
-    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", True))):
+    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", False))):
         return
     behavior = settings.get("seed_behavior", "iter")
     if behavior == "iter":

@@ -46,6 +46,7 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
 - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
 - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+- [x] Example Preset drop-down: 12 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
 - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
 
 ### 🚧 In Progress

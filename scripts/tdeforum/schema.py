@@ -20,14 +20,15 @@ TD parameter names are derived from the API name exactly as the original
 build_master_ui.py did (``translation_z`` -> ``Translationz``), so values and
 expressions from the old Deforum_UI migrate by name.
 
-Defaults ("baselines"): motion is neutral (no camera movement); every other
-value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
+Defaults ("baselines"): motion is neutral (no camera movement); seed behaviour is Iterate
+(+1) with seed 424242; every other value is Deforum 5d63a339's own default unless noted.
+presets.py holds example configurations laid over these on bake (the baselines never change). An LCM checkpoint wants
 CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 """
 
 import re
 
-from . import feed, modulation, tempo
+from . import feed, modulation, presets, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -231,6 +232,9 @@ def _cn_unit_fields(n):
 
 FIELDS = [
     # --- Tempo -----------------------------------------------------------------
+    F("preset", presets.NONE, TE, MENU, menu=presets.NAMES, labels=presets.LABELS,
+      label="Example Preset (applied on bake)", target=None),
+    F("preset_info", "", TE, STATUS, label="Preset", target=None),
     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
     F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
@@ -244,7 +248,8 @@ FIELDS = [
     F("diffusion_cadence", 4, TE, INT, norm=(1, 8), label="Diffusion Cadence (diffuse every Nth frame)"),
     F("seamless_loop", True, TE, TOGGLE, label="Seamless Loop", target=None),
     F("loop_overlap_beats", 1.0, TE, FLOAT, norm=(0, 4), label="Loop Overlap (beats, crossfaded)", target=None),
-    F("loop_seeds", True, TE, TOGGLE, label="Loop Seeds (repeat seeds each loop)", target=None),
+    F("loop_seeds", False, TE, TOGGLE, label="Loop Seeds (schedule seeds to repeat per loop; off = Iterate +1)",
+      target=None),
     F("length_source", "tempo", TE, MENU, menu=["tempo", "manual"],
       labels=["Tempo (loop length)", "Manual (Max Frames)"], target=None),
     F("max_frames", 240, TE, INT, norm=(1, 1000), label="Max Frames (manual)"),
@@ -262,7 +267,7 @@ FIELDS = [
     F("seed_behavior", "iter", G, MENU,
       menu=["iter", "fixed", "random", "ladder", "alternate", "schedule"],
       labels=["Iterate (+1)", "Fixed", "Random", "Ladder", "Alternate", "Schedule"]),
-    F("seed", "-1", G, SEED),
+    F("seed", "424242", G, SEED),
     # Deforum ignores "n_prompt"; the API reads animation_prompts_negative.
     F("n_prompt", "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark",
       G, STR, label="Negative Prompt", key="animation_prompts_negative"),

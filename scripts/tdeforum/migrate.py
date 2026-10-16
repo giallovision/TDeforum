@@ -32,6 +32,25 @@ def _const(value):
     return {"mode": "CONSTANT", "expr": "", "bind": "", "val": value}
 
 
+# Baselines that changed: a saved value equal to the OLD default is not carried over, so the COMP
+# picks up the new baseline. Anything you set to something else is kept.
+BASELINE_BUMPS = {
+    "seed": ("-1", "424242"),
+    "loop_seeds": (True, False),
+}
+
+
+def _is_old_default(field, entry):
+    bump = BASELINE_BUMPS.get(field.api)
+    if bump is None or entry.get("mode", "CONSTANT") != "CONSTANT":
+        return False
+    value = entry.get("val")
+    if isinstance(bump[0], bool):
+        return str(value).strip().lower() in ("1", "1.0", "true", "on") if bump[0] else \
+            str(value).strip().lower() in ("0", "0.0", "false", "off", "")
+    return str(value).strip() == bump[0]
+
+
 def plan(saved, from_old_ui):
     """Actions that move ``saved`` onto the new COMP's parameters."""
     actions = []
@@ -41,6 +60,11 @@ def plan(saved, from_old_ui):
             continue
         entry = saved[name]
         mode = entry.get("mode", "CONSTANT")
+
+        if _is_old_default(field, entry):
+            bump = BASELINE_BUMPS[field.api]
+            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[0], bump[1])))
+            continue
 
         if field.kind == schema.MOD and from_old_ui:
             # Old schedules were string pars; the new base is a float + a raw override.

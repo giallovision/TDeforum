@@ -29,6 +29,7 @@ from . import comfy
 from . import config
 from . import feed
 from . import payload
+from . import presets
 from . import schema
 from . import tempo
 
@@ -48,6 +49,7 @@ BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAIT
         CAPTURING, WAITING_FEED)
 LOST_CONTACT_S = 120.0
 FEED_FINALIZE_TIMEOUT_S = 60.0
+PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
 
 # Operators this controller talks to, relative to root.
@@ -150,6 +152,88 @@ def _set_constant(par, value):
 
 
 # --------------------------------------------------------------------------- reading TD
+
+def _coerce_par(field, value):
+    if field.kind == schema.INT:
+        return int(round(float(value)))
+    if field.kind == schema.FLOAT:
+        return float(value)
+    if field.kind == schema.TOGGLE:
+        return 1 if value else 0
+    return value
+
+
+def _apply_preset_safely(root):
+    try:
+        apply_preset(root)
+    except Exception as exc:
+        traceback.print_exc()
+        log("preset could not be applied: %s" % exc)
+
+
+def apply_preset(root):
+    """Lay the selected Example Preset over the deforum COMP (see presets.py). True if it changed anything.
+
+    Does nothing while the selection equals what was last applied, so your tweaks after applying
+    stay. Picking another preset or None first puts back the values the last preset replaced.
+    Only constant parameters are touched; driven ones (expression / bind / export) keep their driver.
+    """
+    ui = _op(root, "ui")
+    menu = getattr(ui.par, "Preset", None) if ui is not None else None
+    if menu is None:
+        return False
+    selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
+    stored = root.fetch(PRESET_KEY, None, search=False)
+    stored = dict(stored) if isinstance(stored, dict) else {}
+    if selected == stored.get("applied", presets.NONE):
+        return False
+
+    restored = 0
+    for name, value in (stored.get("backup") or {}).items():
+        par = getattr(ui.par, name, None)
+        if par is not None and _is_constant(par):
+            par.val = value
+            restored += 1
+
+    preset, backup, changed, kept = presets.get(selected), {}, 0, []
+    if preset is not None:
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        for api, value in presets.resolve(preset, defaults).items():
+            field = schema.BY_API.get(api)
+            if field is None:
+                log("preset %s: unknown parameter %r skipped" % (preset.id, api))
+                continue
+            targets = [(field.td_name, _coerce_par(field, value))]
+            if field.kind == schema.MOD:
+                targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
+            for name, new in targets:
+                par = getattr(ui.par, name, None)
+                if par is None:
+                    continue
+                if not _is_constant(par):
+                    kept.append(name)
+                    continue
+                if field.menu and name == field.td_name and new not in field.menu:
+                    log("preset %s: %r is not a choice for %s, skipped" % (preset.id, new, name))
+                    continue
+                if par.val != new:
+                    backup[name] = par.val
+                    par.val = new
+                    changed += 1
+    root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
+    if preset is None:
+        text = "None (restored %d parameters)" % restored
+    else:
+        text = "%s: %d parameters set%s" % (preset.label, changed,
+                                             ", %d driven kept" % len(kept) if kept else "")
+    _set_par(ui, "Presetinfo", text)
+    log("preset %s" % text)
+    if preset is not None:
+        log("  " + preset.notes)
+    if kept:
+        log("  driven (expression / bind / export) and left alone: %s" % ", ".join(sorted(kept)))
+    return True
+
 
 def read_ui(ui):
     values = {}
@@ -276,6 +360,8 @@ def queue(root):
     """Queue button: preprocess (optional) then render."""
     cfg = config.load()
     resync(root, cfg)
+    _apply_preset_safely(root)
+    apply_preset(root)
     st = _state(root)
     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
@@ -1096,6 +1182,7 @@ def preview(root):
     """
     cfg = config.load()
     resync(root, cfg)
+    _apply_preset_safely(root)
     values, result = build(root, cfg)
     for warning in result["warnings"]:
         log("warning: " + warning)

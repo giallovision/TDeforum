@@ -258,8 +258,18 @@ class TempoPayloadTest(unittest.TestCase):
         s = r["request"]["deforum_settings"]
         # 120 bpm, 2 bars at 60 fps + 1 beat overlap
         self.assertEqual((s["fps"], s["max_frames"], s["diffusion_cadence"]), (60, 270, 4))
-        self.assertEqual(s["seed_schedule"], "0:(s + t%240)")
+        self.assertEqual(s["seed_behavior"], "iter")                # baseline: Iterate (+1)
+        self.assertNotIn("seed_schedule", s)
         self.assertEqual(s["prompts"], {"0": "json prompt"})        # no rows -> prompt.json
+
+    def test_loop_seeds_is_opt_in(self):
+        s = self.build(loop_seeds=True)["request"]["deforum_settings"]
+        self.assertEqual((s["seed_behavior"], s["seed_schedule"]), ("schedule", "0:(s + t%240)"))
+
+    def test_baseline_seed_and_behaviour(self):
+        self.assertEqual(schema.BY_API["seed"].default, "424242")
+        self.assertEqual(schema.BY_API["seed_behavior"].default, "iter")
+        self.assertIs(schema.BY_API["loop_seeds"].default, False)
 
     def test_slots_and_chop_compile_to_what_deforum_evaluates(self):
         r = self.build(chop={"Translationz": [0.0, 2.0]},
@@ -309,7 +319,7 @@ class TempoPayloadTest(unittest.TestCase):
         self.assertTrue(any("does not divide" in w for w in r["warnings"]))
 
     def test_non_looping_seed_behaviour_warns(self):
-        r = self.build(seed_behavior="random")
+        r = self.build(seed_behavior="random", loop_seeds=True)
         s = r["request"]["deforum_settings"]
         self.assertEqual(s["seed_behavior"], "random")
         self.assertNotIn("seed_schedule", s)
