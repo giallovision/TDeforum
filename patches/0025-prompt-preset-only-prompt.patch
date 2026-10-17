@@ -1,0 +1,157 @@
+From acf29412e5c48ef55174524e0495f900017c6cd0 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 04:46:16 +0000
+Subject: [PATCH] Prompt Preset changes the prompt and nothing else (no Prompt
+ Source switch)
+
+While a preset is picked the payload uses prompt_seq whatever Prompt Source says, also with a manual length.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  2 +-
+ docs/deforum_parameters.md        |  6 +++---
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/payload.py       | 15 +++++++++++----
+ scripts/tdeforum/td_controller.py | 10 ++++++----
+ tests/test_presets.py             | 11 ++++++++++-
+ 6 files changed, 32 insertions(+), 14 deletions(-)
+
+diff --git a/README.md b/README.md
+index e80cef9..c3f62cb 100644
+--- a/README.md
++++ b/README.md
+@@ -186,7 +186,7 @@ The four **Hybrid** examples run Sweep Depth on the same video that drives the m
+ 
+ ### Prompt presets
+ 
+-*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and switches *Prompt Source* to the sequence. The rows it replaced come back when you pick **None**. The Negative Prompt (Globals) still applies.
++*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and changes nothing else: while a preset is picked it is used whatever *Prompt Source* says (also with a manual length). The rows it replaced, and your prompt.json if that is your source, come back when you pick **None**. The Negative Prompt (Globals) still applies.
+ 
+ | id | name | prompt |
+ |---|---|---|
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index 2e99012..9239c79 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -1,6 +1,6 @@
+ # deforum COMP: parameter reference
+ 
+-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.2). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+ Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+@@ -83,8 +83,8 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ 
+ | TD name | Label | Default | What it does |
+ |---|---|---|---|
+-| `Promptsource` | Prompt Source | sequence | Sequence: prompts from the beat-indexed prompt_seq table inside the COMP. prompt.json: frame-keyed prompts from scripts/prompt.json. |
+-| `Promptpreset` | Prompt Preset (writes prompt_seq) | none | Writes one of ten visionary prompts into prompt_seq and switches Prompt Source to it; None restores your rows. |
++| `Promptsource` | Prompt Source | sequence | Sequence: prompts from the beat-indexed prompt_seq table inside the COMP. prompt.json: frame-keyed prompts from scripts/prompt.json. A picked Prompt Preset overrides either. |
++| `Promptpreset` | Prompt Preset (writes prompt_seq) | none | Writes one of ten visionary prompts into prompt_seq and changes nothing else; while one is picked it is the prompt whatever Prompt Source says. None restores your rows (and prompt.json, if that is your source). |
+ | `Promptedit` | Edit prompt_seq (opens deforum/prompt_seq) | (button) | Opens deforum/prompt_seq in a floating editor. |
+ | `Promptxfadebeats` | Default Crossfade (beats) | 1.0 | Default crossfade length between prompt_seq rows when a row has no xfade of its own. |
+ 
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index a1db063..f1f4bd4 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -27,7 +27,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.10.2"
++__version__ = "0.10.3"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index bc0601a..676d747 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -427,11 +427,18 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             _check_cn_guide(values, unit, settings, total, frame_counter, warnings)
+ 
+     # --- prompts ------------------------------------------------------------------------
++    # A Prompt Preset (Prompts page) wins over Prompt Source: picking one changes the prompt and
++    # nothing else, so it is used whatever the source and whether or not the length is tempo-based.
+     sequence = None
+-    if tp and prompt_rows and _text(values.get("prompt_source", "sequence")) == "sequence":
+-        sequence, prompt_warnings = prompt_seq.compile_sequence(
+-            prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
+-        warnings.extend(prompt_warnings)
++    preset_on = _text(values.get("prompt_preset", "none")) not in ("", "none")
++    if prompt_rows and (preset_on or _text(values.get("prompt_source", "sequence")) == "sequence"):
++        if tp:
++            sequence, prompt_warnings = prompt_seq.compile_sequence(
++                prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
++            warnings.extend(prompt_warnings)
++        elif preset_on:
++            first = [r for r in prompt_rows[1:] if len(r) > 1 and str(r[1]).strip()]
++            sequence = {"0": str(first[0][1]).strip()} if first else None
+     settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
+ 
+     # --- output: fps / interpolation, and what the TD side relies on -----------------------
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index d29e69f..440e222 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -356,7 +356,10 @@ def ui_watched():
+ 
+ 
+ def apply_prompt_preset(root):
+-    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back)."""
++    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back).
++
++    Changes nothing else on the COMP: while a preset is picked the payload uses prompt_seq
++    whatever Prompt Source says, so prompt.json users get the preset without a mode switch."""
+     ui = _op(root, "ui")
+     menu = getattr(ui.par, "Promptpreset", None) if ui is not None else None
+     table = _inner(ui, "prompt_seq")
+@@ -385,11 +388,10 @@ def apply_prompt_preset(root):
+     if preset is None:
+         log("prompt preset None: your prompt_seq rows are back")
+         return True
++    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
+     source = getattr(ui.par, "Promptsource", None)
+     if source is not None and str(source.eval()) != "sequence":
+-        _set_constant(source, "sequence")
+-        log("Prompt Source switched to the prompt_seq sequence")
+-    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
++        log("  (used instead of prompt.json while a Prompt Preset is picked; Prompt Source is unchanged)")
+     return True
+ 
+ 
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index 673cdf9..2852393 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -285,7 +285,13 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+         self.assertTrue(ctl.apply_prompt_preset(self.root))
+         self.assertEqual(table.rows[0], ["beat", "prompt", "xfade"])
+         self.assertIn("cosmic eye", table.rows[1][1])
+-        self.assertEqual(ui.par.Promptsource.val, "sequence")
++        self.assertEqual(ui.par.Promptsource.val, "json", "picking a prompt changes nothing else")
++        values = ctl.read_ui(ui)
++        sent = payload.build_request(values, {"0": "from json"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
++        self.assertIn("cosmic eye", sent["request"]["deforum_settings"]["prompts"]["0"])
++        manual = payload.build_request(dict(values, length_source="manual"), {"0": "from json"}, MODELS,
++                                       prompt_rows=ctl.read_prompt_rows(ui))
++        self.assertIn("cosmic eye", manual["request"]["deforum_settings"]["prompts"]["0"])
+         ui.par.Promptpreset.val = "neural_bloom"
+         ctl.apply_prompt_preset(self.root)
+         self.assertIn("neural network", table.rows[1][1])
+@@ -294,6 +300,9 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+         self.assertEqual(table.rows, [["beat", "prompt", "xfade"], ["0", "gold", ""]])
+         values = ctl.read_ui(ui)
+         prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
++        self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "x")   # json again
++        values["prompt_source"] = "sequence"
++        prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
+         self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "gold")
+ 
+     def test_every_prompt_preset_compiles(self):
+-- 
+2.43.0
+

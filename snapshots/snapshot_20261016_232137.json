@@ -1,0 +1,1271 @@
+{
+  "name": "",
+  "pars": {
+    "Amountschedule": {
+      "mode": "CONSTANT",
+      "val": 0.1
+    },
+    "Amountscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Ancestraletaschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Ancestraletascheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Angle": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Angleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Animationmode": {
+      "mode": "CONSTANT",
+      "val": "3D"
+    },
+    "Aspectratioschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Aspectratioscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Autoload": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Bakepoints": {
+      "mode": "CONSTANT",
+      "val": 0
+    },
+    "Beatsperbar": {
+      "mode": "CONSTANT",
+      "val": 4
+    },
+    "Border": {
+      "mode": "CONSTANT",
+      "val": "replicate"
+    },
+    "Bpm": {
+      "mode": "CONSTANT",
+      "val": 150.0
+    },
+    "Cadenceflowfactorschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Cadenceflowfactorscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Cfgscaleschedule": {
+      "mode": "CONSTANT",
+      "val": 1.5
+    },
+    "Cfgscalescheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Chopmode": {
+      "mode": "CONSTANT",
+      "val": "add"
+    },
+    "Choppath": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Choptiming": {
+      "mode": "CONSTANT",
+      "val": "timeline"
+    },
+    "Clipskipschedule": {
+      "mode": "CONSTANT",
+      "val": 2.0
+    },
+    "Clipskipscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Cn1controlmode": {
+      "mode": "CONSTANT",
+      "val": "Balanced"
+    },
+    "Cn1enabled": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn1guidanceend": {
+      "mode": "CONSTANT",
+      "val": 0.8
+    },
+    "Cn1guidancestart": {
+      "mode": "CONSTANT",
+      "val": 0.2
+    },
+    "Cn1loopbackmode": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn1lowvram": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn1maskvidpath": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Cn1model": {
+      "mode": "CONSTANT",
+      "val": "ctrl_v1p_qr_monster_v2"
+    },
+    "Cn1module": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Cn1overwriteframes": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn1pixelperfect": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn1processorres": {
+      "mode": "CONSTANT",
+      "val": 576
+    },
+    "Cn1resizemode": {
+      "mode": "CONSTANT",
+      "val": "Inner Fit (Scale to Fit)"
+    },
+    "Cn1thresholda": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn1thresholdb": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn1vidpath": {
+      "mode": "CONSTANT",
+      "val": "/opt/a1111/td_masks/feeds/cn1_feed.mp4"
+    },
+    "Cn1weight": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Cn2controlmode": {
+      "mode": "CONSTANT",
+      "val": "Balanced"
+    },
+    "Cn2enabled": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn2guidanceend": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Cn2guidancestart": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Cn2loopbackmode": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn2lowvram": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn2maskvidpath": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Cn2model": {
+      "mode": "CONSTANT",
+      "val": "ctrl_v1p_qr_monster_v2"
+    },
+    "Cn2module": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Cn2overwriteframes": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn2pixelperfect": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn2processorres": {
+      "mode": "CONSTANT",
+      "val": 512
+    },
+    "Cn2resizemode": {
+      "mode": "CONSTANT",
+      "val": "Inner Fit (Scale to Fit)"
+    },
+    "Cn2thresholda": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn2thresholdb": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn2vidpath": {
+      "mode": "CONSTANT",
+      "val": "/opt/a1111/td_masks/mask_01.mov"
+    },
+    "Cn2weight": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Cn3controlmode": {
+      "mode": "CONSTANT",
+      "val": "Balanced"
+    },
+    "Cn3enabled": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn3guidanceend": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Cn3guidancestart": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Cn3loopbackmode": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn3lowvram": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Cn3maskvidpath": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Cn3model": {
+      "mode": "CONSTANT",
+      "val": "ctrl_v1p_qr_monster_v2"
+    },
+    "Cn3module": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Cn3overwriteframes": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn3pixelperfect": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Cn3processorres": {
+      "mode": "CONSTANT",
+      "val": 512
+    },
+    "Cn3resizemode": {
+      "mode": "CONSTANT",
+      "val": "Inner Fit (Scale to Fit)"
+    },
+    "Cn3thresholda": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn3thresholdb": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Cn3vidpath": {
+      "mode": "CONSTANT",
+      "val": "/opt/a1111/td_masks/mask_01.mov"
+    },
+    "Cn3weight": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Colorcoherence": {
+      "mode": "CONSTANT",
+      "val": "LAB"
+    },
+    "Colorforcegrayscale": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Comfypreprocenable": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Comfypreprocessor": {
+      "mode": "CONSTANT",
+      "val": "PiDiNetPreprocessor"
+    },
+    "Contrastschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Contrastscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Ddimetaschedule": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Ddimetascheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Depthalgorithm": {
+      "mode": "CONSTANT",
+      "val": "Midas-3-Hybrid"
+    },
+    "Diffusioncadence": {
+      "mode": "CONSTANT",
+      "val": 8
+    },
+    "Enableancestraletascheduling": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Enableclipskipscheduling": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Enableddimetascheduling": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Enablenoisemultiplierscheduling": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Enableperspectiveflip": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Enablestepsscheduling": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Enablesubseedscheduling": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Farschedule": {
+      "mode": "CONSTANT",
+      "val": 10000.0
+    },
+    "Farscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Feed1mode": {
+      "mode": "CONSTANT",
+      "val": "top_loop"
+    },
+    "Feed1top": {
+      "mode": "CONSTANT",
+      "val": "/project1/final_out"
+    },
+    "Feed2mode": {
+      "mode": "CONSTANT",
+      "val": "file"
+    },
+    "Feed2top": {
+      "mode": "CONSTANT",
+      "val": "/project1/final_out"
+    },
+    "Feed3mode": {
+      "mode": "CONSTANT",
+      "val": "file"
+    },
+    "Feed3top": {
+      "mode": "CONSTANT",
+      "val": "/project1/final_out"
+    },
+    "Feedloopstart": {
+      "mode": "CONSTANT",
+      "val": 0
+    },
+    "Feedmethod": {
+      "mode": "CONSTANT",
+      "val": "addframe"
+    },
+    "Forcepreprocess": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Fovschedule": {
+      "expr": "op('wave1')['wave1']*42+84",
+      "mode": "EXPRESSION",
+      "val": 70.0
+    },
+    "Fovscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Height": {
+      "mode": "CONSTANT",
+      "val": 576
+    },
+    "Hybridcompalphaschedule": {
+      "mode": "CONSTANT",
+      "val": 0.8
+    },
+    "Hybridcompalphascheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Hybridcomposite": {
+      "mode": "CONSTANT",
+      "val": "Before Motion"
+    },
+    "Hybridconsistencyblur": {
+      "mode": "CONSTANT",
+      "val": 2
+    },
+    "Hybridflowconsistency": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Hybridflowfactorschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Hybridflowfactorscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Hybridflowmethod": {
+      "mode": "CONSTANT",
+      "val": "RAFT"
+    },
+    "Hybridmotion": {
+      "mode": "CONSTANT",
+      "val": "Optical Flow"
+    },
+    "Hybridmotionuseprevimg": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Img2imgfixsteps": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Interpengine": {
+      "mode": "CONSTANT",
+      "val": "RIFE v4.6"
+    },
+    "Invertmask": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Kernelschedule": {
+      "mode": "CONSTANT",
+      "val": 5
+    },
+    "Legacycolormatch": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Lengthsource": {
+      "mode": "CONSTANT",
+      "val": "tempo"
+    },
+    "Loopbars": {
+      "mode": "CONSTANT",
+      "val": 16
+    },
+    "Loopoffset": {
+      "mode": "CONSTANT",
+      "val": 0
+    },
+    "Loopoverlapbeats": {
+      "mode": "CONSTANT",
+      "val": 2.0
+    },
+    "Loopseeds": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Maxframes": {
+      "mode": "CONSTANT",
+      "val": 240
+    },
+    "Midasweight": {
+      "mode": "CONSTANT",
+      "val": 0.2
+    },
+    "Mod1active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod1beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod1depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod1phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod1shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod1sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod1target": {
+      "mode": "CONSTANT",
+      "val": "zoom"
+    },
+    "Mod2active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod2beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod2depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod2phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod2shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod2sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod2target": {
+      "mode": "CONSTANT",
+      "val": "translation_z"
+    },
+    "Mod3active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod3beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod3depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod3phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod3shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod3sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod3target": {
+      "mode": "CONSTANT",
+      "val": "strength_schedule"
+    },
+    "Mod4active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod4beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod4depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod4phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod4shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod4sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod4target": {
+      "mode": "CONSTANT",
+      "val": "noise_schedule"
+    },
+    "Mod5active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod5beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod5depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod5phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod5shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod5sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod5target": {
+      "mode": "CONSTANT",
+      "val": "rotation_3d_y"
+    },
+    "Mod6active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod6beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod6depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod6phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod6shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod6sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod6target": {
+      "mode": "CONSTANT",
+      "val": "angle"
+    },
+    "Mod7active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod7beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod7depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod7phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod7shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod7sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod7target": {
+      "mode": "CONSTANT",
+      "val": "cfg_scale_schedule"
+    },
+    "Mod8active": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Mod8beats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Mod8depth": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod8phase": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Mod8shape": {
+      "mode": "CONSTANT",
+      "val": "sine"
+    },
+    "Mod8sharpness": {
+      "mode": "CONSTANT",
+      "val": 4.0
+    },
+    "Mod8target": {
+      "mode": "CONSTANT",
+      "val": "translation_x"
+    },
+    "Nearschedule": {
+      "mode": "CONSTANT",
+      "val": 200.0
+    },
+    "Nearscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Noisemultiplierschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Noisemultiplierscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Noiseschedule": {
+      "mode": "CONSTANT",
+      "val": 0.01
+    },
+    "Noisescheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Noisetype": {
+      "mode": "CONSTANT",
+      "val": "perlin"
+    },
+    "Nprompt": {
+      "mode": "CONSTANT",
+      "val": "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark"
+    },
+    "Opticalflowcadence": {
+      "mode": "CONSTANT",
+      "val": "RAFT"
+    },
+    "Opticalflowredogeneration": {
+      "mode": "CONSTANT",
+      "val": "None"
+    },
+    "Outfps": {
+      "mode": "CONSTANT",
+      "val": 60
+    },
+    "Overlaymask": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Paddingmode": {
+      "mode": "CONSTANT",
+      "val": "zeros"
+    },
+    "Pagepresetcamera": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetcn1val": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetcn2val": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetcn3val": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetdiffusion": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetflow": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresethybrid": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetmods": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetmotion2d": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetmotion3d": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetnoise": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetpipeline": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Pagepresetsweep": {
+      "mode": "CONSTANT",
+      "val": "peel_mask"
+    },
+    "Pagepresettempo": {
+      "mode": "CONSTANT",
+      "val": "none"
+    },
+    "Perlinh": {
+      "mode": "CONSTANT",
+      "val": 4
+    },
+    "Perlinoctaves": {
+      "mode": "CONSTANT",
+      "val": 3
+    },
+    "Perlinpersistence": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Perlinw": {
+      "mode": "CONSTANT",
+      "val": 4
+    },
+    "Perspectiveflipfv": {
+      "mode": "CONSTANT",
+      "val": 53.0
+    },
+    "Perspectiveflipfvraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Perspectiveflipgamma": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Perspectiveflipgammaraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Perspectiveflipphi": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Perspectiveflipphiraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Perspectivefliptheta": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Perspectiveflipthetaraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Preset": {
+      "mode": "CONSTANT",
+      "val": "hybrid_flow_glow"
+    },
+    "Promptpreset": {
+      "mode": "CONSTANT",
+      "val": "haeckel_abyss"
+    },
+    "Promptsource": {
+      "mode": "CONSTANT",
+      "val": "sequence"
+    },
+    "Promptxfadebeats": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Redoflowfactorschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Redoflowfactorscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Renderfps": {
+      "mode": "CONSTANT",
+      "val": "20"
+    },
+    "Renderstrategy": {
+      "mode": "CONSTANT",
+      "val": "interpolate"
+    },
+    "Rotation3dx": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Rotation3dxraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Rotation3dy": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Rotation3dyraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Rotation3dz": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Rotation3dzraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Sampler": {
+      "mode": "CONSTANT",
+      "val": "LCM"
+    },
+    "Samplingmode": {
+      "mode": "CONSTANT",
+      "val": "bicubic"
+    },
+    "Scheduler": {
+      "mode": "CONSTANT",
+      "val": "Automatic"
+    },
+    "Sdmodelcheckpoint": {
+      "mode": "CONSTANT",
+      "val": "0"
+    },
+    "Sdvae": {
+      "mode": "CONSTANT",
+      "val": "Automatic"
+    },
+    "Seamlessloop": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Seed": {
+      "mode": "CONSTANT",
+      "val": "424242"
+    },
+    "Seedbehavior": {
+      "mode": "CONSTANT",
+      "val": "iter"
+    },
+    "Sigmaschedule": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Sigmascheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Steps": {
+      "mode": "CONSTANT",
+      "val": 4
+    },
+    "Stepsschedule": {
+      "mode": "CONSTANT",
+      "val": 25.0
+    },
+    "Stepsscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Strength": {
+      "mode": "CONSTANT",
+      "val": 0.8
+    },
+    "Strengthschedule": {
+      "expr": "op('wave1')['wave1']*0.7",
+      "mode": "EXPRESSION",
+      "val": 0.65
+    },
+    "Strengthscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Subseedschedule": {
+      "mode": "CONSTANT",
+      "val": "0:(1)"
+    },
+    "Subseedstrengthschedule": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Subseedstrengthscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Sweepasmask": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Sweepblur": {
+      "mode": "CONSTANT",
+      "val": 8.0
+    },
+    "Sweepcycles": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Sweepdepthvideo": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Sweepdirection": {
+      "mode": "CONSTANT",
+      "val": "forward"
+    },
+    "Sweepenabled": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Sweepfill": {
+      "mode": "CONSTANT",
+      "val": "white"
+    },
+    "Sweepforce": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Sweepgrow": {
+      "mode": "CONSTANT",
+      "val": 10
+    },
+    "Sweepmode": {
+      "mode": "CONSTANT",
+      "val": "max"
+    },
+    "Sweepmodel": {
+      "mode": "CONSTANT",
+      "val": "depth_anything_v2_vits"
+    },
+    "Sweepprepareonly": {
+      "mode": "CONSTANT",
+      "val": false
+    },
+    "Sweepshape": {
+      "mode": "CONSTANT",
+      "val": "ramp"
+    },
+    "Sweepsmooth": {
+      "mode": "CONSTANT",
+      "val": 0.4
+    },
+    "Sweepsoftness": {
+      "mode": "CONSTANT",
+      "val": 16
+    },
+    "Sweeptrail": {
+      "mode": "CONSTANT",
+      "val": 20
+    },
+    "Sweepwidth": {
+      "mode": "CONSTANT",
+      "val": 40
+    },
+    "Thresholdschedule": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Thresholdscheduleraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Transformcenterx": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Transformcenterxraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Transformcentery": {
+      "mode": "CONSTANT",
+      "val": 0.5
+    },
+    "Transformcenteryraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Translationx": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Translationxraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Translationy": {
+      "mode": "CONSTANT",
+      "val": 0.0
+    },
+    "Translationyraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Translationz": {
+      "expr": "op('wave1')['wave1']",
+      "mode": "EXPRESSION",
+      "val": 0.0
+    },
+    "Translationzraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    },
+    "Usedepthwarping": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Usemaskvideo": {
+      "mode": "CONSTANT",
+      "val": true
+    },
+    "Videoframemode": {
+      "mode": "CONSTANT",
+      "val": "trim"
+    },
+    "Videoinitpath": {
+      "mode": "CONSTANT",
+      "val": "/opt/a1111/td_inputs/comfy_videos/archive/ballet/ballet1.mp4"
+    },
+    "Videomaskpath": {
+      "mode": "CONSTANT",
+      "val": "/opt/a1111/td_masks/feeds/cn_sweep_e16888def3.mp4"
+    },
+    "Width": {
+      "mode": "CONSTANT",
+      "val": 1024
+    },
+    "Zoom": {
+      "mode": "CONSTANT",
+      "val": 1.0
+    },
+    "Zoomraw": {
+      "mode": "CONSTANT",
+      "val": ""
+    }
+  },
+  "presets": {
+    "tdeforum_page_presets": {
+      "pagepreset_camera": {
+        "applied": "none",
+        "backup": {}
+      },
+      "pagepreset_cn1": {
+        "applied": "none",
+        "backup": {}
+      },
+      "pagepreset_diffusion": {
+        "applied": "none",
+        "backup": {}
+      },
+      "pagepreset_hybrid": {
+        "applied": "none",
+        "backup": {}
+      },
+      "pagepreset_noise": {
+        "applied": "none",
+        "backup": {}
+      },
+      "pagepreset_sweep": {
+        "applied": "peel_mask",
+        "backup": {
+          "Sweepblur": 4.0,
+          "Sweepcycles": 16.0,
+          "Sweepgrow": 6,
+          "Sweepsmooth": 0.1,
+          "Sweepsoftness": 8,
+          "Sweeptrail": 10,
+          "Sweepwidth": 42
+        }
+      }
+    },
+    "tdeforum_preset": {
+      "applied": "hybrid_flow_glow",
+      "backup": {
+        "Animationmode": "Video Input",
+        "Cn1guidanceend": 1.0,
+        "Cn1weight": 1.0,
+        "Diffusioncadence": 8,
+        "Feed1mode": "file",
+        "Hybridmotion": "None",
+        "Loopoverlapbeats": 1.0,
+        "Mod1active": true,
+        "Noisemultiplierschedule": 1.05,
+        "Noiseschedule": 0.065,
+        "Seamlessloop": true,
+        "Strengthschedule": 0.8,
+        "Sweepasmask": true,
+        "Sweepblur": 0.0,
+        "Sweepcycles": 2.0,
+        "Sweepenabled": false,
+        "Sweepfill": "depth",
+        "Sweepgrow": 4,
+        "Sweepmode": "min",
+        "Sweepshape": "pingpong",
+        "Sweepsmooth": 3.0,
+        "Sweepsoftness": 4,
+        "Sweeptrail": 9,
+        "Sweepwidth": 21
+      }
+    },
+    "tdeforum_prompt_preset": {
+      "applied": "haeckel_abyss",
+      "backup": [
+        [
+          "beat",
+          "prompt",
+          "xfade"
+        ],
+        [
+          "0",
+          "hyperrealistic, multicolored melting oil and water, liquid paint splatter, in the style of Jackson Pollack, 8K UHD",
+          ""
+        ]
+      ]
+    }
+  },
+  "prompt_seq": [
+    [
+      "beat",
+      "prompt",
+      "xfade"
+    ],
+    [
+      "0",
+      "radiolarians and jellyfish in the style of Ernst Haeckel, translucent bioluminescent sea creatures, intricate radial symmetry, deep ocean glow, scientific illustration meets hyperrealism",
+      ""
+    ]
+  ],
+  "taken": "2026-10-16 23:21:37",
+  "tdeforum": "0.11.0",
+  "tdeforum_snapshot": 1
+}

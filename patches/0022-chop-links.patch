@@ -1,0 +1,1159 @@
+From 34152e0bb1bc84927a85934d3e4e94dcdd35a911 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 03:46:46 +0000
+Subject: [PATCH] CHOP links: drop any CHOP channel on a schedule parameter and
+ its whole curve is baked at Queue
+
+- chop_link.py: CHOP Reference expressions (maths over whole channels) and Export CHOP on a
+  MOD parameter's base or raw become its base curve; Timeline (default) or stretch-to-loop timing
+- hybrid flow factor / composite alpha are now MOD (raw override, Mod Matrix targets, linkable)
+- Mod Matrix: CHOP Link Timing, CHOP-linked Parameters status; mod_live outputs linked curves
+- docs/deforum_parameters.md: parameter reference by page; version 0.10.0
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  13 +-
+ ROADMAP.md                        |   1 +
+ docs/deforum_parameters.md        | 287 ++++++++++++++++++++++++++++++
+ scripts/build_master_ui.py        |   8 +-
+ scripts/tdeforum/__init__.py      |   5 +-
+ scripts/tdeforum/chop_link.py     | 205 +++++++++++++++++++++
+ scripts/tdeforum/modulation.py    |   9 +-
+ scripts/tdeforum/payload.py       |  57 +++++-
+ scripts/tdeforum/schema.py        |  13 +-
+ scripts/tdeforum/td_controller.py |  85 ++++++++-
+ tests/test_chop_link.py           | 160 +++++++++++++++++
+ 11 files changed, 821 insertions(+), 22 deletions(-)
+ create mode 100644 docs/deforum_parameters.md
+ create mode 100644 scripts/tdeforum/chop_link.py
+ create mode 100644 tests/test_chop_link.py
+
+diff --git a/README.md b/README.md
+index d25de8d..09c8d05 100644
+--- a/README.md
++++ b/README.md
+@@ -70,9 +70,9 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
+ 
+ Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages (the first one has the *Example Preset* drop-down): **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
+ 
+-Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
++Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold, hybrid flow factor, hybrid composite alpha) has:
+ 
+-* a **float base** (`Translationz`, `Strengthschedule`, …): keyframe it in TD, export a CHOP to it or bind it; the value at Queue time is the base;
++* a **float base** (`Translationz`, `Strengthschedule`, …): type a value, or **drop a CHOP channel on it** (see *CHOP links* below) to drive it with the channel's whole curve; any other expression / bind is read at Queue time as one value;
+ * a **`…raw`** string (`Translationzraw`): a hand-written Deforum schedule; when not empty it is sent verbatim and base + modulation are ignored.
+ 
+ On top of the base, three modulation sources, all tempo-locked:
+@@ -83,6 +83,14 @@ On top of the base, three modulation sources, all tempo-locked:
+ | **Mod CHOP** | COMP input 1 (or *Mod CHOP* path). One loop long, any sample rate; channels named after the parameter (`translation_z` or `Translationz`) | baked: every render frame sampled (base + CHOP + slots) |
+ | **Prompt sequence** | `deforum/prompt_seq` table, columns *beat*, *prompt*, *xfade* | held prompt keys + beat-length crossfades written as weighted `AND` prompts |
+ 
++#### CHOP links: drop any channel on a parameter
++
++Make whatever CHOP you like (Pattern, LFO, Noise, Animation, Script, a math chain …), drag one of its channels onto a schedule parameter's **float base** (e.g. *Motion 3D › Translation Z*) and pick **CHOP Reference** (writes `op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live, and at Queue the **whole channel** is read and baked into that parameter's Deforum schedule (one key per render frame, or *CHOP Bake Points*); the Mod Matrix slots and the Mod CHOP still add on top. Expressions can do maths on channels (`op('pattern1')['chan1'] * 2 + 1`, sums of several CHOPs); they are evaluated once over the whole arrays. Something that cannot be evaluated that way (`math.sin(...)`) falls back to the first channel, as-is, with a warning.
++
++* Drop it on the **base**, not on `…raw`. A channel dropped on `…raw` is handled the same way, but a typed raw schedule always wins over a CHOP on the base (Queue warns).
++* *Mod Matrix › CHOP Link Timing*: **Timeline** (default) renders what the parameter shows while the timeline plays, from *Pipeline › Feed Loop Start* for one loop, using the CHOP's sample rate and start (a Pattern CHOP with Length `me.time.end` is exactly right; past its end it wraps). **Whole channel = one loop** stretches the channel over the loop whatever its length (Pattern *Cycles 4* = four cycles per loop).
++* *Mod Matrix › CHOP-linked Parameters* and the Textport (Queue, bake, `doctor()`) list what is linked; `mod_live` outputs the linked curves too.
++
+ Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
+ 
+ ### ControlNet from a TOP (`final_out`)
+@@ -306,6 +314,7 @@ scripts/
+     schema.py          # deforum COMP fields: drives build_master_ui AND the payload
+     tempo.py           # bpm / bars / fps -> render plan (cadence or interpolation)
+     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
++    chop_link.py       # CHOP channels dropped onto a parameter -> its whole curve
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
+diff --git a/ROADMAP.md b/ROADMAP.md
+index ee9ece7..69b7887 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -51,6 +51,7 @@ This document outlines the macro-architecture for our generative visual performa
+ 
+ - [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
+ - [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
++- [x] CHOP links: drop any CHOP channel on a schedule parameter (CHOP Reference / Export); the whole channel is baked at Queue (timeline or stretched to the loop).
+ - [x] Twelve unorthodox presets (2D, 3D, Video Input, Interpolation), Hybrid Video page, ten visionary prompt presets, sweep preview as COMP output 2.
+ - [x] Page Preset menus on every page but Globals (reset by the Example Preset); Sweep Depth for 2D / 3D Hybrid Video; four hybrid presets.
+ - [x] LCM baseline (4 exact steps, CFG 1.8) with payload checks; presets apply when picked, Re-apply button; Video Input presets on a fixed seed; Sweep Depth grow/blur and the fast vits depth model.
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+new file mode 100644
+index 0000000..cd61672
+--- /dev/null
++++ b/docs/deforum_parameters.md
+@@ -0,0 +1,287 @@
++# deforum COMP: parameter reference
++
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++
++Parameters marked **MOD** are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
++
++## Driving a parameter with a CHOP (CHOP links)
++
++Drag a channel from any CHOP (Pattern, LFO, Noise, Animation, a math chain ...) onto a MOD parameter's **float base** and choose **CHOP Reference** (`op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live; at Queue the *whole* channel is baked into that parameter's Deforum schedule, and Mod Matrix slots / the Mod CHOP still add on top.
++
++- **Base, not raw.** A channel dropped on `<name>raw` is treated the same way, but typed text in raw always beats a CHOP on the base (Queue warns).
++- **Maths is fine:** `op('pattern1')['chan1'] * 2 + 1` or a sum of channels is evaluated over the whole arrays. An expression that cannot be (`math.sin(...)`) falls back to its first channel, as-is, with a warning.
++- **Length:** with *CHOP Link Timing* = Timeline (default), a Pattern CHOP with Length `me.time.end` renders exactly what you see from *Feed Loop Start* for one loop (it wraps past its end). With *Whole channel = one loop* any length is stretched to the loop.
++- **Check it:** *Mod Matrix > CHOP-linked Parameters*, the Textport at Queue / bake / `doctor()`, and the `schedule_preview` table (mode `chop`).
++
++Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `Translationx`, `Translationy`, `Translationz`, `Rotation3dx`, `Rotation3dy`, `Rotation3dz`, `Fovschedule`, `Nearschedule`, `Farschedule`, `Aspectratioschedule`, `Perspectivefliptheta`, `Perspectiveflipphi`, `Perspectiveflipgamma`, `Perspectiveflipfv`, `Strengthschedule`, `Noiseschedule`, `Contrastschedule`, `Cfgscaleschedule`, `Stepsschedule`, `Noisemultiplierschedule`, `Subseedstrengthschedule`, `Ddimetaschedule`, `Ancestraletaschedule`, `Clipskipschedule`, `Hybridflowfactorschedule`, `Hybridcompalphaschedule`, `Cadenceflowfactorschedule`, `Redoflowfactorschedule`, `Amountschedule`, `Sigmaschedule`, `Thresholdschedule`.
++
++## Contents
++
++- [Tempo](#tempo)
++- [Globals](#globals)
++- [Prompts](#prompts)
++- [Motion 2D](#motion-2d)
++- [Motion 3D](#motion-3d)
++- [Camera & Depth](#camera--depth)
++- [Diffusion](#diffusion)
++- [Noise & Color](#noise--color)
++- [Flow & Anti-blur](#flow--anti-blur)
++- [Hybrid Video](#hybrid-video)
++- [Mod Matrix](#mod-matrix)
++- [Sweep Depth](#sweep-depth)
++- [ControlNet Unit 1](#controlnet-unit-1)
++- [Pipeline](#pipeline)
++
++## Tempo
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Preset` | Example Preset (applied when picked) | none | Lays one of the 31 example configurations over the COMP as soon as you pick it. None puts back every value the example (and any Page Preset) replaced. |
++| `Presetapply` | Re-apply Preset | (button) | Lays the selected example over the COMP again after you have changed things; also resets every Page Preset to None. |
++| `Presetinfo` | Preset | (read-only) | Read-only: which example is applied and how many parameters it set. |
++| `Pagepresettempo` | Page Preset (Tempo) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Bpm` | BPM | 120.0 | Tempo of the loop. Together with Beats per Bar and Loop Length it decides how many frames are rendered and the period of every Mod Matrix slot. |
++| `Beatsperbar` | Beats per Bar | 4 | Beats in one bar (4 for 4/4). Used for the loop length and bar-based modulation. |
++| `Loopbars` | Loop Length (bars) | 2 | Length of the loop in bars; at 120 bpm, 4/4 and 60 fps, 2 bars = 240 frames. |
++| `Outfps` | Output FPS | 60 | Frame rate of the finished video and of TouchDesigner's timeline maths. |
++| `Renderstrategy` | Render Strategy | cadence | Cadence: Deforum renders every output frame (with diffusion cadence). Interpolate: Deforum renders at Render FPS and RIFE/FILM fills the frames in between. |
++| `Renderfps` | Render FPS (interpolate) | 30 | With Render Strategy = Interpolate, the rate Deforum actually renders at (15/20/30); the interpolator multiplies it up to Output FPS. |
++| `Interpengine` | Interpolation Engine | RIFE v4.6 | RIFE (fast, crisp) or FILM (smoother on big motion) for the Interpolate strategy. |
++| `Diffusioncadence` | Diffusion Cadence (diffuse every Nth frame) | 4 | Only every Nth frame is diffused; the frames between are warped/blended from it. Higher = smoother and faster, lower = more detail and more flicker. Use 1 in Video Input. |
++| `Seamlessloop` | Seamless Loop | On | Renders a little past the loop and crossfades the overlap in the loop player so the end flows into the start. |
++| `Loopoverlapbeats` | Loop Overlap (beats, crossfaded) | 1.0 | How many beats past the loop are rendered and crossfaded at the seam. |
++| `Loopseeds` | Loop Seeds (schedule seeds to repeat per loop; off = Iterate +1) | Off | Schedules the seed so frame f and f + loop share a seed (helps the seam). Off = plain Iterate +1, the smoother baseline. |
++| `Lengthsource` | Length Source | tempo | Tempo: length comes from BPM / bars. Manual: length is Max Frames. |
++| `Maxframes` | Max Frames (manual) | 240 | Number of frames to render when Length Source is Manual. |
++| `Tempoinfo` | Plan | (read-only) | Read-only: the render plan (frames, fps, cadence or interpolation). |
++
++## Globals
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Sdmodelcheckpoint` | Model (index / schedule) | 0 | The Stable Diffusion checkpoint: an index into available_models, a filename, or a checkpoint schedule. |
++| `Sdvae` | VAE | Automatic | VAE used to decode images; Automatic uses the checkpoint's own. |
++| `Width` | Width | 1024 | Render width in pixels. |
++| `Height` | Height | 576 | Render height in pixels. |
++| `Steps` | Steps (LCM: 4) | 4 | Sampling steps per diffused frame. LCM checkpoints want 4. |
++| `Img2imgfixsteps` | Exact Steps on every frame (A1111 img2img_fix_steps) | On | Makes A1111 run exactly Steps on every img2img frame; without it it runs only int(steps x (1 - Strength)), often a single step. |
++| `Sampler` | Sampler | LCM | Sampler name (LCM for LCM checkpoints). |
++| `Scheduler` | Scheduler | Automatic | Noise scheduler; Automatic picks the sampler's default. |
++| `Animationmode` | Animation Mode | 3D | 2D (flat transforms), 3D (camera through a depth map), Video Input (restyle each video frame) or Interpolation (every frame from noise, morphing between prompts/seeds). |
++| `Seedbehavior` | Seed Behavior | iter | How the seed changes per frame: Iterate (+1, the smooth baseline), Fixed (same noise every frame, best for Video Input), Random, Ladder, Alternate or Schedule. |
++| `Seed` | Seed | 424242 | Starting seed (424242 by default). |
++| `Nprompt` | Negative Prompt | worst quality, low quality, glitch, d... | Negative prompt applied to every frame: what the image should avoid. |
++| `Strength` | Init Strength (first frame) | 0.8 | How much of the init image the very first frame keeps (only when an init image or video is used). |
++| `Usemaskvideo` | Use Mask Video | Off | Uses Video Mask Path as a per-frame inpainting mask. |
++| `Invertmask` | Invert Mask (diffuse the black areas instead) | Off | Diffuses the black parts of the mask instead of the white parts. |
++| `Overlaymask` | Overlay Mask (keep the original outside the mask) | Off | Pastes the un-diffused original back outside the mask, so only the masked area changes. |
++| `Videoinitpath` | Video Init Path | /opt/a1111/td_inputs/comfy_videos/arc... | The input video (container path): the source for Video Input, Hybrid Video and Sweep Depth. |
++| `Videomaskpath` | Video Mask Path | /opt/a1111/td_masks/mask_01.mov | Mask video (container path) used when Use Mask Video is on; Sweep Depth can fill it in. |
++| `Videoframemode` | Video Frame Mode | trim | Trim: use the video's first frames at normal speed. Stride: skip frames so the whole video fits the render (timelapse). |
++
++## Prompts
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Promptsource` | Prompt Source | sequence | Sequence: prompts from the beat-indexed prompt_seq table inside the COMP. prompt.json: frame-keyed prompts from scripts/prompt.json. |
++| `Promptpreset` | Prompt Preset (writes prompt_seq) | none | Writes one of ten visionary prompts into prompt_seq and switches Prompt Source to it; None restores your rows. |
++| `Promptedit` | Edit prompt_seq (opens deforum/prompt_seq) | (button) | Opens deforum/prompt_seq in a floating editor. |
++| `Promptxfadebeats` | Default Crossfade (beats) | 1.0 | Default crossfade length between prompt_seq rows when a row has no xfade of its own. |
++
++## Motion 2D
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetmotion2d` | Page Preset (Motion 2D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Border` | Border | replicate | What fills the edges revealed by 2D motion: Replicate (stretch the edge pixels) or Wrap (tile the image). |
++| `Zoom` | Zoom (2D, 1 = still) | 1.0 | 2D zoom factor per frame (1 = still, 1.003 = slow zoom in, below 1 = zoom out). **MOD** (raw: `Zoomraw`) |
++| `Angle` | Angle (2D, deg/frame) | 0.0 | 2D rotation in degrees per frame. **MOD** (raw: `Angleraw`) |
++| `Transformcenterx` | Transform Center X (2D) | 0.5 | Horizontal pivot for 2D zoom and rotation (0 = left, 1 = right). **MOD** (raw: `Transformcenterxraw`) |
++| `Transformcentery` | Transform Center Y (2D) | 0.5 | Vertical pivot for 2D zoom and rotation (0 = top, 1 = bottom). **MOD** (raw: `Transformcenteryraw`) |
++| `Translationx` | Translation X (2D + 3D) | 0.0 | Sideways movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationxraw`) |
++| `Translationy` | Translation Y (2D + 3D) | 0.0 | Vertical movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationyraw`) |
++
++## Motion 3D
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetmotion3d` | Page Preset (Motion 3D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Paddingmode` | Padding Mode | border | What fills areas the 3D camera reveals: Border (smear), Reflection (mirror) or Zeros (black). |
++| `Samplingmode` | Sampling Mode | bicubic | Pixel interpolation for 3D warps: bicubic (sharp), bilinear or nearest. |
++| `Translationz` | Translation Z (3D push) | 0.0 | Camera push per frame (positive = forward into the image). **MOD** (raw: `Translationzraw`) |
++| `Rotation3dx` | Rotation 3D X (tilt, deg/frame) | 0.0 | Camera tilt in degrees per frame. **MOD** (raw: `Rotation3dxraw`) |
++| `Rotation3dy` | Rotation 3D Y (pan, deg/frame) | 0.0 | Camera pan in degrees per frame. **MOD** (raw: `Rotation3dyraw`) |
++| `Rotation3dz` | Rotation 3D Z (roll, deg/frame) | 0.0 | Camera roll in degrees per frame. **MOD** (raw: `Rotation3dzraw`) |
++
++## Camera & Depth
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetcamera` | Page Preset (Camera & Depth) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Usedepthwarping` | Use Depth Warping | On | 3D: warp the previous frame through its depth map (real parallax) instead of a flat transform. |
++| `Depthalgorithm` | Depth Algorithm | Midas-3-Hybrid | Depth model Deforum uses for 3D warping (MiDaS hybrid by default; Zoe/AdaBins/LeReS alternatives). |
++| `Midasweight` | Midas Weight | 0.2 | Blend weight of MiDaS in the hybrid depth algorithms; higher = stronger depth relief. |
++| `Enableperspectiveflip` | Enable Perspective Flip | Off | Turns on the perspective flip schedules (theta, phi, gamma, fv); without it they do nothing. |
++| `Fovschedule` | FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |
++| `Nearschedule` | Near (3D) | 200.0 | 3D near clipping distance of the depth warp. **MOD** (raw: `Nearscheduleraw`) |
++| `Farschedule` | Far (3D) | 10000.0 | 3D far clipping distance of the depth warp. **MOD** (raw: `Farscheduleraw`) |
++| `Aspectratioschedule` | Aspect Ratio (3D) | 1.0 | 3D aspect ratio of the camera; changing it squeezes or stretches space. **MOD** (raw: `Aspectratioscheduleraw`) |
++| `Perspectivefliptheta` | Flip Theta | 0.0 | Perspective flip: tilt of the picture plane around the horizontal axis (degrees). **MOD** (raw: `Perspectiveflipthetaraw`) |
++| `Perspectiveflipphi` | Flip Phi | 0.0 | Perspective flip: tilt around the vertical axis (degrees). **MOD** (raw: `Perspectiveflipphiraw`) |
++| `Perspectiveflipgamma` | Flip Gamma | 0.0 | Perspective flip: rotation in the picture plane (degrees). **MOD** (raw: `Perspectiveflipgammaraw`) |
++| `Perspectiveflipfv` | Flip FV | 53.0 | Perspective flip: field of view of the virtual camera looking at the plane. **MOD** (raw: `Perspectiveflipfvraw`) |
++
++## Diffusion
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetdiffusion` | Page Preset (Diffusion) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Enablestepsscheduling` | Enable Steps Scheduling | Off | Lets Steps follow the Steps schedule instead of the fixed Steps value. |
++| `Enablenoisemultiplierscheduling` | Enable Noise Multiplier Scheduling | On | Lets the Noise Multiplier schedule apply. |
++| `Enablesubseedscheduling` | Enable Subseed Scheduling | Off | Turns on Subseed / Subseed Strength: blends the noise towards a second seed. |
++| `Subseedschedule` | Subseed | 0:(1) | The second seed (as a schedule) that Subseed Strength blends towards. |
++| `Enableddimetascheduling` | Enable DDIM Eta Scheduling | Off | Lets the DDIM Eta schedule apply (DDIM samplers only). |
++| `Enableancestraletascheduling` | Enable Ancestral Eta Scheduling | Off | Lets the Ancestral Eta schedule apply (ancestral samplers only). |
++| `Enableclipskipscheduling` | Enable CLIP Skip Scheduling | Off | Lets the CLIP Skip schedule apply. |
++| `Strengthschedule` | Strength (keep of previous frame) | 0.65 | How much of the previous frame is kept (0.8 = keep 80 %, re-imagine 20 %). The main smoothness vs. change control. **MOD** (raw: `Strengthscheduleraw`) |
++| `Noiseschedule` | Noise | 0.02 | Fresh noise added to each frame before diffusing; more = more new detail and more flicker. **MOD** (raw: `Noisescheduleraw`) |
++| `Contrastschedule` | Contrast | 1.0 | Contrast applied to each frame before diffusing (1 = unchanged); above 1 builds up contrast over time. **MOD** (raw: `Contrastscheduleraw`) |
++| `Cfgscaleschedule` | CFG Scale (LCM: 1.5-2) | 1.8 | How strongly the prompt is followed. LCM checkpoints want 1.5-2; higher burns. **MOD** (raw: `Cfgscalescheduleraw`) |
++| `Stepsschedule` | Steps (needs Enable Steps Scheduling) | 25.0 | Steps per frame over time (needs Enable Steps Scheduling). **MOD** (raw: `Stepsscheduleraw`) |
++| `Noisemultiplierschedule` | Noise Multiplier | 1.0 | Multiplier on the sampler's own noise; 1 = unchanged. **MOD** (raw: `Noisemultiplierscheduleraw`) |
++| `Subseedstrengthschedule` | Subseed Strength (needs Enable Subseed) | 0.0 | 0..1 blend from the seed's noise to the subseed's noise (needs Enable Subseed). **MOD** (raw: `Subseedstrengthscheduleraw`) |
++| `Ddimetaschedule` | DDIM Eta (needs Enable) | 0.0 | DDIM eta: randomness of DDIM sampling (needs Enable). **MOD** (raw: `Ddimetascheduleraw`) |
++| `Ancestraletaschedule` | Ancestral Eta (needs Enable) | 1.0 | Ancestral eta: randomness of ancestral samplers (needs Enable). **MOD** (raw: `Ancestraletascheduleraw`) |
++| `Clipskipschedule` | CLIP Skip (needs Enable) | 2.0 | How many final CLIP layers to skip when encoding the prompt (needs Enable). **MOD** (raw: `Clipskipscheduleraw`) |
++
++## Noise & Color
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetnoise` | Page Preset (Noise & Color) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Noisetype` | Noise Type | perlin | Shape of the added noise: Perlin (smooth, cloudy) or Uniform (fine grain). |
++| `Perlinw` | Perlin W | 8 | Perlin noise cells across the width; lower = bigger blobs. |
++| `Perlinh` | Perlin H | 8 | Perlin noise cells down the height. |
++| `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. |
++| `Perlinpersistence` | Perlin Persistence | 0.5 | How strong each finer Perlin octave is relative to the previous one. |
++| `Colorcoherence` | Color Coherence | LAB | Keeps colours from drifting by matching each frame to a reference: LAB/HSV/RGB (first frame), Video Input (the video frame), Image, or None. |
++| `Colorforcegrayscale` | Color Force Grayscale | Off | Converts every frame to greyscale before diffusing. |
++| `Legacycolormatch` | Legacy Colormatch (earlier renders used it) | On | Uses Deforum's older colour-matching method (what earlier renders used). |
++
++## Flow & Anti-blur
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetflow` | Page Preset (Flow & Anti-blur) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Opticalflowcadence` | Optical Flow Cadence | RAFT | How the in-between (cadence) frames are made: None (plain blend) or an optical-flow method (RAFT is best) that moves pixels along the motion. |
++| `Opticalflowredogeneration` | Optical Flow Redo Generation | None | Renders each diffused frame twice and uses optical flow between them to stabilise it (less flicker, about 2x slower). |
++| `Kernelschedule` | Anti-blur Kernel (odd) | 5 | Anti-blur sharpening kernel size (odd number). |
++| `Cadenceflowfactorschedule` | Cadence Flow Factor | 1.0 | Strength of the optical flow applied to cadence frames (1 = full). **MOD** (raw: `Cadenceflowfactorscheduleraw`) |
++| `Redoflowfactorschedule` | Redo Flow Factor | 1.0 | Strength of the flow used by Redo Generation. **MOD** (raw: `Redoflowfactorscheduleraw`) |
++| `Amountschedule` | Anti-blur Amount | 0.1 | Anti-blur sharpening amount, fights the softening that accumulates over many frames. **MOD** (raw: `Amountscheduleraw`) |
++| `Sigmaschedule` | Anti-blur Sigma | 1.0 | Anti-blur blur radius used to build the sharpening mask. **MOD** (raw: `Sigmascheduleraw`) |
++| `Thresholdschedule` | Anti-blur Threshold | 0.0 | Anti-blur threshold: only edges above it are sharpened. **MOD** (raw: `Thresholdscheduleraw`) |
++
++## Hybrid Video
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresethybrid` | Page Preset (Hybrid Video) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Hybridmotion` | Hybrid Motion | None | 2D/3D: borrow motion from the init video: Optical Flow (local, per pixel), Perspective or Affine (the video's camera only). |
++| `Hybridflowmethod` | Hybrid Flow Method | RAFT | Optical-flow method for Hybrid Motion (RAFT most accurate, Farneback fastest). |
++| `Hybridmotionuseprevimg` | Flow from the previous generated image | Off | Measures flow between the previous generated frame and the video frame, which pulls the image towards the video's layout. |
++| `Hybridflowconsistency` | Hybrid Flow Consistency | Off | Masks out pixels where the flow is unreliable (occlusions) to reduce tearing. |
++| `Hybridconsistencyblur` | Hybrid Consistency Blur | 2 | Softens the flow-consistency mask. |
++| `Hybridflowfactorschedule` | Hybrid Flow Factor | 1.0 | Scales the borrowed motion (0.5 = half the video's motion, 2 = exaggerated). **MOD** (raw: `Hybridflowfactorscheduleraw`) |
++| `Hybridcomposite` | Hybrid Composite (mix the video in) | None | Blends the video's pixels into each frame before diffusion: Normal, Before Motion or After Generation; None = motion only. |
++| `Hybridcompalphaschedule` | Composite Alpha | 0.5 | How much of the video frame is blended in by Hybrid Composite (0..1). **MOD** (raw: `Hybridcompalphascheduleraw`) |
++
++## Mod Matrix
++
++Slots 1-8 each have the same seven parameters (`Mod1active` ... `Mod8sharpness`). Each slot adds a beat-locked shape to one parameter on top of its base value.
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetmods` | Page Preset (Mod Matrix) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Chopmode` | Mod CHOP Mode | add | How Mod CHOP channels combine with the base values: Add (offset) or Replace. |
++| `Choppath` | Mod CHOP (empty = COMP input 1) | (empty) | A CHOP whose channels are named after parameters (translation_z, zoom, ...), one loop long; empty = COMP input 1. |
++| `Bakepoints` | CHOP Bake Points (0 = every frame) | 0 | Keyframes per loop when baking the Mod CHOP or a CHOP link into Deforum schedules (0 = every frame). |
++| `Choptiming` | CHOP Link Timing | timeline | How a CHOP link is read. Timeline (default): what the parameter shows while the timeline plays, one loop from Feed Loop Start. Whole channel = one loop: the channel is stretched over the loop whatever its length. |
++| `Choplinksinfo` | CHOP-linked Parameters | (read-only) | Read-only: which parameters have a CHOP channel dropped on them, and from where (updated at Queue / bake). |
++| `Mod1active` ... `Mod8active` | Slot N On | Off | Turns this modulation slot on. |
++| `Mod1target` ... `Mod8target` | Slot N Target | zoom | The parameter this slot modulates. |
++| `Mod1shape` ... `Mod8shape` | Slot N Shape | sine | Waveform: sine, triangle, saw up/down, square, kick decay or bump. |
++| `Mod1beats` ... `Mod8beats` | Slot N Cycle (beats) | 1.0 | Length of one cycle in beats (1 = every beat, 4 = once a bar). |
++| `Mod1depth` ... `Mod8depth` | Slot N Depth | 0.0 | Amplitude, in the target's own units, added on top of its base value (negative flips it). |
++| `Mod1phase` ... `Mod8phase` | Slot N Phase (cycles) | 0.0 | Offset of the cycle (0..1) to shift the slot against the beat. |
++| `Mod1sharpness` ... `Mod8sharpness` | Slot N Sharpness | 4.0 | Edge sharpness for square, decay speed for kick decay, narrowness for bump. |
++
++## Sweep Depth
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetsweep` | Page Preset (Sweep Depth) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Sweepenabled` | Sweep Depth On | Off | Turns Sweep Depth on: a band of the init video's depth becomes a guide/mask video. |
++| `Sweepmode` | Mode | max | Max: starts on the nearest depth (white) and sweeps away. Min: starts far and rushes toward you. |
++| `Sweepcycles` | Cycles (sweeps over the render) | 1.0 | How many sweeps over the render. |
++| `Sweepshape` | Shape | ramp | Ramp: each cycle restarts. Ping-pong: each cycle goes out and back. |
++| `Sweepdirection` | Direction | forward | Reverse swaps the start and end of the sweep. |
++| `Sweepwidth` | Band Width (grey levels of 255) | 10 | Width of the white band in grey levels (of 255); 255 = the whole depth map. |
++| `Sweepsoftness` | Edge Softness (grey levels) | 0 | Feathers the band's edges by this many grey levels. |
++| `Sweepgrow` | Grow (px, widens the band shapes) | 0 | Widens the band shapes by this many pixels. |
++| `Sweepblur` | Blur (px, soft glow for ControlNet) | 0.0 | Blurs the band (Gaussian, pixels) into a soft glow; QR Monster reads it better than a hard stencil. |
++| `Sweeptrail` | Trail (frames the band glows on, 0 = off) | 0 | Frames the band keeps glowing after it has passed (fades to 5 %). |
++| `Sweepsmooth` | Depth Smoothing (steadier band, 0 = off) | 0.0 | Blends each depth frame with the previous ones so depth flicker does not make the band jitter. |
++| `Sweepfill` | Band Fill | white | White: a flat white band. Depth: keep the depth shading inside the band. |
++| `Sweepasmask` | Also use as Video Mask | Off | Also sets the sweep as the Video Mask (Use Mask Video on), so only the band is re-diffused. |
++| `Sweepmodel` | Depth Model (ComfyUI) | depth_anything_v2_vits | Depth model ComfyUI uses for the depth video (Depth Anything V2 small is the fast default). |
++| `Sweepdepthvideo` | Pre-made Depth Video (container path; empty = make it from Video Init Path) | (empty) | A depth video you made yourself (container path); ComfyUI is skipped. |
++| `Sweepprepareonly` | Queue only prepares the sweep (depth + mask video, no render) | Off | Queue stops after the depth and sweep videos exist, so you can preview before rendering. |
++| `Sweepdepthpath` | Depth Video | (read-only) | Read-only: the depth video in use. |
++| `Sweepinfo` | Sweep Plan | (read-only) | Read-only: the sweep plan (bands at start/end, frames, render time). |
++| `Sweepshowlatest` | Show Latest Sweep (sweep_preview / COMP output 2) | (button) | Points sweep_preview (COMP output 2) at the newest sweep video. |
++
++## ControlNet Unit 1
++
++Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...`, `Cn3...`, `Feed3...`); the two ComfyUI rows are Unit 1 only.
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetcn1val` | Page Preset (ControlNet Unit 1) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Cn1enabled` | Enabled | Off | Turns this ControlNet unit on. |
++| `Feed1mode` | Guide Source | file | Where the guide video comes from: File (Vid Path), a TOP recorded as a loop or as a still, or Sweep Depth. |
++| `Feed1top` | Source TOP (path, e.g. /project1/final_out) | (empty) | The TOP to record as the guide when Guide Source is a TOP. |
++| `Feed1info` | Last Feed | (read-only) | Read-only: when and how the last guide was made. |
++| `Cn1module` | Module | none | ControlNet preprocessor run inside A1111 (none = use the guide as-is, right for QR Monster and ready-made maps). |
++| `Cn1model` | Model | ctrl_v1p_qr_monster_v2 | ControlNet model, e.g. ctrl_v1p_qr_monster_v2. |
++| `Cn1vidpath` | Vid Path | /opt/a1111/td_masks/mask_01.mov | Guide video/image (container path); set automatically by TOP feeds, ComfyUI preprocessing and Sweep Depth. |
++| `Cn1maskvidpath` | Mask Vid Path | (empty) | Optional mask limiting where this unit acts. |
++| `Cn1weight` | Weight | 1.0 | Strength of this unit's guidance. |
++| `Cn1guidancestart` | Guidance Start | 0.0 | Fraction of the sampling steps after which the unit starts guiding. |
++| `Cn1guidanceend` | Guidance End | 1.0 | Fraction of the steps after which it stops (below 1 lets the last steps add free detail). |
++| `Cn1processorres` | Processor Res | 512 | Resolution the preprocessor works at. |
++| `Cn1thresholda` | Threshold A | 0.5 | First preprocessor-specific threshold (e.g. Canny low). |
++| `Cn1thresholdb` | Threshold B | 0.5 | Second preprocessor-specific threshold (e.g. Canny high). |
++| `Cn1resizemode` | Resize Mode | Inner Fit (Scale to Fit) | How the guide is fitted to the render size: Inner Fit, Outer Fit or Just Resize. |
++| `Cn1controlmode` | Control Mode | Balanced | Balanced, My prompt is more important, or ControlNet is more important. |
++| `Cn1lowvram` | Low Vram | Off | Lower VRAM use at some speed cost. |
++| `Cn1pixelperfect` | Pixel Perfect | On | Lets ControlNet choose the preprocessor resolution from the render size. |
++| `Cn1overwriteframes` | Overwrite Frames | On | Re-extracts the guide video's frames every run instead of reusing old ones. |
++| `Cn1loopbackmode` | Loopback Mode | Off | Feeds the previous generated frame back in as this unit's guide. |
++| `Comfypreprocenable` | Preprocess via ComfyUI | Off | At Queue, ComfyUI preprocesses the init video (Comfy Preprocessor) into Unit 1's guide video (cached). |
++| `Comfypreprocessor` | Comfy Preprocessor | PiDiNetPreprocessor | The ComfyUI preprocessor used for Unit 1 (depth, lineart, pose, edges ...). |
++
++## Pipeline
++
++| TD name | Label | Default | What it does |
++|---|---|---|---|
++| `Pagepresetpipeline` | Page Preset (Pipeline) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
++| `Pipelinestatus` | Status | (read-only) | Read-only: what the pipeline is doing right now (preprocessing, sweep, render %, idle). |
++| `Autoload` | Auto-load finished render | On | Loads the finished render into moviefilein1 and the loop player automatically. |
++| `Forcepreprocess` | Force ComfyUI re-preprocess | Off | Ignores cached ComfyUI results and makes them again. |
++| `Loopoutframes` | Loaded loop length (frames) | (read-only) | Read-only: loop length of the loaded render (frames). |
++| `Loopoutoverlap` | Loaded loop overlap (frames) | (read-only) | Read-only: seam overlap of the loaded render (frames). |
++| `Loopoutrate` | Loaded file frames per output frame | (read-only) | Read-only: file frames per output frame (0.5 when an un-interpolated render plays at half speed). |
++| `Loopoffset` | Loop Player Offset (frames) | 0 | Shifts the loop player's start against the timeline. |
++| `Feedloopstart` | Feed: loop start frame (0 = timeline start) | 0 | Timeline frame where TOP feeds and beat_clock start counting (0 = timeline start). |
++| `Feedmethod` | Feed: recording method | addframe | Add Frame: the recorder steps the timeline frame by frame. Continuous: records every cooked frame. |
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 2cf514c..1c906fb 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -136,12 +136,14 @@ def create(page, field, section=False):
+         p.mode = ParMode.EXPRESSION
+     created = [p]
+     if kind == schema.MOD:
+-        _help(p, 'Base value. Keyframe it, export to it or bind it; the Mod Matrix and the Mod CHOP '
+-                 'add beat-locked motion on top.')
++        _help(p, 'Base value. Drop a CHOP channel on it (CHOP Reference or Export CHOP) and the whole '
++                 'channel is baked into the schedule at Queue (Mod Matrix > CHOP Timing); the Mod Matrix '
++                 'and the Mod CHOP add beat-locked motion on top.')
+         raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
+         raw.default = ''
+         _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
+-                   'When not empty it is sent verbatim and the base + modulation are ignored.')
++                   'When not empty it is sent verbatim and the base + modulation are ignored. '
++                   'A CHOP channel dropped here works like one dropped on the base.')
+         created.append(raw)
+     return created
+ 
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index bcd5b8c..1906a82 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -7,6 +7,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``schedules``     keyframe-string helpers (bake, checkpoint schedules)
+ * ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
+ * ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
++* ``chop_link``     CHOP channels dropped onto a parameter -> its whole curve, baked at Queue
+ * ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
+ * ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
+ * ``sweep``         Sweep Depth: band maths and the background render of the mask video
+@@ -26,10 +27,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.9.2"
++__version__ = "0.10.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/chop_link.py b/scripts/tdeforum/chop_link.py
+new file mode 100644
+index 0000000..6a8a64c
+--- /dev/null
++++ b/scripts/tdeforum/chop_link.py
+@@ -0,0 +1,205 @@
++"""CHOP links: a CHOP channel dropped straight onto a deforum parameter.
++
++Drag a channel (from a Pattern / LFO / Animation / Script CHOP ...) onto a schedule
++parameter, e.g. Motion 3D > Translation Z, and pick **CHOP Reference** (an expression
++like ``op('pattern1')['chan1']``) or **Export CHOP**. The parameter then shows the
++channel's value live in TouchDesigner, and at Queue the *whole* channel is read and baked
++into the Deforum schedule, frame by frame, instead of the one value under the playhead.
++
++Expressions may do maths on channels (``op('pattern1')['chan1'] * 2 + 1``,
++``op('lfo1')[0] + op('noise1')['chan1']``): they are evaluated once with every channel
++reference standing for the channel's whole array (numpy). An expression that cannot be
++evaluated that way (``math.sin(...)``, ``me.time.frame``) falls back to its first channel
++reference, used as-is, with a warning; an expression with no CHOP in it is an ordinary
++expression and keeps its current value.
++
++Timing (Mod Matrix > CHOP Link Timing):
++    timeline  (default) the channel is read on the timeline: the samples under the loop's
++              timeline span (Pipeline > Feed Loop Start, the same span beat_clock counts),
++              so the render follows exactly what the parameter shows while the timeline
++              plays (a Pattern CHOP with Length me.time.end; past its end it wraps)
++    loop      the whole channel is one loop, stretched to the render (any length works;
++              a Pattern CHOP with Cycles 4 = four cycles per loop)
++
++This module has no TouchDesigner imports: the controller hands it parameter objects and a
++``resolve(path)`` function; the tests hand it fakes.
++"""
++
++import math
++import re
++
++LOOP, TIMELINE = "loop", "timeline"
++TIMINGS = [TIMELINE, LOOP]
++TIMING_LABELS = ["Timeline (as it plays from Feed Loop Start)", "Whole channel = one loop (stretch)"]
++
++# op('path')['chan'] / op("path")[0] / op('path').chan('chan')
++_REF = re.compile(r"""op\(\s*(['"])(?P<path>.+?)\1\s*\)\s*"""
++                  r"""(?:\[\s*(?:(['"])(?P<name>.+?)\3|(?P<index>\d+))\s*\]"""
++                  r"""|\.chan\(\s*(['"])(?P<cname>.+?)\6\s*\))""")
++
++
++class Link(object):
++    """One linked parameter: the samples (one value per CHOP sample) and where they came from."""
++    __slots__ = ("samples", "rate", "start", "source", "note")
++
++    def __init__(self, samples, rate=None, start=0.0, source="", note=None):
++        self.samples = [float(v) for v in samples]
++        self.rate = float(rate) if rate else None
++        self.start = float(start or 0.0)
++        self.source = source
++        self.note = note
++
++    def as_dict(self):
++        return {"samples": self.samples, "rate": self.rate, "start": self.start,
++                "source": self.source, "note": self.note}
++
++
++def mode_name(par):
++    return getattr(getattr(par, "mode", None), "name", str(getattr(par, "mode", ""))).split(".")[-1].upper()
++
++
++def _is_chop(o):
++    return o is not None and hasattr(o, "numChans") and hasattr(o, "chans")
++
++
++def _channel(chop, key):
++    chans = list(chop.chans())
++    if isinstance(key, int):
++        return chans[key] if 0 <= key < len(chans) else None
++    for chan in chans:
++        if chan.name == key:
++            return chan
++    return None
++
++
++def _vals(chan):
++    return [float(v) for v in chan.vals]
++
++
++def _meta(chop):
++    rate = getattr(chop, "rate", None)
++    try:
++        rate = float(rate) if rate else None
++    except (TypeError, ValueError):
++        rate = None
++    try:
++        start = float(getattr(chop, "start", 0) or 0)
++    except (TypeError, ValueError):
++        start = 0.0
++    return rate, start
++
++
++def _label(chop, key):
++    return "%s[%s]" % (getattr(chop, "path", getattr(chop, "name", "?")),
++                       key if isinstance(key, int) else repr(str(key)))
++
++
++class _ChopView(object):
++    """What ``op('pattern1')`` evaluates to inside a linked expression."""
++
++    def __init__(self, chop, used):
++        self._chop, self._used = chop, used
++
++    def _get(self, key):
++        import numpy
++        chan = _channel(self._chop, key)
++        if chan is None:
++            raise KeyError("%s has no channel %r" % (getattr(self._chop, "path", "CHOP"), key))
++        self._used.append((self._chop, key))
++        return numpy.asarray(_vals(chan), dtype=float)
++
++    def __getitem__(self, key):
++        return self._get(key)
++
++    def chan(self, key):
++        return self._get(key)
++
++    def __getattr__(self, name):
++        return getattr(self._chop, name)
++
++
++def _from_expression(par, owner, resolve):
++    expr = str(getattr(par, "expr", "") or "").strip()
++    if not expr or "op(" not in expr:
++        return None
++    used = []
++
++    def op(path):
++        target = resolve(path)
++        return _ChopView(target, used) if _is_chop(target) else target
++
++    namespace = {"op": op, "me": owner, "math": math}
++    if owner is not None and hasattr(owner, "parent"):
++        namespace["parent"] = owner.parent
++    try:
++        import numpy
++        namespace["np"] = namespace["numpy"] = numpy
++        result = eval(expr, namespace)   # the parameter's own expression, as TD would run it
++        if used:
++            arr = numpy.asarray(result, dtype=float).reshape(-1)
++            if arr.size:
++                rate, start = _meta(used[0][0])
++                return Link(arr.tolist(), rate, start, " + ".join(sorted(set(_label(c, k) for c, k in used)))
++                            if len(used) > 1 else _label(*used[0]))
++    except Exception:
++        pass
++    match = _REF.search(expr)       # fallback: the first channel reference, as-is
++    if not match:
++        return None
++    chop = resolve(match.group("path"))
++    if not _is_chop(chop):
++        return None
++    key = int(match.group("index")) if match.group("index") else (match.group("name") or match.group("cname"))
++    chan = _channel(chop, key)
++    if chan is None:
++        return Link([], source=_label(chop, key), note="channel %r not found" % (key,))
++    rate, start = _meta(chop)
++    whole = match.group(0).strip() == expr
++    return Link(_vals(chan), rate, start, _label(chop, key),
++                None if whole else "expression %r could not be evaluated over the whole channel; "
++                                   "used %s as-is" % (expr, _label(chop, key)))
++
++
++def _from_export(par):
++    chop = getattr(par, "exportOP", None)
++    if not _is_chop(chop):
++        return None
++    source = getattr(par, "exportSource", None)
++    name = getattr(source, "name", None)
++    chan = _channel(chop, name) if name is not None else None
++    if chan is None:
++        return None
++    rate, start = _meta(chop)
++    return Link(_vals(chan), rate, start, _label(chop, name) + " (export)")
++
++
++def link_of(par, owner=None, resolve=None):
++    """The Link driving ``par``, or None when it is not driven by a CHOP channel."""
++    if par is None:
++        return None
++    mode = mode_name(par)
++    if mode == "EXPORT":
++        return _from_export(par)
++    if mode == "EXPRESSION":
++        return _from_expression(par, owner, resolve or (lambda path: None))
++    return None
++
++
++def loop_samples(link, timing, loop_seconds, loop_start_seconds=0.0):
++    """The samples that make up ONE loop (resample_loop stretches them to render frames)."""
++    samples = link["samples"] if isinstance(link, dict) else link.samples
++    rate = link["rate"] if isinstance(link, dict) else link.rate
++    start = link["start"] if isinstance(link, dict) else link.start
++    n = len(samples)
++    if timing != TIMELINE or n < 2 or not rate or not loop_seconds or loop_seconds <= 0:
++        return list(samples)
++    count = max(2, int(round(loop_seconds * rate)))
++    first = loop_start_seconds * rate - (start or 0.0)
++    out = []
++    for k in range(count):
++        pos = first + k
++        i = int(math.floor(pos))
++        frac = pos - i
++        a, b = samples[i % n], samples[(i + 1) % n]
++        out.append(a + (b - a) * frac)
++    return out
+diff --git a/scripts/tdeforum/modulation.py b/scripts/tdeforum/modulation.py
+index 690a4a1..d1ec22b 100644
+--- a/scripts/tdeforum/modulation.py
++++ b/scripts/tdeforum/modulation.py
+@@ -179,15 +179,20 @@ def resample_loop(samples, loop_frames, total_frames):
+ 
+ 
+ def compile_field(base, slots, fpb, total_frames, chop=None, chop_mode="add",
+-                  raw="", points=0, precision=5):
++                  raw="", points=0, precision=5, base_curve=None):
+     """Return (schedule string, (min, max) over the render, mode).
+ 
+-    mode is "raw", "constant", "expression" or "baked".
++    mode is "raw", "constant", "expression", "baked" (Mod CHOP) or "chop" (a CHOP channel
++    linked to the parameter itself: ``base_curve`` gives the base per render frame).
+     """
+     raw = str(raw or "").strip()
+     if raw:
+         return schedules.as_schedule(raw), None, "raw"
+     active = [s for s in slots if s.depth]
++    if base_curve is not None:
++        values = [evaluate(base_curve[t], active, fpb, t, chop[t] if chop is not None else None, chop_mode)
++                  for t in range(total_frames)]
++        return schedules.keyframe_string(values, points, precision), (min(values), max(values)), "chop"
+     if chop is None:
+         values = [evaluate(base, active, fpb, t) for t in range(total_frames)] or [float(base)]
+         bounds = (min(values), max(values))
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 05d481b..bc0601a 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -22,7 +22,7 @@ from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
+ 
+ import math
+ 
+-from . import feed
++from . import chop_link, feed
+ from . import modulation
+ from . import prompt_seq
+ from . import schedules
+@@ -194,7 +194,7 @@ def _sample_loop(samples, loop_frames, t):
+     return a + (b - a) * (pos - i)
+ 
+ 
+-def live_values(values, chop, loop_timeline_frame, project_rate):
++def live_values(values, chop, loop_timeline_frame, project_rate, links=None):
+     """{api: value} the render uses at the loop position ``loop_timeline_frame``.
+ 
+     For the ``mod_live`` Script CHOP: every MOD parameter that a Mod Matrix slot or a Mod CHOP
+@@ -211,23 +211,54 @@ def live_values(values, chop, loop_timeline_frame, project_rate):
+     slots = read_slots(values, warnings)
+     chop_fields = _chop_by_field(chop, warnings)
+     chop_mode = _text(values.get("chop_mode", "add")) or "add"
++    timing = _text(values.get("chop_timing", chop_link.TIMELINE)) or chop_link.TIMELINE
++    links = links or {}
++    loop_seconds = _loop_seconds(tp, values, loop_frames or 1)
+     out = {"render_frame": t}
+     for field in schema.MOD_FIELDS:
+         if field.api not in values or _text(values.get(raw_key(field.api), "")):
+             continue
+         field_slots = [s for s in slots if s.target == field.api and s.depth]
+         samples = chop_fields.get(field.api)
+-        if not field_slots and not samples:
++        link = links.get(field.api)
++        if link is not None and not link.get("samples"):
++            link = None
++        if not field_slots and not samples and link is None:
+             continue
+         try:
+             base = coerce(field, values[field.api])
+         except (TypeError, ValueError):
+             base = float(field.default)
++        if link is not None:
++            one_loop = chop_link.loop_samples(link, timing, loop_seconds, link.get("loop_start_seconds", 0.0))
++            base = _sample_loop(one_loop, loop_frames or len(one_loop), t)
+         chop_value = _sample_loop(samples, loop_frames or len(samples), t) if samples else None
+         out[field.api] = modulation.evaluate(base, field_slots, fpb, t, chop_value, chop_mode)
+     return out
+ 
+ 
++def _loop_seconds(tp, values, total):
++    """Seconds of one loop on the timeline (render frames / render fps)."""
++    if tp:
++        return float(tp["loop_frames"]) / float(tp["render_fps"] or 15)
++    fps = _as_number(values.get("out_fps", 15), float) or 15.0
++    return float(total) / float(fps)
++
++
++def _link_curve(field, link, override, timing, loop_seconds, loop_frames, total):
++    """(base curve over render frames 0..total-1 or None, warning or None) for a CHOP link."""
++    source = link.get("source") or "a CHOP"
++    if override:
++        return None, ("%s: the raw schedule is set, so %s on the base is ignored (clear raw to use it)"
++                      % (field.td_name, source))
++    if not link.get("samples"):
++        return None, "%s: %s gave no samples%s; base value used" % (
++            field.td_name, source, " (%s)" % link["note"] if link.get("note") else "")
++    one_loop = chop_link.loop_samples(link, timing, loop_seconds, link.get("loop_start_seconds", 0.0))
++    note = "%s: %s" % (field.td_name, link["note"]) if link.get("note") else None
++    return modulation.resample_loop(one_loop, loop_frames, total), note
++
++
+ def _chop_by_field(chop, warnings):
+     """{channel name: samples} -> {api: samples}; names may be api or TD names."""
+     lookup = {}
+@@ -247,7 +278,7 @@ def _chop_by_field(chop, warnings):
+ 
+ 
+ def build_request(values, prompts=None, models=None, frame_counter=None,
+-                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None):
++                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None, links=None):
+     """Return {"request", "plan", "tempo", "schedules", "warnings"}.
+ 
+     values         {api_name: value} as read from the COMP (missing keys = not on the COMP);
+@@ -257,6 +288,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     frame_counter  callable(container_path) -> int | None, used to cap frame counts
+     prompt_rows    [(beat, prompt, xfade)] from the COMP's prompt_seq table
+     chop           {channel name: [samples]} describing one loop (the Mod CHOP)
++    links          {api: chop_link dict} CHOP channels dropped onto a MOD parameter (base or raw);
++                   the channel becomes the parameter's base curve (see chop_link.py)
+     """
+     models = models or {}
+     warnings = []
+@@ -289,6 +322,9 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     fpb = tp["fpb"] if tp else tempo.frames_per_beat(_as_number(values.get("bpm", 120), float), 15)
+     loop_frames = tp["loop_frames"] if tp else total
+     chop_fields = _chop_by_field(chop, warnings)
++    timing = _text(values.get("chop_timing", chop_link.TIMELINE)) or chop_link.TIMELINE
++    loop_seconds = _loop_seconds(tp, values, total)
++    links = links or {}
+     if tp and tp["seamless"]:
+         warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
+     compiled = {}
+@@ -307,6 +343,13 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             field_slots = [s for s in slots if s.target == field.api]
+             samples = chop_fields.get(field.api)
+             chop_values = modulation.resample_loop(samples, loop_frames, total) if samples else None
++            base_curve = None
++            link = links.get(field.api)
++            if link is not None:
++                base_curve, link_note = _link_curve(field, link, override, timing, loop_seconds,
++                                                    loop_frames, total)
++                if link_note:
++                    warnings.append(link_note)
+             try:
+                 base = float(field.default) if override or text == "" else coerce(field, raw)
+             except (TypeError, ValueError):
+@@ -315,7 +358,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             sched, bounds, how = modulation.compile_field(
+                 base, field_slots, fpb, total, chop_values,
+                 _text(values.get("chop_mode", "add")), override,
+-                int(_as_number(values.get("bake_points", 0), float)))
++                int(_as_number(values.get("bake_points", 0), float)), base_curve=base_curve)
+             settings[field.key] = sched
+             compiled[field.api] = (how, sched)
+             ranges[field.api] = bounds if bounds else None
+@@ -467,7 +510,7 @@ def _is_constant_schedule(text):
+ 
+ 
+ def _check_field(field, how, bounds, mode, slots, override, warnings):
+-    moving = how in ("expression", "baked") or (bool(override) and not _is_constant_schedule(override))
++    moving = how in ("expression", "baked", "chop") or (bool(override) and not _is_constant_schedule(override))
+     if moving and field.dims and mode in ("2D", "3D") and field.dims != mode:
+         warnings.append("%s is %s-only; Deforum ignores it in %s mode" % (field.api, field.dims, mode))
+     if bounds and field.safe:
+@@ -532,7 +575,7 @@ def summary(result):
+         parts.append("capped by %s" % plan["limited_by"])
+     parts.append("%sx%s" % (s.get("W"), s.get("H")))
+     moving = sorted(api for api, (how, sched) in result.get("schedules", {}).items()
+-                    if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
++                    if how in ("expression", "baked", "chop") or (how == "raw" and not _is_constant_schedule(sched)))
+     if moving:
+         parts.append("mod: " + ", ".join(moving))
+     active = ["CN%d %s" % (u, s.get("cn_%d_model" % u)) for u in range(1, CN_UNITS + 1)
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 45f9c57..42f325e 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ 
+ import re
+ 
+-from . import feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
++from . import chop_link, feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -182,7 +182,11 @@ _MODS = [
+     _mod("amount_schedule", 0.1, FL, (0, 1), "Anti-blur Amount", (0, None)),
+     _mod("sigma_schedule", 1.0, FL, (0.1, 5), "Anti-blur Sigma", (0, None)),
+     _mod("threshold_schedule", 0.0, FL, (0, 1), "Anti-blur Threshold", (0, None)),
++    # Hybrid Video (2D / 3D with a Video Init Path)
++    _mod("hybrid_flow_factor_schedule", 1.0, HY, (0, 2), "Hybrid Flow Factor", (0, None)),
++    _mod("hybrid_comp_alpha_schedule", 0.5, HY, (0, 1), "Composite Alpha", (0, 1)),
+ ]
++_HY_MODS = dict((f.api, f) for f in _MODS if f.page == HY)
+ MOD_APIS = [f.api for f in _MODS]
+ MOD_LABELS = [f.label for f in _MODS]
+ SCHEDULE_APIS = MOD_APIS   # bake / preview targets (kept for older callers)
+@@ -355,9 +359,9 @@ FIELDS = [
+     F("hybrid_motion_use_prev_img", False, HY, TOGGLE, label="Flow from the previous generated image"),
+     F("hybrid_flow_consistency", False, HY, TOGGLE),
+     F("hybrid_consistency_blur", 2, HY, INT, norm=(0, 16)),
+-    F("hybrid_flow_factor_schedule", 1.0, HY, FLOAT, norm=(0, 2), as_schedule=True, label="Hybrid Flow Factor"),
++    _HY_MODS["hybrid_flow_factor_schedule"],
+     F("hybrid_composite", "None", HY, MENU, menu=HYBRID_COMPOSITES, label="Hybrid Composite (mix the video in)"),
+-    F("hybrid_comp_alpha_schedule", 0.5, HY, FLOAT, norm=(0, 1), as_schedule=True, label="Composite Alpha"),
++    _HY_MODS["hybrid_comp_alpha_schedule"],
+ ] + [f for f in _MODS if f.page == FL] + [
+ 
+     # --- Mod Matrix ----------------------------------------------------------------
+@@ -365,6 +369,9 @@ FIELDS = [
+       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
+     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
+     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
++    F("chop_timing", chop_link.TIMELINE, MM, MENU, menu=chop_link.TIMINGS, labels=chop_link.TIMING_LABELS,
++      label="CHOP Link Timing", target=None),
++    F("chop_links_info", "", MM, STATUS, label="CHOP-linked Parameters", target=None),
+ ] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
+ 
+     # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index c496d7b..e70d097 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -26,6 +26,7 @@ import sys
+ import time
+ import traceback
+ 
++from . import chop_link
+ from . import comfy
+ from . import config
+ from . import feed
+@@ -438,6 +439,73 @@ def read_ui(ui):
+     return values
+ 
+ 
++def _resolver(ui):
++    """op(path) the way a deforum parameter expression sees it: siblings first, then children."""
++    def resolve(path):
++        bases = []
++        parent = getattr(ui, "parent", None)
++        if callable(parent):
++            try:
++                bases.append(parent())
++            except Exception:
++                pass
++        bases.append(ui)
++        for base in bases:
++            try:
++                found = base.op(path) if base is not None else None
++            except Exception:
++                found = None
++            if found is not None:
++                return found
++        try:
++            import td
++            return td.op(path)
++        except Exception:
++            return None
++    return resolve
++
++
++def read_links(ui, values):
++    """CHOP channels dropped onto MOD parameters -> {api: link dict} (see chop_link.py).
++
++    A channel on the raw schedule parameter counts like one on the base: its raw value
++    (the channel's current value as text) is cleared from ``values`` so it is not sent.
++    """
++    links = {}
++    if ui is None:
++        return links
++    resolve = _resolver(ui)
++    timeline = getattr(ui, "time", None)
++    rate = float(getattr(timeline, "rate", 0) or 0) or 60.0
++    first = float(getattr(timeline, "start", 1) or 1)
++    loop_start = float(values.get("feed_loop_start", 0) or 0) or first
++    start_seconds = max(0.0, (loop_start - first) / rate)
++    for field in schema.MOD_FIELDS:
++        for name, on_raw in ((field.td_name, False), (field.raw_td_name, True)):
++            par = getattr(ui.par, name, None)
++            try:
++                link = chop_link.link_of(par, ui, resolve)
++            except Exception as exc:
++                link = chop_link.Link([], source=name, note="could not read its CHOP (%s)" % exc)
++            if link is None:
++                continue
++            entry = link.as_dict()
++            entry["loop_start_seconds"] = start_seconds
++            entry["par"] = name
++            if on_raw:
++                values[payload.raw_key(field.api)] = ""
++            if field.api not in links or on_raw:
++                links[field.api] = entry
++    return links
++
++
++def describe_links(links):
++    if not links:
++        return "none (drag a CHOP channel onto a schedule parameter: CHOP Reference or Export)"
++    return "; ".join("%s <- %s" % (schema.BY_API[api].td_name, link.get("source") or "?")
++                     for api, link in sorted(links.items()))
++
++
+ def read_prompt_rows(ui):
+     """prompt_seq table -> [[beat, prompt, xfade], ...] (None when the COMP has no table)."""
+     table = _inner(ui, "prompt_seq")
+@@ -517,12 +585,16 @@ def build(root, cfg):
+     if ui is None:
+         raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
+     values = read_ui(ui)
++    links = read_links(ui, values)
++    _set_par(ui, "Choplinksinfo", describe_links(links))
+     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
+     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
+                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
+                                                                 payload.DEFAULT_CHECKPOINT),
+                                    prompt_rows=read_prompt_rows(ui),
+-                                   chop=read_mod_chop(ui, values))
++                                   chop=read_mod_chop(ui, values), links=links)
++    if links:
++        log("CHOP-linked: " + describe_links(links))
+     if result.get("tempo"):
+         _set_par(ui, "Tempoinfo", tempo.describe(result["tempo"]))
+     return values, result
+@@ -1731,7 +1803,7 @@ def preview(root):
+     values, result = build(root, cfg)
+     for warning in result["warnings"]:
+         log("warning: " + warning)
+-    order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
++    order = {"chop": 0, "expression": 1, "baked": 2, "raw": 3, "constant": 4}
+     rows = sorted(result["schedules"].items(), key=lambda kv: (order.get(kv[1][0], 9), kv[0]))
+     table = _inner(_op(root, "ui"), "preview")
+     if table is not None:
+@@ -1795,7 +1867,9 @@ def mod_live_cook(script_op):
+         chan = clock["loop_frame"] if clock is not None else None
+         loop_frame = float(chan[0]) if chan is not None else 0.0
+         values = read_ui(ui)
+-        live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame, script_op.time.rate)
++        links = read_links(ui, values)
++        live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame,
++                                   script_op.time.rate, links)
+         script_op.clear()
+         script_op.numSamples = 1
+         for name in sorted(live):
+@@ -1930,6 +2004,11 @@ def doctor(root):
+             used = sorted(n for n in chop if n.lower() in known)
+             log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
+                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
++        links = read_links(ui, values)
++        log("CHOP-linked parameters: %s" % describe_links(links))
++        for api, link in sorted(links.items()):
++            if link.get("note"):
++                log("  %s: %s" % (api, link["note"]))
+         rows = read_prompt_rows(ui)
+         source = values.get("prompt_source")
+         log("prompt_seq rows: %d in %s/prompt_seq (Prompts > Edit prompt_seq opens it); prompts come from %s"
+diff --git a/tests/test_chop_link.py b/tests/test_chop_link.py
+new file mode 100644
+index 0000000..8d78b77
+--- /dev/null
++++ b/tests/test_chop_link.py
+@@ -0,0 +1,160 @@
++"""CHOP channels dropped onto a deforum parameter (chop_link.py and its payload / controller use)."""
++
++import unittest
++
++from _fakes import Channel, Op, Par, ParMode, make_network
++from tdeforum import chop_link, payload, schema, td_controller as ctl
++
++from test_controller import TEMPO_UI
++
++
++def chop(name, parent=None, rate=30.0, start=0.0, **channels):
++    o = Op(name, parent)
++    o.channels = [Channel(n, v) for n, v in channels.items()]
++    o.rate, o.start = rate, start
++    return o
++
++
++RAMP = [float(i) for i in range(60)]          # one value per render frame of a 60-frame loop
++
++
++class LinkReadTest(unittest.TestCase):
++    def setUp(self):
++        self.pattern = chop("pattern1", chan1=RAMP, chan2=[1.0] * 60)
++        self.ops = {"pattern1": self.pattern, "/project1/pattern1": self.pattern}
++        self.resolve = self.ops.get
++
++    def link(self, par):
++        return chop_link.link_of(par, None, self.resolve)
++
++    def test_chop_reference(self):
++        link = self.link(Par("Translationz", 3.0, ParMode.EXPRESSION, "op('pattern1')['chan1']"))
++        self.assertEqual(link.samples, RAMP)
++        self.assertEqual(link.rate, 30.0)
++        self.assertIsNone(link.note)
++        self.assertIn("chan1", link.source)
++
++    def test_index_and_chan_forms(self):
++        self.assertEqual(self.link(Par("Zoom", 1, ParMode.EXPRESSION, 'op("pattern1")[1]')).samples, [1.0] * 60)
++        self.assertEqual(self.link(Par("Zoom", 1, ParMode.EXPRESSION,
++                                       "op('/project1/pattern1').chan('chan1')")).samples, RAMP)
++
++    def test_maths_over_the_whole_channel(self):
++        link = self.link(Par("Zoom", 1, ParMode.EXPRESSION,
++                             "1 + op('pattern1')['chan1'] * 0.01 + op('pattern1')['chan2']"))
++        self.assertAlmostEqual(link.samples[0], 2.0)
++        self.assertAlmostEqual(link.samples[59], 2.59)
++        self.assertIsNone(link.note)
++
++    def test_unevaluable_expression_falls_back_to_the_channel(self):
++        link = self.link(Par("Zoom", 1, ParMode.EXPRESSION, "math.sin(op('pattern1')['chan1'])"))
++        self.assertEqual(link.samples, RAMP)
++        self.assertIn("as-is", link.note)
++
++    def test_export(self):
++        par = Par("Translationz", 0.0, ParMode.EXPORT)
++        par.exportOP, par.exportSource = self.pattern, self.pattern.channels[0]
++        link = self.link(par)
++        self.assertEqual(link.samples, RAMP)
++        self.assertIn("export", link.source)
++
++    def test_not_linked(self):
++        self.assertIsNone(self.link(Par("Zoom", 1.0)))
++        self.assertIsNone(self.link(Par("Zoom", 1.0, ParMode.EXPRESSION, "me.time.frame * 0.01")))
++        self.assertIsNone(self.link(Par("Zoom", 1.0, ParMode.EXPRESSION, "op('missing')['chan1']")))
++        missing = self.link(Par("Zoom", 1.0, ParMode.EXPRESSION, "op('pattern1')['nope']"))
++        self.assertEqual(missing.samples, [])
++        self.assertIn("not found", missing.note)
++
++    def test_timeline_window(self):
++        # 2-second loop starting 1 s into a 30 Hz channel: samples 30..89 (wrapping past the end)
++        link = chop_link.Link(RAMP, 30.0, 0.0)
++        window = chop_link.loop_samples(link, chop_link.TIMELINE, 2.0, 1.0)
++        self.assertEqual(len(window), 60)
++        self.assertEqual(window[0], 30.0)
++        self.assertEqual(window[29], 59.0)
++        self.assertEqual(window[30], 0.0)
++        self.assertEqual(chop_link.loop_samples(link, chop_link.LOOP, 2.0, 1.0), RAMP)
++
++
++class LinkPayloadTest(unittest.TestCase):
++    def values(self, **extra):
++        v = dict(TEMPO_UI, mod1_active=False, loop_seeds=False)
++        v.update(extra)
++        return v
++
++    def test_link_bakes_the_whole_channel(self):
++        links = {"translation_z": chop_link.Link(RAMP, 30.0).as_dict()}
++        result = payload.build_request(self.values(), links=links)
++        how, sched = result["schedules"]["translation_z"]
++        self.assertEqual(how, "chop")
++        keys = sched.split(", ")
++        self.assertEqual(len(keys), result["plan"]["max_frames"])     # 75 = loop + 1 beat overlap
++        self.assertEqual(keys[0], "0:(0.00000)")
++        self.assertEqual(keys[59], "59:(59.00000)")
++        self.assertEqual(keys[60], "60:(0.00000)")                   # the overlap wraps to the loop start
++        self.assertIn("translation_z", payload.summary(result))
++
++    def test_mod_matrix_adds_on_top(self):
++        links = {"translation_z": chop_link.Link([5.0, 5.0], 30.0).as_dict()}
++        result = payload.build_request(self.values(mod1_active=True), links=links)
++        values = [float(k.split("(")[1].rstrip(")")) for k in result["schedules"]["translation_z"][1].split(", ")]
++        self.assertAlmostEqual(values[0], 7.0)          # kick decay starts at depth 2 on top of the 5 base
++        self.assertTrue(all(v >= 5.0 - 1e-6 for v in values))
++
++    def test_raw_text_wins_and_warns(self):
++        links = {"zoom": chop_link.Link(RAMP, 30.0).as_dict()}
++        v = self.values()
++        v[payload.raw_key("zoom")] = "0:(1.01)"
++        result = payload.build_request(v, links=links)
++        self.assertEqual(result["schedules"]["zoom"], ("raw", "0:(1.01)"))
++        self.assertTrue(any("raw schedule is set" in w for w in result["warnings"]))
++
++    def test_hybrid_schedules_are_linkable(self):
++        result = payload.build_request(self.values(hybrid_flow_factor_schedule=1.0, hybrid_comp_alpha_schedule=0.5))
++        self.assertEqual(result["schedules"]["hybrid_flow_factor_schedule"], ("constant", "0:(1)"))
++        links = {"hybrid_comp_alpha_schedule": chop_link.Link([0.0, 1.0], 30.0).as_dict()}
++        result = payload.build_request(self.values(hybrid_comp_alpha_schedule=0.5), links=links)
++        self.assertEqual(result["schedules"]["hybrid_comp_alpha_schedule"][0], "chop")
++        self.assertIn("hybrid_comp_alpha_schedule", schema.MOD_APIS)
++
++    def test_live_values_follow_the_link(self):
++        links = {"zoom": chop_link.Link(RAMP, 30.0).as_dict()}
++        live = payload.live_values(self.values(), None, 20.0, 60.0, links)   # 20 timeline frames = render frame 10
++        self.assertAlmostEqual(live["zoom"], 10.0)
++
++
++class LinkControllerTest(unittest.TestCase):
++    def setUp(self):
++        self.root = make_network(dict(TEMPO_UI, mod1_active=False), comp=True)
++        self.ui = self.root.op("deforum")
++        self.ui.parent = lambda: self.root
++        self.root.add(chop("pattern1", self.root, chan1=RAMP))
++
++    def test_reference_on_base_and_raw(self):
++        self.ui.par.Translationz = Par("Translationz", 12.0, ParMode.EXPRESSION, "op('pattern1')['chan1']")
++        self.ui.par.Zoomraw = Par("Zoomraw", "0.5", ParMode.EXPRESSION, "op('pattern1')['chan1'] * 0.001 + 1")
++        values = ctl.read_ui(self.ui)
++        links = ctl.read_links(self.ui, values)
++        self.assertEqual(sorted(links), ["translation_z", "zoom"])
++        self.assertEqual(values[payload.raw_key("zoom")], "")          # the raw text is the channel, not a schedule
++        self.assertIn("Translationz <- /project1/pattern1", ctl.describe_links(links))
++        result = payload.build_request(values, links=links)
++        self.assertEqual(result["schedules"]["zoom"][0], "chop")
++        self.assertTrue(result["schedules"]["zoom"][1].startswith("0:(1.00000), 1:(1.00100)"))
++
++    def test_timeline_timing_uses_feed_loop_start(self):
++        self.root.timeline = None
++        self.ui.time = type("T", (), {"rate": 60.0, "start": 1})()
++        self.ui.par.Feedloopstart = Par("Feedloopstart", 61)        # 1 s into the timeline
++        self.ui.par.Choptiming = Par("Choptiming", chop_link.TIMELINE)
++        self.ui.par.Translationz = Par("Translationz", 0.0, ParMode.EXPRESSION, "op('pattern1')['chan1']")
++        values = ctl.read_ui(self.ui)
++        links = ctl.read_links(self.ui, values)
++        self.assertAlmostEqual(links["translation_z"]["loop_start_seconds"], 1.0)
++        result = payload.build_request(values, links=links)
++        self.assertTrue(result["schedules"]["translation_z"][1].startswith("0:(30.00000)"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

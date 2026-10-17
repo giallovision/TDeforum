@@ -1,0 +1,116 @@
+From 20d6e323ced6755ff2df4f014effc50e863e9a5c Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 00:23:07 +0000
+Subject: [PATCH] Report unreachable ComfyUI/Deforum: port check in doctor,
+ fail fast on connection errors
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ scripts/tdeforum/td_controller.py | 23 +++++++++++++++++++++++
+ scripts/webclient2_callbacks.py   |  3 ++-
+ tests/test_controller.py          |  3 +++
+ tests/test_sweep.py               | 19 +++++++++++++++++++
+ 4 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 6ca58cc..33b982d 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -1064,7 +1064,27 @@ def on_response(root, dat, status_code, data):
+ 
+ 
+ def on_error(root, dat, error):
++    """A Web Client DAT could not complete a request (no answer at all, unlike an HTTP error)."""
+     log("%s request error: %s" % (dat.name, error))
++    st = _state(root)
++    cfg = config.load()
++    if dat.name == NAMES["comfy"] and st.get("state") == COMFY_SUBMITTED:
++        _fail(root, st, "could not reach ComfyUI at %s (%s). Open that address in a browser on this "
++                        "computer; if it does not load, the container port is not published or a firewall "
++                        "blocks it. Set server_host / comfy_port in %s if it lives elsewhere."
++              % (config.comfy_url(cfg), error, cfg["local_file"]))
++    elif dat.name == NAMES["deforum"] and st.get("state") == DEFORUM_SUBMITTED:
++        _fail(root, st, "could not reach Deforum at %s (%s)" % (config.deforum_url(cfg), error))
++
++
++def _reachable(host, port, timeout=2.0):
++    """'open' / the reason a TCP connection to host:port failed (checked from this computer)."""
++    import socket
++    try:
++        socket.create_connection((host, int(port)), timeout).close()
++        return "open"
++    except Exception as exc:
++        return "NOT reachable (%s)" % (exc,)
+ 
+ 
+ def _on_deforum_submit(root, st, code, body, text):
+@@ -1417,6 +1437,9 @@ def doctor(root):
+         getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
+         "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
+     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
++    log("port check from this computer: Deforum %s:%s %s | ComfyUI %s:%s %s" % (
++        cfg["server_host"], cfg["deforum_port"], _reachable(cfg["server_host"], cfg["deforum_port"]),
++        cfg["server_host"], cfg["comfy_port"], _reachable(cfg["server_host"], cfg["comfy_port"])))
+     ui = _op(root, "ui")
+     values = read_ui(ui) if ui is not None else {}
+     if ui is None:
+diff --git a/scripts/webclient2_callbacks.py b/scripts/webclient2_callbacks.py
+index f79d588..93cdd07 100644
+--- a/scripts/webclient2_callbacks.py
++++ b/scripts/webclient2_callbacks.py
+@@ -29,5 +29,6 @@ def onResponse(webClientDAT, statusCode, headerDict, data, *args):
+ 
+ 
+ def onError(webClientDAT, *args):
+-    _ctl().on_error(webClientDAT.parent(), webClientDAT, args[-1] if args else 'unknown error')
++    _ctl().on_error(webClientDAT.parent(), webClientDAT,
++                    ', '.join(str(a) for a in args) or 'TouchDesigner gave no details')
+     return
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index 8ed7367..ce6dea5 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -41,6 +41,9 @@ class ControllerTest(unittest.TestCase):
+         patcher = mock.patch.object(config, "load", return_value=cfg)
+         patcher.start()
+         self.addCleanup(patcher.stop)
++        ports = mock.patch.object(ctl, "_reachable", return_value="open")
++        ports.start()
++        self.addCleanup(ports.stop)
+         self.addCleanup(shutil.rmtree, self.share)
+         self.root = make_network(dict(UI))
+ 
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index b395289..41dca16 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -313,6 +313,25 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         ctl.queue(self.root)
+         self.assertEqual(self.state(), ctl.CAPTURING)
+ 
++    def test_unreachable_comfyui_fails_at_once_with_the_address(self):
++        ui = self.make()
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
++        ctl.on_error(self.root, self.root.op("webclient_comfyui"), "connection refused")
++        self.assertEqual(self.state(), ctl.IDLE)
++        status = ui.par.Pipelinestatus.val
++        self.assertIn("could not reach ComfyUI", status)
++        self.assertIn(":8188", status)
++
++    def test_doctor_checks_the_ports(self):
++        self.make()
++        with mock.patch.object(ctl, "_reachable", side_effect=lambda h, p, t=2.0: "open" if p == 7865 else "NOT reachable (x)"):
++            with mock.patch("builtins.print") as out:
++                ctl.doctor(self.root)
++        text = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
++        self.assertIn("7865 open", text)
++        self.assertIn("8188 NOT reachable (x)", text)
++
+     def test_preview_and_doctor_report_the_sweep(self):
+         self.make()
+         with mock.patch("builtins.print") as out:
+-- 
+2.43.0
+

@@ -1,0 +1,711 @@
+From 273cedc3f250ba714266d8c26dd6666ba3b92dde Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 05:13:09 +0000
+Subject: [PATCH] Snapshots of the deforum COMP, input video loop as COMP
+ output 3, Reload Render + Input
+
+- Pipeline: Take Snapshot / Snapshot File / Load Snapshot (every parameter with expressions and binds, prompt_seq, preset state; T:/snapshots)
+- in_head/in_tail -> in_cross -> out_input: the init video at render size, frame-matched and seam-crossfaded like the render
+- Pipeline > Reload Render + Input reloads outputs 1 and 3
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  14 +++
+ docs/deforum_parameters.md        |  11 +-
+ scripts/build_master_ui.py        |  53 ++++++++-
+ scripts/tdeforum/__init__.py      |   5 +-
+ scripts/tdeforum/schema.py        |  12 ++
+ scripts/tdeforum/snapshots.py     | 108 +++++++++++++++++
+ scripts/tdeforum/td_controller.py | 189 +++++++++++++++++++++++++++++-
+ tests/_fakes.py                   |   6 +-
+ tests/test_builder.py             |  28 ++++-
+ tests/test_controller.py          |  37 ++++++
+ 10 files changed, 446 insertions(+), 17 deletions(-)
+ create mode 100644 scripts/tdeforum/snapshots.py
+
+diff --git a/README.md b/README.md
+index c3f62cb..9ced709 100644
+--- a/README.md
++++ b/README.md
+@@ -238,6 +238,20 @@ echo "$HOME/Codebase/comfyui/output/preprocessed_vids $PWD/td_masks/preprocessed
+ sudo mount -a && make down && make up
+ ```
+ 
++### Outputs for compositing
++
++| COMP output | what |
++|---|---|
++| 1 `out_loop` | the render, seamless loop player |
++| 2 `out_sweep` | the last Sweep Depth mask video |
++| 3 `out_input` | the **init video looped the same way as the render**: at render size (W × H), the frames Deforum used (start / stride from the frame plan), interpolation-aware, with the same seam crossfade, so outputs 1 and 3 line up frame for frame |
++
++*Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
++
++### Snapshots
++
++*Pipeline › Take Snapshot* saves every parameter (values, expressions and binds, so CHOP References too), `prompt_seq` and the preset state to `T:/snapshots/<name>_<date_time>.json` and puts that path in *Snapshot File*. *Load Snapshot* puts it all back; *Snapshot File* also takes just a file name from `T:/snapshots`. Status lines and buttons are not saved; a parameter exported from a CHOP keeps its export.
++
+ ### Live CHOPs: `beat_clock` and `mod_live`
+ 
+ Two CHOPs inside the COMP make live TouchDesigner visuals line up with what Deforum renders:
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index 9239c79..1e76c06 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -1,6 +1,6 @@
+ # deforum COMP: parameter reference
+ 
+-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.2). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.11.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+ Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+@@ -286,3 +286,12 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
+ | `Loopoffset` | Loop Player Offset (frames) | 0 | Shifts the loop player's start against the timeline. |
+ | `Feedloopstart` | Feed: loop start frame (0 = timeline start) | 0 | Timeline frame where TOP feeds and beat_clock start counting (0 = timeline start). |
+ | `Feedmethod` | Feed: recording method | addframe | Add Frame: the recorder steps the timeline frame by frame. Continuous: records every cooked frame. |
++| `Reloadoutputs` | Reload Render + Input (outputs 1 and 3) | (button) | Loads the last render (output 1) and its input video (output 3) again; with nothing loaded yet, the newest render with the current settings' loop plan. |
++| `Loopinstart` | Input loop: first video frame | (read-only) | Read-only: first init-video frame the render used (output 3 starts there). |
++| `Loopinstride` | Input loop: video frames per render frame | (read-only) | Read-only: init-video frames per render frame (more than 1 with Video Frame Mode = Stride). |
++| `Loopinrate` | Input loop: render frames per output frame | (read-only) | Read-only: render frames per output frame (0.5 when the render is interpolated x2); keeps output 3 in step with output 1. |
++| `Snapshotname` | Snapshot Name (optional) | (empty) | Optional name for the next snapshot; the file is <name>_<date_time>.json. |
++| `Snapshottake` | Take Snapshot (saves every parameter) | (button) | Saves every parameter (values, expressions, binds), prompt_seq and the preset state to T:/snapshots and puts the file in Snapshot File. |
++| `Snapshotpath` | Snapshot File (path, or a name in T:/snapshots) | (empty) | The snapshot to load: a full path, or just a file name from T:/snapshots. |
++| `Snapshotload` | Load Snapshot | (button) | Puts back everything the snapshot saved (CHOP-exported parameters keep their export). |
++| `Snapshotinfo` | Snapshot | (read-only) | Read-only: the last snapshot taken or loaded. |
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 0bba36b..a450bb9 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -18,6 +18,7 @@
+ #   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
+ #                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
+ #   sweep_preview -> out_sweep   the last Sweep Depth mask video (COMP output 2)
++#   in_head/in_tail -> in_cross -> out_input   the init video looped like the render (COMP output 3)
+ #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
+ #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
+ #                                    channels named after parameters (drive live visuals with it)
+@@ -118,6 +119,9 @@ def create(page, field, section=False):
+     elif kind == schema.PULSE:
+         p = page.appendPulse(name, label=label)[0]
+         return [p]
++    elif kind == schema.FILE:
++        p = page.appendFile(name, label=label)[0]
++        p.default = str(field.default)
+     else:  # str, schedule, seed, checkpoint, status
+         p = page.appendStr(name, label=label)[0]
+         p.default = str(field.default)
+@@ -266,14 +270,53 @@ def build_inner(comp, values):
+     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
+     cross.inputConnectors[0].connect(head)
+     cross.inputConnectors[1].connect(tail)
+-    # Tail weight 1 -> 0 over the overlap at the start of each loop (smoothstep: no kink at
+-    # either end), 0 afterwards.
+-    _expr(cross, 'cross', '(lambda p, o: (lambda w: w * w * (3.0 - 2.0 * w))(1.0 - p / o) '
+-                          'if 0 < o and p < o else 0.0)'
+-                          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
++    _expr(cross, 'cross', _CROSS)
+     out = _get(comp, outTOP, 'out_loop', 400, 0)
+     out.inputConnectors[0].connect(cross)
+ 
++    build_input_loop(comp)
++
++
++# Tail weight 1 -> 0 over the overlap at the start of each loop (smoothstep: no kink at
++# either end), 0 afterwards.
++_CROSS = ('(lambda p, o: (lambda w: w * w * (3.0 - 2.0 * w))(1.0 - p / o) if 0 < o and p < o else 0.0)'
++          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
++
++
++def _input_index(offset):
++    """Init-video frame for the loop playhead: start + stride * render frame (the frame Deforum used)."""
++    return ('int(parent().par.Loopinstart.eval() or 0) + int(parent().par.Loopinstride.eval() or 1) * '
++            'int((%s%s) * float(parent().par.Loopinrate.eval() or 1))' % (_P, offset))
++
++
++def build_input_loop(comp):
++    """COMP output 3: the init video at render size, looped and seam-crossfaded like the render,
++    so render and input line up frame for frame for blending / compositing."""
++    head = _get(comp, moviefileinTOP, 'in_head', 0, -950)
++    tail = _get(comp, moviefileinTOP, 'in_tail', 0, -1100)
++    for player, offset in ((head, ''), (tail, ' + %s' % _LOOP)):
++        playmode = getattr(player.par, 'playmode', None)
++        if playmode is not None:
++            _set_menu(playmode, 'specify', 'specifyindex')
++        unit = getattr(player.par, 'indexunit', None)
++        if unit is not None:
++            _set_menu(unit, 'indices', 'index', 'frames')
++        _expr(player, 'index', _input_index(offset))
++        res = getattr(player.par, 'outputresolution', None)
++        if res is not None:
++            _set_menu(res, 'custom')
++            _expr(player, 'resolutionw', 'int(parent().par.Width.eval())')
++            _expr(player, 'resolutionh', 'int(parent().par.Height.eval())')
++        else:
++            say('NOTE %s has no outputresolution; set Common > Output Resolution to the render size by hand'
++                % player.name)
++    cross = _get(comp, crossTOP, 'in_cross', 200, -1000)
++    cross.inputConnectors[0].connect(head)
++    cross.inputConnectors[1].connect(tail)
++    _expr(cross, 'cross', _CROSS)
++    out = _get(comp, outTOP, 'out_input', 400, -1000)        # COMP output 3 (below out_sweep)
++    out.inputConnectors[0].connect(cross)
++
+ 
+ # Timeline position inside the loop, the same way the feed recorder and the render count it:
+ # frame 0 = Pipeline > Feed loop start (or the timeline start), tempo from the Tempo page.
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index f1f4bd4..4f75817 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -7,6 +7,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``schedules``     keyframe-string helpers (bake, checkpoint schedules)
+ * ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
+ * ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
++* ``snapshots``     Take / Load Snapshot: every COMP parameter as JSON on the share
+ * ``chop_link``     CHOP channels dropped onto a parameter -> its whole curve, baked at Queue
+ * ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
+ * ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
+@@ -27,10 +28,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.10.3"
++__version__ = "0.11.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index ab73953..643dfd5 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -59,6 +59,7 @@ SEED = "seed"              # string par (seeds overflow TD int pars); sent as in
+ CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
+ STATUS = "status"          # read-only string written by the controller
+ PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
++FILE = "file"              # string par with a file browser (TD-only)
+ 
+ RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
+ MOD_MARK = "~ "            # label prefix of driveable (MOD) parameters on the COMP
+@@ -429,6 +430,17 @@ FIELDS = [
+       label="Feed: loop start frame (0 = timeline start)", target=None),
+     F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
+       label="Feed: recording method", target=None),
++    # Outputs: 1 = render loop, 2 = sweep, 3 = the input video looped the same way as the render
++    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input (outputs 1 and 3)", target=None),
++    F("loop_in_start", "0", PL, STATUS, label="Input loop: first video frame", target=None),
++    F("loop_in_stride", "1", PL, STATUS, label="Input loop: video frames per render frame", target=None),
++    F("loop_in_rate", "1", PL, STATUS, label="Input loop: render frames per output frame", target=None),
++    # Snapshots of every parameter (tdeforum/snapshots.py)
++    F("snapshot_name", "", PL, STR, label="Snapshot Name (optional)", target=None),
++    F("snapshot_take", 0, PL, PULSE, label="Take Snapshot (saves every parameter)", target=None),
++    F("snapshot_path", "", PL, FILE, label="Snapshot File (path, or a name in T:/snapshots)", target=None),
++    F("snapshot_load", 0, PL, PULSE, label="Load Snapshot", target=None),
++    F("snapshot_info", "", PL, STATUS, label="Snapshot", target=None),
+ ]
+ 
+ def _with_page_presets(fields):
+diff --git a/scripts/tdeforum/snapshots.py b/scripts/tdeforum/snapshots.py
+new file mode 100644
+index 0000000..abbd6fb
+--- /dev/null
++++ b/scripts/tdeforum/snapshots.py
+@@ -0,0 +1,108 @@
++"""Snapshots of the deforum COMP: every parameter (value, expression, bind), prompt_seq and
++the preset bookkeeping, saved as JSON on the share and loaded back with one pulse.
++
++Pipeline page:
++    Take Snapshot   writes <share>/snapshots/<name or timestamp>.json and puts its path in
++                    Snapshot File, ready to load later
++    Snapshot File   a snapshot to load (a full path, or just a name from the snapshots folder)
++    Load Snapshot   puts every saved parameter back
++
++Read-only parameters (status lines), buttons and the snapshot fields themselves are not
++saved. Expressions and binds come back as expressions and binds (so a CHOP Reference link
++is restored too); an Export CHOP re-attaches by itself and its parameter is left alone.
++"""
++
++import json
++import os
++import re
++import time
++
++from . import schema
++
++VERSION = 1
++FOLDER = "snapshots"
++SKIP_KINDS = (schema.STATUS, schema.PULSE)
++SKIP_APIS = ("snapshot_name", "snapshot_path")
++
++
++def folder(cfg):
++    return (cfg.get("snapshot_dir") or (cfg["share_root"].rstrip("/") + "/" + FOLDER)).rstrip("/")
++
++
++def safe_name(text):
++    text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text or "").strip()).strip("._")
++    return text[:80]
++
++
++def new_path(cfg, name="", now=None):
++    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
++    base = safe_name(name)
++    return "%s/%s.json" % (folder(cfg), ("%s_%s" % (base, stamp)) if base else "snapshot_" + stamp)
++
++
++def resolve(cfg, text):
++    """Snapshot File -> a path: full paths as given, bare names from the snapshots folder."""
++    text = str(text or "").strip().strip('"')
++    if not text:
++        return None
++    if "/" in text.replace("\\", "/") or re.match(r"^[A-Za-z]:", text):
++        return text.replace("\\", "/")
++    return "%s/%s%s" % (folder(cfg), text, "" if text.lower().endswith(".json") else ".json")
++
++
++def par_names():
++    """TD names a snapshot covers, in schema order."""
++    names = []
++    for field in schema.FIELDS:
++        if field.kind in SKIP_KINDS or field.api in SKIP_APIS:
++            continue
++        names.append(field.td_name)
++        if field.kind == schema.MOD:
++            names.append(field.raw_td_name)
++    return names
++
++
++def mode_name(par):
++    return getattr(getattr(par, "mode", None), "name", str(getattr(par, "mode", ""))).split(".")[-1].upper()
++
++
++def capture_par(par):
++    entry = {"mode": mode_name(par) or "CONSTANT", "val": par.val}
++    expr = str(getattr(par, "expr", "") or "")
++    bind = str(getattr(par, "bindExpr", "") or "")
++    if entry["mode"] == "EXPRESSION" and expr:
++        entry["expr"] = expr
++    if entry["mode"] == "BIND" and bind:
++        entry["bind"] = bind
++    if not isinstance(entry["val"], (str, int, float, bool)) and entry["val"] is not None:
++        entry["val"] = str(entry["val"])
++    return entry
++
++
++def build(pars, prompt_rows, presets, name="", version="", now=None):
++    """The snapshot dict. pars {TD name: par}, presets {storage key: stored value}."""
++    return {
++        "tdeforum_snapshot": VERSION,
++        "tdeforum": version,
++        "name": name,
++        "taken": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
++        "pars": dict((n, capture_par(p)) for n, p in pars.items()),
++        "prompt_seq": [list(map(str, r)) for r in (prompt_rows or [])],
++        "presets": presets or {},
++    }
++
++
++def write(path, data):
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path + ".tmp", "w", encoding="utf-8") as fh:
++        json.dump(data, fh, indent=2, sort_keys=True)
++    os.replace(path + ".tmp", path)
++    return path
++
++
++def read(path):
++    with open(path, "r", encoding="utf-8") as fh:
++        data = json.load(fh)
++    if not isinstance(data, dict) or "pars" not in data:
++        raise ValueError("%s is not a deforum snapshot" % path)
++    return data
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 440e222..49aafb4 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -27,6 +27,7 @@ import time
+ import traceback
+ 
+ from . import chop_link
++from . import snapshots
+ from . import comfy
+ from . import config
+ from . import feed
+@@ -61,6 +62,7 @@ FEED_FINALIZE_TIMEOUT_S = 60.0
+ PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+ PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
+ PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
++LAST_LOAD_KEY = "tdeforum_last_load"  # root storage: {path, expect} of the render last loaded
+ FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
+ CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+ 
+@@ -84,6 +86,8 @@ INNER = {
+     "preview": "schedule_preview",    # table written by preview()
+     "head": "loop_head",              # loop player: Movie File In at the playhead
+     "tail": "loop_tail",              # loop player: Movie File In one loop later
++    "in_head": "in_head",             # input loop (output 3): the init video at the playhead
++    "in_tail": "in_tail",             # input loop: one loop later
+     "sweep_preview": "sweep_preview", # Sweep Depth: Movie File In showing the last mask video
+     "beat_clock": "beat_clock",       # Constant CHOP: loop / beat / bar phase on the timeline
+     "mod_live": "mod_live",           # Script CHOP: Mod Matrix values at the current loop frame
+@@ -346,12 +350,19 @@ def on_ui_pulse(root, name):
+         return open_prompt_seq(root)
+     if name == "Sweepshowlatest":
+         return show_latest_sweep(root)
++    if name == "Reloadoutputs":
++        return reload_outputs(root)
++    if name == "Snapshottake":
++        return take_snapshot(root)
++    if name == "Snapshotload":
++        return load_snapshot(root)
+     return False
+ 
+ 
+ def ui_watched():
+     """TD names ui_exec watches."""
+-    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest"] + \
++    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest", "Reloadoutputs",
++            "Snapshottake", "Snapshotload"] + \
+         [schema.BY_API[a].td_name for a in schema.PAGE_PRESET_APIS]
+ 
+ 
+@@ -631,13 +642,30 @@ def build(root, cfg):
+     return values, result
+ 
+ 
+-def _expectation(result):
+-    """What the finished render will look like on disk / how to loop it (kept in state)."""
++def _expectation(result, cfg=None):
++    """What the finished render will look like on disk / how to loop it (kept in state).
++
++    ``input``: how the init video lines up with the render (COMP output 3 plays it looped the
++    same way): video frame = start + stride * render frame, render frame = output frame * rate."""
+     tp = result.get("tempo")
+     if not tp:
+         return None
+-    return {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
+-            "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
++    expect = {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
++              "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
++    expect["input"] = _input_expect(result, cfg, 1.0 / max(1, int(tp["interp_x"] or 1)))
++    return expect
++
++
++def _input_expect(result, cfg, rate):
++    settings = result.get("request", {}).get("deforum_settings", {})
++    init = str(settings.get("video_init_path", "") or "").strip()
++    if not init or cfg is None:
++        return None
++    plan = result.get("plan") or {}
++    return {"container": init, "share": config.to_share(cfg, init) or init,
++            "start": int(plan.get("extract_from_frame") or 0),
++            "stride": int(plan.get("extract_nth_frame") or 1), "rate": float(rate),
++            "size": [settings.get("W"), settings.get("H")]}
+ 
+ 
+ def _write_runtime_json(cfg, name, data):
+@@ -1061,7 +1089,7 @@ def _submit_deforum(root, cfg, result, st):
+                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
+     now = time.time()
+     _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
+-                 "expect": _expectation(result)})
++                 "expect": _expectation(result, cfg)})
+     _set_status(root, "render: submitted")
+     log("render submitted: " + payload.summary(result))
+ 
+@@ -1811,6 +1839,8 @@ def _load_movie(root, path, expect=None):
+             reload_ = getattr(player.par, "reloadpulse", None)
+             if reload_ is not None:
+                 reload_.pulse()
++    _load_input(ui, (expect or {}).get("input"))
++    root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
+     if expect and expect.get("out_loop"):
+         loop = int(expect["out_loop"])                 # output frames per loop
+         rate = float(expect.get("rate", 1.0))          # file frames per output frame
+@@ -1828,6 +1858,153 @@ def _load_movie(root, path, expect=None):
+                "" if frames else " (file length unknown, used the plan)"))
+ 
+ 
++def _load_input(ui, info):
++    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross)."""
++    if ui is None:
++        return
++    share = (info or {}).get("share") or ""
++    if info:
++        _set_par(ui, "Loopinstart", str(int(info.get("start", 0))))
++        _set_par(ui, "Loopinstride", str(int(info.get("stride", 1))))
++        _set_par(ui, "Loopinrate", "%g" % float(info.get("rate", 1.0)))
++    for key in ("in_head", "in_tail"):
++        player = _inner(ui, key)
++        if player is None:
++            continue
++        _set_constant(player.par.file, share)
++        reload_ = getattr(player.par, "reloadpulse", None)
++        if reload_ is not None:
++            try:
++                reload_.pulse()
++            except Exception:
++                pass
++    if info:
++        log("input loop (output 3): %s from frame %d, every %d%s" % (
++            os.path.basename(share), int(info.get("start", 0)), int(info.get("stride", 1)),
++            "" if float(info.get("rate", 1)) == 1 else ", %g render frames per output frame" % info["rate"]))
++
++
++def reload_outputs(root):
++    """Pipeline > Reload Render + Input: load the last render and its input video again
++    (outputs 1 and 3); without one, the newest render with the current settings' plan."""
++    stored = root.fetch(LAST_LOAD_KEY, None, search=False) or {}
++    path, expect = stored.get("path"), stored.get("expect")
++    if not path or not os.path.isfile(path):
++        cfg = config.load()
++        outputs = config.to_share(cfg, "/opt/a1111/outputs/img2img-images/")
++        path = latest_render(glob.glob((outputs or "") + "Deforum_*/*.mp4"))
++        if path is None:
++            log("nothing to reload: no render loaded yet and none under %s" % outputs)
++            return None
++        path = path.replace("\\", "/")
++        try:
++            _values, result = build(root, cfg)
++            expect = _expectation(result, cfg)
++        except Exception as exc:
++            log("reload: could not plan the loop from the current settings (%s)" % exc)
++            expect = None
++    _load_movie(root, path, expect)
++    log("reloaded render %s%s" % (os.path.basename(path),
++                                  " + input video" if (expect or {}).get("input") else " (no input video)"))
++    return path
++
++
++# --------------------------------------------------------------------------- snapshots
++
++def _preset_storage(root):
++    return dict((key, root.fetch(key, None, search=False))
++                for key in (PRESET_KEY, PAGE_PRESET_KEY, PROMPT_PRESET_KEY))
++
++
++def take_snapshot(root, cfg=None):
++    """Pipeline > Take Snapshot: every parameter + prompt_seq + preset state -> JSON on the share."""
++    cfg = cfg or config.load()
++    ui = _op(root, "ui")
++    if ui is None:
++        log("no deforum COMP to snapshot")
++        return None
++    pars = dict((n, getattr(ui.par, n)) for n in snapshots.par_names() if getattr(ui.par, n, None) is not None)
++    name = str(getattr(getattr(ui.par, "Snapshotname", None), "val", "") or "")
++    data = snapshots.build(pars, read_prompt_rows(ui), _preset_storage(root), name,
++                           getattr(sys.modules.get(__package__), "__version__", ""))
++    path = snapshots.write(snapshots.new_path(cfg, name), data)
++    par = getattr(ui.par, "Snapshotpath", None)
++    if par is not None:
++        _set_constant(par, path)
++    _set_par(ui, "Snapshotinfo", "saved %s (%d parameters)" % (os.path.basename(path), len(pars)))
++    log("snapshot saved: %s (%d parameters)" % (path, len(pars)))
++    return path
++
++
++def _restore_par(par, entry):
++    mode = str(entry.get("mode", "CONSTANT")).upper()
++    if mode == "EXPRESSION" and entry.get("expr"):
++        par.expr = entry["expr"]
++        par.mode = type(par.mode).EXPRESSION if hasattr(type(par.mode), "EXPRESSION") else par.mode
++        return
++    if mode == "BIND" and entry.get("bind"):
++        par.bindExpr = entry["bind"]
++        par.mode = type(par.mode).BIND if hasattr(type(par.mode), "BIND") else par.mode
++        return
++    value = entry.get("val")
++    menu = getattr(par, "menuNames", None)
++    if menu and value not in list(menu):
++        raise ValueError("%r is not a choice" % (value,))
++    _set_constant(par, value)
++
++
++def load_snapshot(root, cfg=None):
++    """Pipeline > Load Snapshot: put back what Take Snapshot saved in Snapshot File."""
++    cfg = cfg or config.load()
++    ui = _op(root, "ui")
++    field = getattr(ui.par, "Snapshotpath", None) if ui is not None else None
++    path = snapshots.resolve(cfg, field.eval() if field is not None else "")
++    if not path:
++        log("Snapshot File is empty: take a snapshot or pick one in %s" % snapshots.folder(cfg))
++        return False
++    try:
++        data = snapshots.read(path)
++    except Exception as exc:
++        log("snapshot %s could not be read: %s" % (path, exc))
++        _set_par(ui, "Snapshotinfo", "could not read %s" % os.path.basename(path))
++        return False
++    # Preset bookkeeping first, so the menus changing below match what is 'applied' (no re-apply).
++    for key, value in (data.get("presets") or {}).items():
++        if key in (PRESET_KEY, PAGE_PRESET_KEY, PROMPT_PRESET_KEY):
++            root.store(key, value)
++    done, kept, missing, bad = 0, [], [], []
++    for name, entry in sorted(data["pars"].items()):
++        par = getattr(ui.par, name, None)
++        if par is None:
++            missing.append(name)
++            continue
++        if snapshots.mode_name(par) == "EXPORT":
++            kept.append(name)
++            continue
++        try:
++            _restore_par(par, entry)
++            done += 1
++        except Exception as exc:
++            bad.append("%s (%s)" % (name, exc))
++    rows = data.get("prompt_seq") or []
++    table = _inner(ui, "prompt_seq")
++    if rows and table is not None:
++        table.clear()
++        for row in rows:
++            table.appendRow(row)
++    text = "loaded %s: %d parameters%s" % (os.path.basename(path), done,
++                                           ", prompt_seq %d rows" % max(0, len(rows) - 1) if rows else "")
++    _set_par(ui, "Snapshotinfo", text)
++    log("snapshot " + text + (" (taken %s)" % data.get("taken") if data.get("taken") else ""))
++    if kept:
++        log("  exported from a CHOP, left alone: %s" % ", ".join(kept))
++    if missing:
++        log("  not on this COMP (older/newer build): %s" % ", ".join(missing))
++    if bad:
++        log("  could not set: %s" % "; ".join(bad))
++    return True
++
++
+ # --------------------------------------------------------------------------- buttons
+ 
+ def latest_render(paths):
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index f0c8df8..4b61a17 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -186,7 +186,9 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
+     if comp:
+         for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
+-                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath"):
++                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath",
++                     "Loopinstart", "Loopinstride", "Loopinrate", "Snapshotname", "Snapshotpath",
++                     "Snapshotinfo"):
+             ui_pars.setdefault(name, "")
+     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
+     if comp:
+@@ -195,7 +197,7 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+         mod = ui.add(Op("in_mod", ui))
+         mod.channels = [Channel(n, v) for n, v in (chop or {}).items()]
+         ui.add(Op("schedule_preview", ui))
+-        for name in ("loop_head", "loop_tail"):
++        for name in ("loop_head", "loop_tail", "in_head", "in_tail"):
+             ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
+         root.timeline = Timeline()
+         top = root.add(Op("/", root))
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index d2599f5..a80c0c6 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -80,6 +80,9 @@ class Page(object):
+     def appendPulse(self, name, label=""):
+         return self._add(name, "Pulse", 0)
+ 
++    def appendFile(self, name, label=""):
++        return self._add(name, "File", "")
++
+     def destroy(self):
+         self.comp.customPages.remove(self)
+         for p in [p for p in self.comp.customPars]:
+@@ -168,7 +171,9 @@ BUILTINS = {
+     "moviefileinTOP": [("file", "Str", "", ()), ("index", "Float", 0, ()),
+                        ("playmode", "Menu", "locked", ("locked", "specify", "sequential")),
+                        ("indexunit", "Menu", "frames", ("indices", "frames", "seconds", "fraction")),
+-                       ("reloadpulse", "Pulse", 0, ())],
++                       ("reloadpulse", "Pulse", 0, ()),
++                       ("outputresolution", "Menu", "useinput", ("useinput", "half", "fit", "custom")),
++                       ("resolutionw", "Int", 0, ()), ("resolutionh", "Int", 0, ())],
+     "crossTOP": [("cross", "Float", 0, ())],
+     "selectTOP": [("top", "Str", "", ())],
+     "scriptCHOP": [("callbacks", "Str", "", ())],
+@@ -260,6 +265,27 @@ class BuilderTest(unittest.TestCase):
+         self.assertIsNotNone(comp.op("in_mod"))
+         self.assertFalse(any("NOTE loop_" in line for line in self.log))
+ 
++    def test_input_loop_is_output_three(self):
++        comp = self.build()
++        head, tail, cross = comp.op("in_head"), comp.op("in_tail"), comp.op("in_cross")
++        self.assertIs(comp.op("out_input").inputConnectors[0].source, cross)
++        self.assertIs(cross.inputConnectors[1].source, tail)
++        self.assertLess(comp.op("out_input").nodeY, comp.op("out_sweep").nodeY)
++        self.assertEqual(head.par.outputresolution.val, "custom")
++        self.assertIn("Width", head.par.resolutionw.expr)
++        self.assertIn("Loopinstride", tail.par.index.expr)
++        self.assertIn("Loopoutframes", tail.par.index.expr)
++        self.assertEqual(cross.par.cross.expr, comp.op("loop_cross").par.cross.expr)
++        # head index at loop frame 20, start 10, stride 2, 0.5 render frames per output frame
++        pars = dict(Loopoutframes=120, Loopoffset=0, Loopinstart=10, Loopinstride=2, Loopinrate=0.5)
++        ns = {"absTime": type("T", (), {"frame": 140})(),
++              "parent": lambda: type("C", (), {"par": type("P", (), dict(
++                  (k, type("V", (), {"eval": (lambda v: lambda self: v)(v)})()) for k, v in pars.items()))()})()}
++        self.assertEqual(eval(head.par.index.expr, ns), 10 + 2 * 10)
++        self.assertEqual(eval(tail.par.index.expr, ns), 10 + 2 * 70)
++        for name in ("Snapshottake", "Snapshotload", "Snapshotpath", "Reloadoutputs", "Loopinstride"):
++            self.assertTrue(hasattr(comp.par, name), name)
++
+     def test_feed_ops_per_unit(self):
+         comp = self.build()
+         for unit in (1, 2, 3):
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index 06fd561..3e0ad93 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -236,6 +236,43 @@ class TempoCompTest(ControllerTest.__bases__[0]):
+         self.assertEqual(ui.par.Loopoutframes.val, "120")      # 4 beats at 60 fps
+         self.assertEqual(ui.par.Loopoutoverlap.val, "30")      # 15 render frames x2
+         self.assertEqual(ui.par.Loopoutrate.val, "1")
++        # output 3: the init video, looped the same way (30 fps render on a 60 fps loop)
++        self.assertTrue(ui.op("in_head").par.file.val.endswith("comfy_videos/archive/a.mp4"))
++        self.assertEqual(ui.op("in_tail").par.file.val, ui.op("in_head").par.file.val)
++        self.assertEqual((ui.par.Loopinstart.val, ui.par.Loopinstride.val, ui.par.Loopinrate.val),
++                         ("0", "1", "0.5"))
++        # Reload Render + Input: the same files again, even after they were cleared
++        ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
++        self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
++        self.assertEqual(ui.op("loop_head").par.file.val, path)
++        self.assertTrue(ui.op("in_head").par.file.val.endswith("a.mp4"))
++
++    def test_snapshot_round_trip(self):
++        ui = self.make()
++        ui.par.Translationz.val = 3.5
++        ui.par.Zoomraw.val = "0:(1.01)"
++        ui.par.Snapshotname.val = "gold run!"
++        ui.par.Rotation3dy.mode, ui.par.Rotation3dy.expr = ParMode.EXPRESSION, "op('pattern1')['chan1']"
++        self.root.store(ctl.PRESET_KEY, {"applied": "none", "backup": {"Zoom": 1.0}})
++        path = ctl.on_ui_pulse(self.root, "Snapshottake")
++        self.assertTrue(path.startswith(self.share + "/snapshots/gold_run_"), path)
++        self.assertEqual(ui.par.Snapshotpath.val, path)
++        ui.par.Translationz.val, ui.par.Zoomraw.val = 0.0, ""
++        ui.par.Rotation3dy.mode = ParMode.CONSTANT
++        ui.op("prompt_seq").rows = [["beat", "prompt", "xfade"], ["0", "changed", ""]]
++        self.root.store(ctl.PRESET_KEY, {})
++        ui.par.Snapshotpath.val = os.path.basename(path)[:-5]          # a bare name works too
++        self.assertTrue(ctl.on_ui_pulse(self.root, "Snapshotload"))
++        self.assertEqual((ui.par.Translationz.val, ui.par.Zoomraw.val), (3.5, "0:(1.01)"))
++        self.assertEqual((ui.par.Rotation3dy.mode, ui.par.Rotation3dy.expr),
++                         (ParMode.EXPRESSION, "op('pattern1')['chan1']"))
++        self.assertEqual(ui.op("prompt_seq").rows[1], ["0", "gold", ""])
++        self.assertEqual(self.root.storage[ctl.PRESET_KEY]["backup"], {"Zoom": 1.0})
++        self.assertIn("loaded gold_run_", ui.par.Snapshotinfo.val)
++        with open(path) as fh:
++            saved = json.load(fh)
++        self.assertNotIn("Pipelinestatus", saved["pars"])           # status lines are not saved
++        self.assertNotIn("Snapshotpath", saved["pars"])
+ 
+     def test_missing_interpolation_falls_back_to_plain_render(self):
+         ui = self.make()
+-- 
+2.43.0
+

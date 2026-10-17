@@ -1,0 +1,329 @@
+From ceb242176a6ed03cadaa0d68b06368c015b6d9eb Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 03:09:25 +0000
+Subject: [PATCH] Sweep Depth: use the file VHS really wrote (fullpath), try
+ counter-less / other counter names on a 404 and adopt the real name
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ Makefile                          |  4 +--
+ scripts/build_master_ui.py        |  4 ++-
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/comfy.py         |  3 ++
+ scripts/tdeforum/config.py        |  5 ++++
+ scripts/tdeforum/sweep.py         | 48 +++++++++++++++++++++++++------
+ scripts/tdeforum/td_controller.py | 27 +++++++++++++++--
+ tests/test_builder.py             |  3 +-
+ tests/test_payload.py             | 10 +++++++
+ tests/test_sweep.py               | 36 ++++++++++++++++++-----
+ 10 files changed, 119 insertions(+), 23 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index d34b122..909f85c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -100,8 +100,8 @@ unload: ## Free VRAM (unload the checkpoint), container stays up
+ reload: ## Load the checkpoint back into VRAM
+ 	@curl -fsS -X POST $(API)/sdapi/v1/reload-checkpoint >/dev/null && echo "checkpoint reloaded"
+ 
+-test: ## Unit tests for scripts/tdeforum (no TouchDesigner needed)
+-	python3 -m unittest discover -s tests
++test: ## Unit tests for scripts/tdeforum (no TouchDesigner needed; log output only for failures)
++	python3 -m unittest discover -s tests -b
+ 
+ doctor: ## GPU, API and persistent-volume checks
+ 	@docker exec $(CONTAINER) nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader \
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 75cceb3..2cf514c 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -407,7 +407,9 @@ def run():
+     preview = comp.op(td_controller.SWEEP_PREVIEW)
+     if preview is not None and not str(preview.par.file.eval() or '').strip():
+         try:
+-            td_controller.show_latest_sweep(root)
++            found = td_controller.show_latest_sweep(root, quiet=True)
++            if found:
++                say('sweep_preview: %s' % found)
+         except Exception as exc:
+             say('sweep_preview not set: %s' % exc)
+ 
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index f11a204..bcd5b8c 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -26,7 +26,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.9.1"
++__version__ = "0.9.2"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/comfy.py b/scripts/tdeforum/comfy.py
+index a059749..659b0c9 100644
+--- a/scripts/tdeforum/comfy.py
++++ b/scripts/tdeforum/comfy.py
+@@ -80,6 +80,9 @@ def parse_history(history, prompt_id, output_node="21"):
+         for key in ("gifs", "videos", "images"):
+             for item in node_out.get(key) or []:
+                 name = str(item.get("filename", ""))
++                full = str(item.get("fullpath", "") or "").replace("\\", "/")
++                if full.lower().endswith(VIDEO_EXTS):
++                    name = full.rsplit("/", 1)[-1]     # the file VHS actually wrote
+                 if name.lower().endswith(VIDEO_EXTS):
+                     return "done", str(item.get("subfolder", "")), name, None
+ 
+diff --git a/scripts/tdeforum/config.py b/scripts/tdeforum/config.py
+index 2148178..966f104 100644
+--- a/scripts/tdeforum/config.py
++++ b/scripts/tdeforum/config.py
+@@ -81,6 +81,11 @@ def load(local_file=None):
+         "local_file": local_file or scripts_dir + "/tdeforum.local.json",
+     })
+ 
++    # Tests point the whole share somewhere else (no machine overrides, no real share).
++    test_share = os.environ.get("TDEFORUM_TEST_SHARE")
++    if test_share:
++        root = _norm(test_share).rstrip("/") + "/"
++        cfg.update(share_root=root, runtime_dir=root + "runtime", local_file=root + "no-local.json")
+     if os.path.isfile(cfg["local_file"]):
+         with open(cfg["local_file"], "r", encoding="utf-8") as fh:
+             overrides = json.load(fh)
+diff --git a/scripts/tdeforum/sweep.py b/scripts/tdeforum/sweep.py
+index 586abb2..abece6f 100644
+--- a/scripts/tdeforum/sweep.py
++++ b/scripts/tdeforum/sweep.py
+@@ -309,6 +309,43 @@ def download(url, path, timeout=60.0):
+     return written
+ 
+ 
++def _name_variants(url):
++    """The same ComfyUI output under the names VHS may really have used: without the _00001
++    counter, or with another counter (e.g. when an older run already took _00001)."""
++    from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
++    import re
++    parts = urlsplit(url)
++    query = dict((k, v[0]) for k, v in parse_qs(parts.query).items())
++    name = query.get("filename", "")
++    stem, ext = os.path.splitext(name)
++    base = re.sub(r"_\d{5}$", "", stem)
++    names = [base + ext] + ["%s_%05d%s" % (base, n, ext) for n in range(1, 10)]
++    out = []
++    for candidate in names:
++        if candidate != name:
++            q = dict(query, filename=candidate)
++            out.append(urlunsplit(parts._replace(query=urlencode(q))))
++    return out
++
++
++def _download_any(url, path, result):
++    """download(), and on a 404 the name variants. Returns (bytes, url used)."""
++    try:
++        return download(url, path), url
++    except Exception as exc:
++        if getattr(exc, "code", None) != 404:
++            raise
++    for alternative in _name_variants(url):
++        try:
++            return download(alternative, path), alternative
++        except Exception as exc:
++            if getattr(exc, "code", None) != 404:
++                raise
++    result["missing_depth"] = True                      # ComfyUI has no such output file
++    raise RuntimeError("ComfyUI has no depth video %s, with or without a _0000N counter (HTTP 404 from %s)"
++                       % (os.path.basename(path), url))
++
++
+ def _open_writer(cv2, path, fps, size):
+     for code in FOURCCS:
+         writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*code), float(fps), size, True)
+@@ -377,15 +414,10 @@ def run_job(job):
+         if not os.path.isfile(depth):
+             if not job.get("fetch_url"):
+                 raise RuntimeError("the depth video is not readable from TouchDesigner: %s" % depth)
+-            try:
+-                size = download(job["fetch_url"], depth)
+-            except Exception as exc:
+-                if getattr(exc, "code", None) == 404:      # ComfyUI has no such output file
+-                    result["missing_depth"] = True
+-                    raise RuntimeError("ComfyUI has no depth video %s (HTTP 404 from %s)"
+-                                       % (os.path.basename(depth), job["fetch_url"]))
+-                raise
++            size, used = _download_any(job["fetch_url"], depth, result)
+             result["fetched"] = size
++            if used != job["fetch_url"]:
++                result["fetched_as"] = used
+         depth_frames = video_frames(depth)
+         plan_info = dict(job["plan"])
+         values = job["values"]
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 329a164..c496d7b 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -392,7 +392,7 @@ def apply_prompt_preset(root):
+     return True
+ 
+ 
+-def show_latest_sweep(root, cfg=None):
++def show_latest_sweep(root, cfg=None, quiet=False):
+     """Point deforum/sweep_preview at the newest cn_sweep_*.mp4 (COMP output 2 shows it)."""
+     cfg = cfg or config.load()
+     folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
+@@ -400,10 +400,12 @@ def show_latest_sweep(root, cfg=None):
+     found = [f for f in found if ".tmp." not in f]
+     ui = _op(root, "ui")
+     if not found:
+-        log("no sweep video in %s yet" % folder)
++        if not quiet:
++            log("no sweep video in %s yet" % folder)
+         return None
+     _show_sweep(ui, found[-1])
+-    log("sweep_preview: %s" % found[-1])
++    if not quiet:
++        log("sweep_preview: %s" % found[-1])
+     return found[-1]
+ 
+ 
+@@ -722,6 +724,9 @@ def _after_sweep(root, cfg, st, meta, done):
+     info = "%s | %d frames in %.1fs" % (done.get("describe", ""), done.get("frames", 0), done.get("seconds", 0))
+     _set_par(ui, "Sweepinfo", info)
+     log("sweep: " + info + (" (downloaded the depth video first)" if done.get("fetched") else ""))
++    if done.get("fetched_as"):
++        log("sweep: ComfyUI had the depth video under another name: %s" % done["fetched_as"])
++        _rename_depth(root, ui, done["fetched_as"])
+     _show_sweep(ui, meta["out_share"])
+     for unit in meta.get("units") or []:
+         _set_cn_video(root, meta["out"], unit)
+@@ -755,6 +760,22 @@ def _alias_depth_cache(root, ui, frames):
+     root.store(CACHE_KEY, cache)
+ 
+ 
++def _rename_depth(root, ui, url):
++    """Use ComfyUI's real file name for the depth video everywhere (field and preprocess cache)."""
++    from urllib.parse import parse_qs, urlsplit
++    name = (parse_qs(urlsplit(url).query).get("filename") or [""])[0]
++    old = str(ui.par.Sweepdepthpath.eval() or "") if getattr(ui.par, "Sweepdepthpath", None) else ""
++    if not name or not old or old.endswith("/" + name):
++        return
++    new = old.rsplit("/", 1)[0] + "/" + name
++    _set_par(ui, "Sweepdepthpath", new)
++    cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
++    for key, value in list(cache.items()):
++        if value == old:
++            cache[key] = new
++    root.store(CACHE_KEY, cache)
++
++
+ def _remake_depth(root, cfg, st, done):
+     """The remembered depth video is gone from ComfyUI (deleted, or ComfyUI's output folder
+     changed): forget it everywhere and ask ComfyUI for it again, once."""
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index fcd4717..8933986 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -190,7 +190,8 @@ def run_builder(root, scripts_dir, out):
+     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
+                  "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP", "parameterexecuteDAT"):
+         env[kind] = kind
+-    with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
++    with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT), \
++            mock.patch.dict(os.environ, {"TDEFORUM_TEST_SHARE": os.path.dirname(scripts_dir)}):
+         with open(BUILDER, encoding="utf-8") as fh:
+             code = fh.read()
+         exec(compile(code, BUILDER, "exec"), env)
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index ac051fb..594ead3 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -414,3 +414,13 @@ class DepthNodeTest(unittest.TestCase):
+         aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
+         self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
+         self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)
++
++
++class HistoryNameTest(unittest.TestCase):
++    def test_the_file_vhs_wrote_wins_over_the_reported_name(self):
++        history = {"p": {"status": {"status_str": "success", "completed": True}, "outputs": {"21": {"gifs": [
++            {"filename": "a_00001.mp4", "subfolder": "preprocessed_vids",
++             "fullpath": "/opt/ComfyUI/output/preprocessed_vids/a.mp4"}]}}}}
++        self.assertEqual(comfy.parse_history(history, "p"), ("done", "preprocessed_vids", "a.mp4", None))
++        del history["p"]["outputs"]["21"]["gifs"][0]["fullpath"]
++        self.assertEqual(comfy.parse_history(history, "p")[2], "a_00001.mp4")
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index d4c1f47..01c6c22 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -418,31 +418,52 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+         self.assertIn("cn_sweep_", self.sent()["cn_1_vid_path"])
+ 
++    def test_a_depth_video_under_a_counterless_name_is_found_and_renamed(self):
++        import urllib.error
++        fixture = write_depth_video(os.path.join(self.share, "fixture", "d.mp4"), frames=75)
++        real = self.DEPTH.replace("_00001", "")
++
++        def comfy_view(url, path, timeout=60.0):
++            if "filename=" + real not in url:                 # only the name VHS really wrote exists
++                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
++            os.makedirs(os.path.dirname(path), exist_ok=True)
++            shutil.copyfile(fixture, path)
++            return os.path.getsize(path)
++        ui = self.make()
++        ctl.queue(self.root)
++        with mock.patch.object(sweep, "download", side_effect=comfy_view):
++            self.depth_done(on_share=False)
++            self.tick()
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        self.assertEqual(ui.par.Sweepdepthpath.val, "/opt/a1111/td_masks/preprocessed_vids/" + real)
++        self.assertIn("/opt/a1111/td_masks/preprocessed_vids/" + real,
++                      self.root.storage[ctl.CACHE_KEY].values())
++
+     def test_a_depth_video_comfyui_no_longer_has_is_made_again_once(self):
+         import urllib.error
+         fixture = write_depth_video(os.path.join(self.share, "fixture", "d.mp4"), frames=75)
+-        calls = []
++        jobs = {"n": 0}
+ 
+-        def flaky(url, path, timeout=60.0):
+-            calls.append(url)
+-            if len(calls) == 1:
++        def view(url, path, timeout=60.0):
++            if jobs["n"] < 2:                                 # gone under every name
+                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+             os.makedirs(os.path.dirname(path), exist_ok=True)
+             shutil.copyfile(fixture, path)
+             return os.path.getsize(path)
+         ui = self.make()
+         ctl.queue(self.root)
+-        with mock.patch.object(sweep, "download", side_effect=flaky):
++        with mock.patch.object(sweep, "download", side_effect=view):
++            jobs["n"] = 1
+             self.depth_done(on_share=False)
+             self.assertEqual(self.state(), ctl.SWEEP_RENDERING)
+-            self.tick()                                   # 404 -> forget it, new ComfyUI job
++            self.tick()                                   # 404 everywhere -> forget it, new ComfyUI job
+             self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
+             self.assertEqual(ui.par.Sweepdepthpath.val, "")
+             posts = [r for r in self.root.op("webclient_comfyui").requests if r[0] == "POST"]
+             self.assertEqual(len(posts), 2)
++            jobs["n"] = 2
+             self.depth_done(on_share=False)
+             self.tick()
+-        self.assertEqual(len(calls), 2)
+         self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+ 
+     def test_a_second_404_fails_with_the_url(self):
+@@ -460,6 +481,7 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.assertEqual(self.state(), ctl.IDLE)
+         status = ui.par.Pipelinestatus.val
+         self.assertIn("ComfyUI has no depth video", status)
++        self.assertIn("_0000N", status)
+         self.assertIn("/view?", status)
+ 
+     def test_second_queue_hits_both_caches(self):
+-- 
+2.43.0
+

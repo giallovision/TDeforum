@@ -1,0 +1,737 @@
+From 268a7763ac0ad036c3a960746be4f14747015368 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 23:10:05 +0000
+Subject: [PATCH] Baseline Iterate +1 / seed 424242; Example Preset drop-down
+ with 12 overlays
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  28 ++++-
+ ROADMAP.md                        |   1 +
+ scripts/tdeforum/__init__.py      |   3 +-
+ scripts/tdeforum/migrate.py       |  24 ++++
+ scripts/tdeforum/payload.py       |   2 +-
+ scripts/tdeforum/presets.py       | 156 ++++++++++++++++++++++++
+ scripts/tdeforum/schema.py        |  15 ++-
+ scripts/tdeforum/td_controller.py |  87 ++++++++++++++
+ tests/test_payload.py             |  14 ++-
+ tests/test_presets.py             | 190 ++++++++++++++++++++++++++++++
+ 10 files changed, 510 insertions(+), 10 deletions(-)
+ create mode 100644 scripts/tdeforum/presets.py
+ create mode 100644 tests/test_presets.py
+
+diff --git a/README.md b/README.md
+index 6a0b517..861b51c 100644
+--- a/README.md
++++ b/README.md
+@@ -68,7 +68,7 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
+ 
+ ### The `deforum` COMP
+ 
+-Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
++Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages (the first one has the *Example Preset* drop-down): **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
+ 
+ Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
+ 
+@@ -104,6 +104,31 @@ Notes:
+ * `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
+ * Units 1-3 have pages; units 4-5 stay available through the payload only.
+ 
++### Example presets
++
++*Tempo › Example Preset* (first page of the COMP) lays one of 12 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++
++* Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
++* A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
++* Motion (2D/3D camera) and the Mod Matrix slots a preset does not mention are set to the baseline, so each example starts from a neutral camera.
++* The values a preset replaced are remembered: pick another preset, or **None**, and press bake to get them back first. Your own tweaks after applying stay until the selection changes.
++* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts and ControlNet are never touched.
++
++| id | name | what it does |
++|---|---|---|
++| `3d_tunnel_roll` | 3D - Tunnel roll (good) | Steady forward push with a slow roll; high keep so it flows like a QR tunnel. |
++| `3d_slow_orbit` | 3D - Slow orbit (good) | Gentle pan around the scene with mirrored edges so nothing smears at the border. |
++| `3d_kick_push` | 3D - Kick push (good) | Slow drift forward plus a push on every beat (Mod slot 1) that also loosens Strength on the hit (slot 2), so the kick regenerates detail. |
++| `3d_warp_drive` | 3D - Warp drive (extreme) | Fast push, wide FOV and a surge every 4 beats. Expect stretching; cadence 2 keeps up. |
++| `3d_vortex` | 3D - Vortex (extreme) | Fast roll while pushing in and tilting; the picture spirals and re-forms. |
++| `3d_strobe_push` | 3D - Strobe push (extreme) | Hard pushes on every half beat, a contrast flash and a Strength dip on the beat. |
++| `2d_zoom_drift` | 2D - Zoom drift (good) | Slow zoom in with a hint of rotation; the classic smooth Deforum roll. |
++| `2d_scroll` | 2D - Scroll (good) | Sideways scroll with wrapped edges, so the picture tiles instead of smearing. |
++| `2d_spiral_crash` | 2D - Spiral crash (extreme) | Fast zoom and spin with low keep: the image keeps collapsing into new structure. |
++| `2d_twirl` | 2D - Twirl (extreme) | Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2). |
++| `video_soft_restyle` | Video Input - Soft restyle (good) | Keeps most of the init video's structure and colour; frames follow the video (needs Globals > Video Init Path). |
++| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video: heavy restyle, extra noise, no colour matching. |
++
+ ### Tempo
+ 
+ At 60 fps one beat is **40 frames at 90 bpm, 30 at 120, 24 at 150**. *Tempo* sets BPM, beats per bar and loop length in bars; the render length follows (plus an overlap for the seam). Two render strategies:
+@@ -173,6 +198,7 @@ scripts/
+     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
++    presets.py         # 12 example configurations (Example Preset drop-down)
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+     comfy.py           # ComfyUI request / history parsing
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 41c715b..a52c19a 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,6 +46,7 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+ - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+ - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
++- [x] Example Preset drop-down: 12 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
+ - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+ 
+ ### 🚧 In Progress
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 7f3dfdc..cbdb834 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -9,6 +9,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
+ * ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
+ * ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
++* ``presets``       example configurations for the deforum COMP (Example Preset drop-down)
+ * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
+ * ``migrate``       old Deforum_UI values -> the COMP's parameters
+ * ``payload``       builds the Deforum batch request + frame plan
+@@ -25,7 +26,7 @@ import sys
+ __version__ = "0.4.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/migrate.py b/scripts/tdeforum/migrate.py
+index df4b904..0b01ff4 100644
+--- a/scripts/tdeforum/migrate.py
++++ b/scripts/tdeforum/migrate.py
+@@ -32,6 +32,25 @@ def _const(value):
+     return {"mode": "CONSTANT", "expr": "", "bind": "", "val": value}
+ 
+ 
++# Baselines that changed: a saved value equal to the OLD default is not carried over, so the COMP
++# picks up the new baseline. Anything you set to something else is kept.
++BASELINE_BUMPS = {
++    "seed": ("-1", "424242"),
++    "loop_seeds": (True, False),
++}
++
++
++def _is_old_default(field, entry):
++    bump = BASELINE_BUMPS.get(field.api)
++    if bump is None or entry.get("mode", "CONSTANT") != "CONSTANT":
++        return False
++    value = entry.get("val")
++    if isinstance(bump[0], bool):
++        return str(value).strip().lower() in ("1", "1.0", "true", "on") if bump[0] else \
++            str(value).strip().lower() in ("0", "0.0", "false", "off", "")
++    return str(value).strip() == bump[0]
++
++
+ def plan(saved, from_old_ui):
+     """Actions that move ``saved`` onto the new COMP's parameters."""
+     actions = []
+@@ -42,6 +61,11 @@ def plan(saved, from_old_ui):
+         entry = saved[name]
+         mode = entry.get("mode", "CONSTANT")
+ 
++        if _is_old_default(field, entry):
++            bump = BASELINE_BUMPS[field.api]
++            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[0], bump[1])))
++            continue
++
+         if field.kind == schema.MOD and from_old_ui:
+             # Old schedules were string pars; the new base is a float + a raw override.
+             if mode == "EXPRESSION" and entry.get("expr"):
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 390bf3b..1772484 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -356,7 +356,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+ 
+ 
+ def _loop_seeds(values, settings, tp, warnings):
+-    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", True))):
++    if not (tp["seamless"] and _as_bool(values.get("loop_seeds", False))):
+         return
+     behavior = settings.get("seed_behavior", "iter")
+     if behavior == "iter":
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+new file mode 100644
+index 0000000..9589191
+--- /dev/null
++++ b/scripts/tdeforum/presets.py
+@@ -0,0 +1,156 @@
++"""Example configurations for the ``deforum`` COMP (the "Example Preset" drop-down, Tempo page).
++
++A preset is a plain ``{api name: value}`` dict that is laid over the COMP's current values when
++*bake* is pressed. It never edits the baselines in schema.py. td_controller.apply_preset() does
++the TouchDesigner side:
++
++* only constant parameters are changed (anything you have bound, exported or given an
++  expression keeps its driver and is listed in the log);
++* the values it replaces are remembered, so choosing another preset or **None** and pressing
++  bake puts your previous values back first;
++* motion parameters and Mod Matrix slots a preset does not mention are set to the baseline
++  (RESET_KEYS), so an example always starts from a neutral camera, not from the last one;
++* a MOD parameter's ``Raw`` override is cleared while the preset is on (a raw schedule would
++  beat the preset's base value).
++
++Never touched: seed and seed behaviour (the baseline is Iterate +1, seed 424242), sampler,
++steps, CFG, size, model, prompts, ControlNet. Tune those for your checkpoint once.
++
++Units, at the 60 fps default: translation is Deforum units per frame (``translate_xyz`` =
++-translation / 200, positive Z = forward), rotation is degrees per frame, 2D zoom is a factor per
++frame (1.003 = +20 % per second), Strength is how much of the previous frame is kept.
++"""
++
++NONE = "none"
++
++GOOD, EXTREME = "good", "extreme"
++
++
++class Preset(object):
++    __slots__ = ("id", "label", "mode", "level", "notes", "values")
++
++    def __init__(self, id, label, mode, level, notes, values):
++        self.id, self.label, self.mode, self.level, self.notes = id, label, mode, level, notes
++        self.values = values
++
++    def __repr__(self):
++        return "Preset(%s)" % self.id
++
++
++# Motion that every example resets to the baseline unless it sets it. The Mod Matrix slots are
++# switched off the same way (their ``modN_active`` toggles).
++RESET_KEYS = [
++    "zoom", "angle", "transform_center_x", "transform_center_y",
++    "translation_x", "translation_y", "translation_z",
++    "rotation_3d_x", "rotation_3d_y", "rotation_3d_z",
++] + ["mod%d_active" % n for n in range(1, 9)]
++
++
++def _slot(n, target, shape, beats, depth, sharpness=4.0, phase=0.0):
++    p = "mod%d_" % n
++    return {p + "active": True, p + "target": target, p + "shape": shape, p + "beats": beats,
++            p + "depth": depth, p + "sharpness": sharpness, p + "phase": phase}
++
++
++def _merge(*parts):
++    out = {}
++    for part in parts:
++        out.update(part)
++    return out
++
++
++# Shared by the "good" examples: carry most of the previous frame, almost no fresh noise, the
++# depth warp helps the camera move. Extremes override what they push.
++_SMOOTH = {
++    "strength_schedule": 0.78, "noise_schedule": 0.02, "noise_multiplier_schedule": 1.0,
++    "contrast_schedule": 1.0, "diffusion_cadence": 4, "optical_flow_cadence": "RAFT",
++    "color_coherence": "LAB", "loop_overlap_beats": 2.0,
++}
++_3D = {"animation_mode": "3D", "use_depth_warping": True, "fov_schedule": 70.0, "midas_weight": 0.3,
++       "padding_mode": "border"}
++_2D = {"animation_mode": "2D", "border": "replicate"}
++_VIDEO = {"animation_mode": "Video Input", "seamless_loop": False, "diffusion_cadence": 1,
++          "optical_flow_cadence": "None", "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0}
++
++PRESETS = [
++    # ------------------------------------------------------------------ 3D
++    Preset("3d_tunnel_roll", "3D - Tunnel roll (good)", "3D", GOOD,
++           "Steady forward push with a slow roll; high keep so it flows like a QR tunnel.",
++           _merge(_SMOOTH, _3D, {"translation_z": 0.6, "rotation_3d_z": 0.04})),
++    Preset("3d_slow_orbit", "3D - Slow orbit (good)", "3D", GOOD,
++           "Gentle pan around the scene with mirrored edges so nothing smears at the border.",
++           _merge(_SMOOTH, _3D, {"rotation_3d_y": 0.12, "translation_x": 0.15, "translation_z": 0.2,
++                                 "fov_schedule": 60.0, "padding_mode": "reflection"})),
++    Preset("3d_kick_push", "3D - Kick push (good)", "3D", GOOD,
++           "Slow drift forward plus a push on every beat (Mod slot 1) that also loosens Strength "
++           "on the hit (slot 2), so the kick regenerates detail.",
++           _merge(_SMOOTH, _3D, {"translation_z": 0.25, "strength_schedule": 0.8},
++                  _slot(1, "translation_z", "decay", 1.0, 1.2, 5.0),
++                  _slot(2, "strength_schedule", "decay", 1.0, -0.15, 5.0))),
++    Preset("3d_warp_drive", "3D - Warp drive (extreme)", "3D", EXTREME,
++           "Fast push, wide FOV and a surge every 4 beats. Expect stretching; cadence 2 keeps up.",
++           _merge(_SMOOTH, _3D, {"translation_z": 3.0, "rotation_3d_z": 0.15, "fov_schedule": 95.0,
++                                 "midas_weight": 0.5, "strength_schedule": 0.6, "noise_schedule": 0.04,
++                                 "diffusion_cadence": 2, "contrast_schedule": 1.04},
++                  _slot(1, "translation_z", "sine", 4.0, 1.5))),
++    Preset("3d_vortex", "3D - Vortex (extreme)", "3D", EXTREME,
++           "Fast roll while pushing in and tilting; the picture spirals and re-forms.",
++           _merge(_SMOOTH, _3D, {"rotation_3d_z": 0.9, "rotation_3d_x": 0.2, "translation_z": 1.2,
++                                 "fov_schedule": 80.0, "strength_schedule": 0.55, "noise_schedule": 0.06,
++                                 "diffusion_cadence": 2, "padding_mode": "reflection"})),
++    Preset("3d_strobe_push", "3D - Strobe push (extreme)", "3D", EXTREME,
++           "Hard pushes on every half beat, a contrast flash and a Strength dip on the beat.",
++           _merge(_SMOOTH, _3D, {"strength_schedule": 0.7, "noise_schedule": 0.05, "diffusion_cadence": 2},
++                  _slot(1, "translation_z", "square", 0.5, 2.0, 8.0),
++                  _slot(2, "contrast_schedule", "decay", 0.5, 0.08, 6.0),
++                  _slot(3, "strength_schedule", "decay", 1.0, -0.3, 5.0))),
++    # ------------------------------------------------------------------ 2D
++    Preset("2d_zoom_drift", "2D - Zoom drift (good)", "2D", GOOD,
++           "Slow zoom in with a hint of rotation; the classic smooth Deforum roll.",
++           _merge(_SMOOTH, _2D, {"zoom": 1.003, "angle": 0.1})),
++    Preset("2d_scroll", "2D - Scroll (good)", "2D", GOOD,
++           "Sideways scroll with wrapped edges, so the picture tiles instead of smearing.",
++           _merge(_SMOOTH, _2D, {"translation_x": 1.2, "strength_schedule": 0.8, "border": "wrap"})),
++    Preset("2d_spiral_crash", "2D - Spiral crash (extreme)", "2D", EXTREME,
++           "Fast zoom and spin with low keep: the image keeps collapsing into new structure.",
++           _merge(_SMOOTH, _2D, {"zoom": 1.02, "angle": 1.2, "strength_schedule": 0.5,
++                                 "noise_schedule": 0.08, "diffusion_cadence": 2, "contrast_schedule": 1.02})),
++    Preset("2d_twirl", "2D - Twirl (extreme)", "2D", EXTREME,
++           "Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2).",
++           _merge(_SMOOTH, _2D, {"zoom": 1.008, "strength_schedule": 0.6, "noise_schedule": 0.05,
++                                 "diffusion_cadence": 2, "border": "wrap"},
++                  _slot(1, "angle", "sine", 4.0, 2.5),
++                  _slot(2, "zoom", "decay", 1.0, 0.02, 5.0))),
++    # ------------------------------------------------------------------ Video Input
++    Preset("video_soft_restyle", "Video Input - Soft restyle (good)", "Video Input", GOOD,
++           "Keeps most of the init video's structure and colour; frames follow the video (needs "
++           "Globals > Video Init Path).",
++           _merge(_VIDEO, {"strength_schedule": 0.55, "noise_schedule": 0.0, "color_coherence": "Video Input"})),
++    Preset("video_melt", "Video Input - Melt (extreme)", "Video Input", EXTREME,
++           "Loose hold on the video: heavy restyle, extra noise, no colour matching.",
++           _merge(_VIDEO, {"strength_schedule": 0.3, "noise_schedule": 0.1, "noise_multiplier_schedule": 1.1,
++                           "color_coherence": "None"})),
++]
++
++BY_ID = dict((p.id, p) for p in PRESETS)
++NAMES = [NONE] + [p.id for p in PRESETS]
++LABELS = ["None"] + [p.label for p in PRESETS]
++
++
++def get(name):
++    """The Preset for a menu value; None for "none" / unknown names."""
++    return BY_ID.get(str(name or "").strip())
++
++
++def resolve(preset, defaults):
++    """{api: value} to apply: the preset's values over the baseline for every RESET key.
++
++    ``defaults`` maps api name -> baseline value (schema defaults). Only RESET_KEYS fall back
++    to the baseline; everything else is touched only when the preset names it.
++    """
++    out = {}
++    for key in RESET_KEYS:
++        if key in defaults:
++            out[key] = defaults[key]
++    out.update(preset.values)
++    return out
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index c5698cd..1e58430 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -20,14 +20,15 @@ TD parameter names are derived from the API name exactly as the original
+ build_master_ui.py did (``translation_z`` -> ``Translationz``), so values and
+ expressions from the old Deforum_UI migrate by name.
+ 
+-Defaults ("baselines"): motion is neutral (no camera movement); every other
+-value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
++Defaults ("baselines"): motion is neutral (no camera movement); seed behaviour is Iterate
++(+1) with seed 424242; every other value is Deforum 5d63a339's own default unless noted.
++presets.py holds example configurations laid over these on bake (the baselines never change). An LCM checkpoint wants
+ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ """
+ 
+ import re
+ 
+-from . import feed, modulation, tempo
++from . import feed, modulation, presets, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -231,6 +232,9 @@ def _cn_unit_fields(n):
+ 
+ FIELDS = [
+     # --- Tempo -----------------------------------------------------------------
++    F("preset", presets.NONE, TE, MENU, menu=presets.NAMES, labels=presets.LABELS,
++      label="Example Preset (applied on bake)", target=None),
++    F("preset_info", "", TE, STATUS, label="Preset", target=None),
+     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
+     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
+     F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
+@@ -244,7 +248,8 @@ FIELDS = [
+     F("diffusion_cadence", 4, TE, INT, norm=(1, 8), label="Diffusion Cadence (diffuse every Nth frame)"),
+     F("seamless_loop", True, TE, TOGGLE, label="Seamless Loop", target=None),
+     F("loop_overlap_beats", 1.0, TE, FLOAT, norm=(0, 4), label="Loop Overlap (beats, crossfaded)", target=None),
+-    F("loop_seeds", True, TE, TOGGLE, label="Loop Seeds (repeat seeds each loop)", target=None),
++    F("loop_seeds", False, TE, TOGGLE, label="Loop Seeds (schedule seeds to repeat per loop; off = Iterate +1)",
++      target=None),
+     F("length_source", "tempo", TE, MENU, menu=["tempo", "manual"],
+       labels=["Tempo (loop length)", "Manual (Max Frames)"], target=None),
+     F("max_frames", 240, TE, INT, norm=(1, 1000), label="Max Frames (manual)"),
+@@ -262,7 +267,7 @@ FIELDS = [
+     F("seed_behavior", "iter", G, MENU,
+       menu=["iter", "fixed", "random", "ladder", "alternate", "schedule"],
+       labels=["Iterate (+1)", "Fixed", "Random", "Ladder", "Alternate", "Schedule"]),
+-    F("seed", "-1", G, SEED),
++    F("seed", "424242", G, SEED),
+     # Deforum ignores "n_prompt"; the API reads animation_prompts_negative.
+     F("n_prompt", "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark",
+       G, STR, label="Negative Prompt", key="animation_prompts_negative"),
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index f566e4a..f505a02 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -29,6 +29,7 @@ from . import comfy
+ from . import config
+ from . import feed
+ from . import payload
++from . import presets
+ from . import schema
+ from . import tempo
+ 
+@@ -48,6 +49,7 @@ BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAIT
+         CAPTURING, WAITING_FEED)
+ LOST_CONTACT_S = 120.0
+ FEED_FINALIZE_TIMEOUT_S = 60.0
++PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+ CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+ 
+ # Operators this controller talks to, relative to root.
+@@ -151,6 +153,88 @@ def _set_constant(par, value):
+ 
+ # --------------------------------------------------------------------------- reading TD
+ 
++def _coerce_par(field, value):
++    if field.kind == schema.INT:
++        return int(round(float(value)))
++    if field.kind == schema.FLOAT:
++        return float(value)
++    if field.kind == schema.TOGGLE:
++        return 1 if value else 0
++    return value
++
++
++def _apply_preset_safely(root):
++    try:
++        apply_preset(root)
++    except Exception as exc:
++        traceback.print_exc()
++        log("preset could not be applied: %s" % exc)
++
++
++def apply_preset(root):
++    """Lay the selected Example Preset over the deforum COMP (see presets.py). True if it changed anything.
++
++    Does nothing while the selection equals what was last applied, so your tweaks after applying
++    stay. Picking another preset or None first puts back the values the last preset replaced.
++    Only constant parameters are touched; driven ones (expression / bind / export) keep their driver.
++    """
++    ui = _op(root, "ui")
++    menu = getattr(ui.par, "Preset", None) if ui is not None else None
++    if menu is None:
++        return False
++    selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
++    stored = root.fetch(PRESET_KEY, None, search=False)
++    stored = dict(stored) if isinstance(stored, dict) else {}
++    if selected == stored.get("applied", presets.NONE):
++        return False
++
++    restored = 0
++    for name, value in (stored.get("backup") or {}).items():
++        par = getattr(ui.par, name, None)
++        if par is not None and _is_constant(par):
++            par.val = value
++            restored += 1
++
++    preset, backup, changed, kept = presets.get(selected), {}, 0, []
++    if preset is not None:
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for api, value in presets.resolve(preset, defaults).items():
++            field = schema.BY_API.get(api)
++            if field is None:
++                log("preset %s: unknown parameter %r skipped" % (preset.id, api))
++                continue
++            targets = [(field.td_name, _coerce_par(field, value))]
++            if field.kind == schema.MOD:
++                targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
++            for name, new in targets:
++                par = getattr(ui.par, name, None)
++                if par is None:
++                    continue
++                if not _is_constant(par):
++                    kept.append(name)
++                    continue
++                if field.menu and name == field.td_name and new not in field.menu:
++                    log("preset %s: %r is not a choice for %s, skipped" % (preset.id, new, name))
++                    continue
++                if par.val != new:
++                    backup[name] = par.val
++                    par.val = new
++                    changed += 1
++    root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
++    if preset is None:
++        text = "None (restored %d parameters)" % restored
++    else:
++        text = "%s: %d parameters set%s" % (preset.label, changed,
++                                             ", %d driven kept" % len(kept) if kept else "")
++    _set_par(ui, "Presetinfo", text)
++    log("preset %s" % text)
++    if preset is not None:
++        log("  " + preset.notes)
++    if kept:
++        log("  driven (expression / bind / export) and left alone: %s" % ", ".join(sorted(kept)))
++    return True
++
++
+ def read_ui(ui):
+     values = {}
+     for field in schema.FIELDS:
+@@ -276,6 +360,8 @@ def queue(root):
+     """Queue button: preprocess (optional) then render."""
+     cfg = config.load()
+     resync(root, cfg)
++    _apply_preset_safely(root)
++    apply_preset(root)
+     st = _state(root)
+     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
+         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
+@@ -1096,6 +1182,7 @@ def preview(root):
+     """
+     cfg = config.load()
+     resync(root, cfg)
++    _apply_preset_safely(root)
+     values, result = build(root, cfg)
+     for warning in result["warnings"]:
+         log("warning: " + warning)
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index 07b4027..fe2807c 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -258,9 +258,19 @@ class TempoPayloadTest(unittest.TestCase):
+         s = r["request"]["deforum_settings"]
+         # 120 bpm, 2 bars at 60 fps + 1 beat overlap
+         self.assertEqual((s["fps"], s["max_frames"], s["diffusion_cadence"]), (60, 270, 4))
+-        self.assertEqual(s["seed_schedule"], "0:(s + t%240)")
++        self.assertEqual(s["seed_behavior"], "iter")                # baseline: Iterate (+1)
++        self.assertNotIn("seed_schedule", s)
+         self.assertEqual(s["prompts"], {"0": "json prompt"})        # no rows -> prompt.json
+ 
++    def test_loop_seeds_is_opt_in(self):
++        s = self.build(loop_seeds=True)["request"]["deforum_settings"]
++        self.assertEqual((s["seed_behavior"], s["seed_schedule"]), ("schedule", "0:(s + t%240)"))
++
++    def test_baseline_seed_and_behaviour(self):
++        self.assertEqual(schema.BY_API["seed"].default, "424242")
++        self.assertEqual(schema.BY_API["seed_behavior"].default, "iter")
++        self.assertIs(schema.BY_API["loop_seeds"].default, False)
++
+     def test_slots_and_chop_compile_to_what_deforum_evaluates(self):
+         r = self.build(chop={"Translationz": [0.0, 2.0]},
+                        mod1_active=True, mod1_target="translation_z", mod1_shape="sine",
+@@ -309,7 +319,7 @@ class TempoPayloadTest(unittest.TestCase):
+         self.assertTrue(any("does not divide" in w for w in r["warnings"]))
+ 
+     def test_non_looping_seed_behaviour_warns(self):
+-        r = self.build(seed_behavior="random")
++        r = self.build(seed_behavior="random", loop_seeds=True)
+         s = r["request"]["deforum_settings"]
+         self.assertEqual(s["seed_behavior"], "random")
+         self.assertNotIn("seed_schedule", s)
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+new file mode 100644
+index 0000000..ccf93e7
+--- /dev/null
++++ b/tests/test_presets.py
+@@ -0,0 +1,190 @@
++import json
++import unittest
++
++from _fakes import ParMode, make_network, ROOT_DIR  # noqa: F401  (puts scripts/ on sys.path)
++import test_controller
++from test_payload import KNOWN_KEYS, MODELS, _comp_values
++from tdeforum import migrate, payload, presets, schema
++from tdeforum import td_controller as ctl
++
++
++class PresetDataTest(unittest.TestCase):
++    def test_twelve_examples_good_and_extreme_per_mode(self):
++        self.assertEqual(len(presets.PRESETS), 12)
++        for mode in ("3D", "2D", "Video Input"):
++            levels = [p.level for p in presets.PRESETS if p.mode == mode]
++            self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
++            self.assertGreaterEqual(levels.count(presets.EXTREME), 1, mode)
++            self.assertGreaterEqual(len(levels), 2, mode)
++
++    def test_menu_has_none_first_and_unique_ids(self):
++        self.assertEqual(presets.NAMES[0], "none")
++        self.assertEqual(len(set(presets.NAMES)), len(presets.NAMES))
++        field = schema.BY_API["preset"]
++        self.assertEqual((field.menu, field.default, field.page), (presets.NAMES, "none", schema.PAGE_ORDER[0]))
++        self.assertEqual(schema.FIELDS[0].api, "preset")           # first thing on the first page
++        self.assertEqual(presets.LABELS[0], "None")
++
++    def test_every_key_exists_and_values_fit_the_field(self):
++        for preset in presets.PRESETS:
++            for api, value in preset.values.items():
++                field = schema.BY_API.get(api)
++                self.assertIsNotNone(field, "%s: %s" % (preset.id, api))
++                if field.menu:
++                    self.assertIn(value, field.menu, "%s: %s" % (preset.id, api))
++                if field.kind in (schema.FLOAT, schema.INT, schema.MOD):
++                    self.assertIsInstance(value, (int, float), "%s: %s" % (preset.id, api))
++                if field.safe:
++                    lo, hi = field.safe
++                    self.assertTrue((lo is None or value >= lo) and (hi is None or value <= hi),
++                                    "%s: %s=%s outside %s" % (preset.id, api, value, field.safe))
++                if field.kind == schema.TOGGLE:
++                    self.assertIsInstance(value, bool)
++
++    def test_presets_leave_the_seed_and_checkpoint_setup_alone(self):
++        protected = {"seed", "seed_behavior", "loop_seeds", "sampler", "scheduler", "steps", "W", "H",
++                     "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
++        for preset in presets.PRESETS:
++            self.assertFalse(protected & set(preset.values), preset.id)
++            self.assertFalse([k for k in preset.values if k.startswith("cn_")], preset.id)
++
++    def test_reset_keys_are_motion_or_slot_toggles(self):
++        for key in presets.RESET_KEYS:
++            field = schema.BY_API[key]
++            self.assertTrue(field.page in (schema.PAGE_MOTION2D, schema.PAGE_MOTION3D)
++                            or key.endswith("_active"), key)
++
++    def test_each_preset_builds_a_valid_request(self):
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for preset in presets.PRESETS:
++            values = _comp_values(**presets.resolve(preset, defaults))
++            result = payload.build_request(values, {"0": "x"}, MODELS)
++            s = result["request"]["deforum_settings"]
++            self.assertEqual(s["animation_mode"], preset.mode, preset.id)
++            self.assertEqual(sorted(k for k in s if k not in KNOWN_KEYS), [], preset.id)
++            self.assertEqual((s["seed"], s["seed_behavior"]), (424242, "iter"), preset.id)
++            json.dumps(result["request"])
++            if preset.level == presets.GOOD:
++                bad = [w for w in result["warnings"]
++                       if "-only" in w or "outside" in w or "does not divide" in w]
++                self.assertEqual(bad, [], "%s: %s" % (preset.id, result["warnings"]))
++
++    def test_beat_presets_use_mod_slots(self):
++        for preset_id in ("3d_kick_push", "3d_strobe_push", "2d_twirl", "3d_warp_drive"):
++            self.assertTrue(presets.BY_ID[preset_id].values.get("mod1_active"), preset_id)
++        self.assertFalse(presets.BY_ID["3d_tunnel_roll"].values.get("mod1_active", False))
++
++
++class BaselineTest(unittest.TestCase):
++    def test_iterate_and_424242(self):
++        self.assertEqual(schema.BY_API["seed"].default, "424242")
++        self.assertEqual(schema.BY_API["seed_behavior"].default, "iter")
++        self.assertIs(schema.BY_API["loop_seeds"].default, False)
++
++    def test_old_defaults_move_to_the_new_baseline_but_custom_values_stay(self):
++        const = lambda val: {"mode": "CONSTANT", "expr": "", "bind": "", "val": val}
++        actions = migrate.plan({"Seed": const("-1"), "Loopseeds": const(1)}, False)
++        self.assertEqual([a[0] for a in actions if a[0] == "set"], [])
++        self.assertEqual(len([a for a in actions if a[0] == "note"]), 2)
++        kept = migrate.plan({"Seed": const("99"), "Loopseeds": const(0)}, False)
++        self.assertEqual(sorted(a[1] for a in kept if a[0] == "set"), ["Loopseeds", "Seed"])
++        driven = migrate.plan({"Seed": {"mode": "EXPRESSION", "expr": "absTime.frame", "bind": "", "val": "-1"}},
++                              False)
++        self.assertEqual([a[1] for a in driven if a[0] == "set"], ["Seed"])
++
++
++class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
++    setUp = test_controller.ControllerTest.setUp
++
++    def make(self, **overrides):
++        values = dict((f.api, f.default) for f in schema.FIELDS)
++        values.update(overrides)
++        self.root = make_network(values, comp=True, prompt_rows=[("0", "gold", "")])
++        self.ui = self.root.op("deforum")
++        return self.ui
++
++    def pick(self, name):
++        self.ui.par.Preset.val = name
++
++    def test_nothing_happens_on_none(self):
++        ui = self.make()
++        self.assertFalse(ctl.apply_preset(self.root))
++        self.assertEqual(ui.par.Translationz.val, 0.0)
++
++    def test_apply_on_bake_then_restore_with_none(self):
++        ui = self.make(translation_z=0.5, **{"translation_z:raw": "0:(1)"})
++        ui.par.Translationzraw.val = "0:(1)"
++        ui.par.Zoom.val = 1.01
++        self.pick("3d_tunnel_roll")
++        ctl.preview(self.root)                                    # bake
++        self.assertEqual(ui.par.Animationmode.val, "3D")
++        self.assertEqual((ui.par.Translationz.val, ui.par.Translationzraw.val), (0.6, ""))
++        self.assertEqual(ui.par.Zoom.val, 1.0, "motion not named by the preset goes back to baseline")
++        self.assertEqual(ui.par.Strengthschedule.val, 0.78)
++        self.assertEqual(ui.par.Seed.val, "424242")
++        self.assertIn("3D - Tunnel roll", ui.par.Presetinfo.val)
++
++        self.pick("none")
++        ctl.preview(self.root)
++        self.assertEqual((ui.par.Translationz.val, ui.par.Translationzraw.val), (0.5, "0:(1)"))
++        self.assertEqual(ui.par.Zoom.val, 1.01)
++        self.assertEqual(ui.par.Strengthschedule.val, schema.BY_API["strength_schedule"].default)
++        self.assertEqual(ui.par.Animationmode.val, "3D")
++        self.assertIn("None", ui.par.Presetinfo.val)
++
++    def test_switching_presets_restores_first_and_never_stacks(self):
++        ui = self.make()
++        self.pick("3d_kick_push")
++        ctl.apply_preset(self.root)
++        self.assertTrue(ui.par.Mod1active.val and ui.par.Mod2active.val)
++        self.assertEqual((ui.par.Mod1target.val, ui.par.Mod1shape.val), ("translation_z", "decay"))
++        self.pick("2d_zoom_drift")
++        ctl.apply_preset(self.root)
++        self.assertEqual(ui.par.Animationmode.val, "2D")
++        self.assertFalse(ui.par.Mod1active.val or ui.par.Mod2active.val)
++        self.assertEqual((ui.par.Translationz.val, ui.par.Zoom.val), (0.0, 1.003))
++        self.pick("none")
++        ctl.apply_preset(self.root)
++        self.assertEqual(ui.par.Animationmode.val, "3D")
++        self.assertEqual(ui.par.Zoom.val, 1.0)
++
++    def test_tweaks_after_applying_survive_until_the_selection_changes(self):
++        ui = self.make()
++        self.pick("3d_tunnel_roll")
++        ctl.apply_preset(self.root)
++        ui.par.Translationz.val = 2.0
++        self.assertFalse(ctl.apply_preset(self.root))
++        ctl.preview(self.root)
++        self.assertEqual(ui.par.Translationz.val, 2.0)
++
++    def test_driven_parameters_are_left_alone(self):
++        ui = self.make()
++        ui.par.Translationz.mode, ui.par.Translationz.expr = ParMode.EXPRESSION, "op('lfo')[0]"
++        ui.par.Translationz.val = 0.25
++        self.pick("3d_tunnel_roll")
++        ctl.apply_preset(self.root)
++        self.assertEqual((ui.par.Translationz.mode, ui.par.Translationz.val), (ParMode.EXPRESSION, 0.25))
++        self.assertEqual(ui.par.Rotation3dz.val, 0.04)
++        self.pick("none")
++        ctl.apply_preset(self.root)
++        self.assertEqual((ui.par.Translationz.mode, ui.par.Translationz.expr), (ParMode.EXPRESSION, "op('lfo')[0]"))
++
++    def test_every_preset_applies_and_then_queues(self):
++        ui = self.make()
++        for preset in presets.PRESETS:
++            self.pick(preset.id)
++            self.assertTrue(ctl.apply_preset(self.root), preset.id)
++            values = ctl.read_ui(ui)
++            self.assertEqual(values["animation_mode"], preset.mode, preset.id)
++            for api, value in preset.values.items():
++                field = schema.BY_API[api]
++                self.assertEqual(values[api], ctl._coerce_par(field, value), "%s %s" % (preset.id, api))
++            result = payload.build_request(values, {"0": "x"}, MODELS)
++            self.assertEqual(result["request"]["deforum_settings"]["animation_mode"], preset.mode)
++        self.pick("none")
++        ctl.apply_preset(self.root)
++        self.assertEqual(ctl.read_ui(ui)["translation_z"], 0.0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

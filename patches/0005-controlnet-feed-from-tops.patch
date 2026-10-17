@@ -1,0 +1,1591 @@
+From 3d8308334f1284584066a993678f8ce4d09a7c8a Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 21:57:24 +0000
+Subject: [PATCH] Add ControlNet guide feeds recorded from TOPs (Units 1-3)
+
+Records final_out (or any TOP) to a Deforum-readable video/still synced to the project
+timeline, with frame planning, state machine, builder ops, tests and docs.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  22 +-
+ ROADMAP.md                        |   4 +-
+ scripts/build_master_ui.py        |  11 +
+ scripts/feed_capture_exec.py      |  21 ++
+ scripts/setup_network.py          |  22 ++
+ scripts/tdeforum/__init__.py      |   5 +-
+ scripts/tdeforum/config.py        |   4 +
+ scripts/tdeforum/feed.py          | 161 ++++++++++++
+ scripts/tdeforum/payload.py       |  65 +++--
+ scripts/tdeforum/schema.py        |  75 +++---
+ scripts/tdeforum/td_controller.py | 401 +++++++++++++++++++++++++++++-
+ tests/_fakes.py                   |  55 +++-
+ tests/test_builder.py             |  19 +-
+ tests/test_controller.py          | 213 ++++++++++++++++
+ tests/test_feed.py                |  89 +++++++
+ 15 files changed, 1106 insertions(+), 61 deletions(-)
+ create mode 100644 scripts/feed_capture_exec.py
+ create mode 100644 scripts/tdeforum/feed.py
+ create mode 100644 tests/test_feed.py
+
+diff --git a/README.md b/README.md
+index 7661c47..6d680fc 100644
+--- a/README.md
++++ b/README.md
+@@ -68,7 +68,7 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
+ 
+ ### The `deforum` COMP
+ 
+-Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · Pipeline**.
++Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages: **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
+ 
+ Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
+ 
+@@ -85,6 +85,25 @@ On top of the base, three modulation sources, all tempo-locked:
+ 
+ Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
+ 
++### ControlNet from a TOP (`final_out`)
++
++Deforum can only read a *file* for ControlNet, so TouchDesigner records the TOP into one. On each *ControlNet Unit* page set **Guide Source**:
++
++* **Existing file**: the unit's *Vid Path* as before.
++* **TOP: record the loop**: Queue records *Source TOP* (for example `/project1/final_out`) into `T:/td_masks/feeds/cnN_feed.mp4` and points the unit's Vid Path at it.
++* **TOP: one still frame**: saves the current frame as a PNG; Deforum uses it for every frame.
++
++How a loop feed is made: Deforum frame k is guided by video frame k, so the recording has exactly *max_frames* frames. Queue pauses the timeline, steps it to the planned frame for each render frame (wrapping around the loop for the overlap), and records one video frame per step. At 60 fps + cadence that is every timeline frame; with RIFE/FILM it is every 2nd/3rd/4th. *Pipeline › Feed Loop Start* is the timeline frame the loop begins on (0 = the timeline start). *Pipeline › Feed Method* chooses Add Frame (exact) or "record every cooked frame" (fallback).
++
++Notes:
++
++* `final_out` must be driven by the **project timeline** (`me.time.frame`, Timeline CHOP, ...), not `absTime` or real-time clocks, or the recording will not match the loop.
++* Feedback networks (Feedback TOP, Cache) depend on stepping through every frame; they are not reproducible by jumping, so keep the guide source feed-forward.
++* Preview (**bake**) logs the plan ("feed 1: 270 frames, timeline 1..240 ...") without recording.
++* ComfyUI preprocessing is skipped for TOP feeds; use ControlNet's own module (`depth_midas`, `canny`, ...) or leave it at `none` for ready-made masks or QR images.
++* `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
++* Units 1-3 have pages; units 4-5 stay available through the payload only.
++
+ ### Tempo
+ 
+ At 60 fps one beat is **40 frames at 90 bpm, 30 at 120, 24 at 150**. *Tempo* sets BPM, beats per bar and loop length in bars; the render length follows (plus an overlap for the seam). Two render strategies:
+@@ -153,6 +172,7 @@ scripts/
+     tempo.py           # bpm / bars / fps -> render plan (cadence or interpolation)
+     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
++    feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+     comfy.py           # ComfyUI request / history parsing
+diff --git a/ROADMAP.md b/ROADMAP.md
+index ba26efb..41c715b 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,6 +46,7 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+ - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+ - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
++- [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+ 
+ ### 🚧 In Progress
+ - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
+@@ -53,7 +54,8 @@ This document outlines the macro-architecture for our generative visual performa
+ - [ ] Workflow Drafting: Build the base video-to-video + OpenPose JSON workflow in ComfyUI.
+ 
+ ### 🔮 Future Implementations
+-- [ ] Expand TouchDesigner UI to support dynamically toggling ControlNet Units 2-5 (payload already reads CN fields generically from `schema.py`; add `cn_2_*` fields there).
++- [ ] ControlNet Units 4-5 pages (payload already supports them).
++- [ ] Verify the TOP feed recording in TouchDesigner; ComfyUI preprocessing of TOP feeds.
+ - [ ] OSC Architecture: send the tempo/loop state and Mod Matrix values to Resolume's OSC routing addresses.
+ - [ ] Beat clock CHOP inside the `deforum` COMP (beat / bar phase at the COMP's BPM) for driving live TD visuals in sync with the renders.
+ - [ ] Parseq-style per-parameter keyframe editor (Animation COMP → Mod CHOP) for hand-drawn curves.
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index ff70231..2712ad4 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -15,6 +15,8 @@
+ #   in_mod            In CHOP    COMP input 1: the Mod CHOP (channels named after parameters)
+ #   schedule_preview  table DAT  filled by the bake button / td_controller.preview()
+ #   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
++#   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
++#                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
+ 
+ import json
+ import os
+@@ -214,6 +216,15 @@ def build_inner(comp, values):
+             _set_menu(unit, 'indices', 'index', 'frames')
+         _expr(player, 'index', 'int(%s * %s)%s' % (_P, _RATE, offset))
+ 
++    for unit in range(1, schema.CN_UI_UNITS + 1):
++        y = -300 - 150 * unit
++        sel = _get(comp, selectTOP, td_controller.FEED_SELECT % unit, 0, y)
++        rec = _get(comp, moviefileoutTOP, td_controller.FEED_OUT % unit, 250, y)
++        rec.inputConnectors[0].connect(sel)
++        kind = getattr(rec.par, 'type', None)
++        if kind is not None:
++            _set_menu(kind, 'movie')
++
+     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
+     cross.inputConnectors[0].connect(head)
+     cross.inputConnectors[1].connect(tail)
+diff --git a/scripts/feed_capture_exec.py b/scripts/feed_capture_exec.py
+new file mode 100644
+index 0000000..8a1f5d2
+--- /dev/null
++++ b/scripts/feed_capture_exec.py
+@@ -0,0 +1,21 @@
++# Execute DAT `feed_capture_exec` (Frame End on; created and file-synced by setup_network).
++# While a ControlNet feed is being recorded (Queue with Guide Source = "TOP: record the
++# loop") this steps the project timeline one planned frame at a time and pulses the
++# Movie File Out TOPs inside the deforum COMP. Idle = one cheap storage lookup per frame.
++# All logic lives in scripts/tdeforum/td_controller.py (capture_tick).
++
++
++def _ctl():
++    import os
++    import sys
++    path = me.par.file.eval()
++    scripts = os.path.dirname(path) if path else 'T:/scripts'
++    if scripts not in sys.path:
++        sys.path.insert(0, scripts)
++    from tdeforum import td_controller
++    return td_controller
++
++
++def onFrameEnd(frame):
++    _ctl().capture_tick(me.parent())
++    return
+diff --git a/scripts/setup_network.py b/scripts/setup_network.py
+index ee82b30..646c322 100644
+--- a/scripts/setup_network.py
++++ b/scripts/setup_network.py
+@@ -126,6 +126,28 @@ def main():
+         set_par(loader, 'file', SCRIPTS + '/loadvideo_exec.py')
+         set_par(loader, 'syncfile', True)
+ 
++    # 7b. Frame-End stepper that records ControlNet feeds from TOPs.
++    stepper = ROOT.op('feed_capture_exec')
++    if stepper is None:
++        stepper = ROOT.create(executeDAT, 'feed_capture_exec')
++        stepper.nodeX, stepper.nodeY = (loader.nodeX if loader is not None else 0), \
++            (loader.nodeY - 150 if loader is not None else -300)
++        say('created feed_capture_exec')
++    set_par(stepper, 'file', SCRIPTS + '/feed_capture_exec.py')
++    set_par(stepper, 'syncfile', True)
++    set_par(stepper, 'framestart', False)
++    set_par(stepper, 'frameend', True)
++    set_par(stepper, 'active', True)
++
++    # 7c. The builder DAT reads its script from the share like the others, so a patched
++    #     build_master_ui.py is what runs (a DAT holding stale text rebuilt the old UI once).
++    builder = ROOT.op('builder_master_ui')
++    if builder is None:
++        builder = ROOT.create(textDAT, 'builder_master_ui')
++        say('created builder_master_ui')
++    set_par(builder, 'file', SCRIPTS + '/build_master_ui.py')
++    set_par(builder, 'syncfile', True)
++
+     # 8. Report (no changes): creative-chain wiring worth a look.
+     comp = ROOT.op('deforum')
+     wave = ROOT.op('wave_generator')
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 45900b1..7f3dfdc 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -8,6 +8,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``tempo``         bpm / bars / fps -> render plan (cadence or RIFE/FILM interpolation)
+ * ``modulation``    beat-locked LFO shapes -> Deforum expressions or baked keyframes
+ * ``prompt_seq``    beat-indexed prompts -> held keys + weighted AND crossfades
++* ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
+ * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
+ * ``migrate``       old Deforum_UI values -> the COMP's parameters
+ * ``payload``       builds the Deforum batch request + frame plan
+@@ -21,10 +22,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.3.0"
++__version__ = "0.4.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/config.py b/scripts/tdeforum/config.py
+index 6f0d60d..a019a26 100644
+--- a/scripts/tdeforum/config.py
++++ b/scripts/tdeforum/config.py
+@@ -35,6 +35,10 @@ DEFAULTS = {
+     },
+     "comfy_output_node": "21",
+     "comfy_client_id": "tdeforum",
++    # Where TouchDesigner writes ControlNet guide feeds (container path; must be under
++    # path_map so both sides see it) and their container format (.mov for ProRes/Animation).
++    "cn_feed_dir": "/opt/a1111/td_masks/feeds",
++    "cn_feed_ext": ".mp4",
+     # Model used when an index in Sdmodelcheckpoint is missing from available_models.
+     "default_checkpoint": "angraRealflexLCMV6_v10.safetensors",
+     # Pipeline timing.
+diff --git a/scripts/tdeforum/feed.py b/scripts/tdeforum/feed.py
+new file mode 100644
+index 0000000..32c74fa
+--- /dev/null
++++ b/scripts/tdeforum/feed.py
+@@ -0,0 +1,161 @@
++"""ControlNet guide feeds taken from TouchDesigner TOPs.
++
++Deforum cannot read a TOP. It reads a *file*: ``cn_N_vid_path`` is either one
++still image (.png/.jpg/.bmp, used for every frame) or a video (mov/mp4/avi/webm/
++mpg...). For a video, Deforum unpacks frames ``0 .. max_frames-1`` to JPEG and
++frame k of the video guides Deforum frame k (at 5d63a339, deforum_controlnet.py,
++``process_controlnet_input_frames`` / ``read_cn_data``). Consequences:
++
++* the video's own frame rate is irrelevant; its *frame count* must be at least
++  ``max_frames`` or the tail of the render gets no guidance;
++* with a low render rate (RIFE/FILM mode) frame k is one render step, so the
++  feed has to be sampled at the render rate, not recorded at 60 fps;
++* image sequences are rejected (the path must end in a video extension).
++
++So the TouchDesigner side records exactly ``max_frames`` frames: frame k shows
++the source TOP at loop time k / render_fps, wrapping around the loop for the
++seamless-loop overlap. This module is the pure planning part (no TouchDesigner
++objects); td_controller.py drives the recording.
++"""
++
++import posixpath
++
++from . import config
++from . import tempo
++
++FILE, TOP_LOOP, TOP_STILL = "file", "top_loop", "top_still"
++MODES = [FILE, TOP_LOOP, TOP_STILL]
++MODE_LABELS = ["Existing file (Vid Path)", "TOP: record the loop", "TOP: one still frame"]
++ADD_FRAME, CONTINUOUS = "addframe", "continuous"
++METHODS = [ADD_FRAME, CONTINUOUS]
++METHOD_LABELS = ["Add Frame, one pulse per planned frame (exact)",
++                 "Record every cooked frame (fallback if Add Frame does nothing)"]
++UNITS = 3                      # ControlNet units that have a page on the COMP
++STILL_EXT = ".png"
++_EPS = 1e-6
++
++
++def _truthy(value):
++    if isinstance(value, str):
++        return value.strip().lower() in ("1", "true", "yes", "on")
++    return bool(value)
++
++
++class Request(object):
++    """One ControlNet unit whose guide comes from a TOP."""
++    __slots__ = ("unit", "mode", "top")
++
++    def __init__(self, unit, mode, top):
++        self.unit, self.mode, self.top = unit, mode, top
++
++    def __repr__(self):
++        return "Request(unit=%d, mode=%s, top=%r)" % (self.unit, self.mode, self.top)
++
++
++def mode_of(values, unit):
++    mode = str(values.get("feed_%d_mode" % unit, FILE) or FILE).strip()
++    return mode if mode in MODES else FILE
++
++
++def requests(values, units=UNITS):
++    """Enabled units whose guide must be captured from a TOP before rendering."""
++    out = []
++    for unit in range(1, units + 1):
++        mode = mode_of(values, unit)
++        if mode != FILE and _truthy(values.get("cn_%d_enabled" % unit, False)):
++            out.append(Request(unit, mode, str(values.get("feed_%d_top" % unit, "") or "").strip()))
++    return out
++
++
++def method_of(values):
++    method = str(values.get("feed_method", ADD_FRAME) or ADD_FRAME).strip()
++    return method if method in METHODS else ADD_FRAME
++
++
++def extension(cfg, mode):
++    return STILL_EXT if mode == TOP_STILL else str(cfg.get("cn_feed_ext", ".mp4"))
++
++
++def container_path(cfg, unit, mode):
++    """Where the Deforum container will read the feed (the cn_N_vid_path value)."""
++    return "%s/cn%d_feed%s" % (str(cfg["cn_feed_dir"]).rstrip("/"), unit, extension(cfg, mode))
++
++
++def share_path(cfg, unit, mode):
++    """Where TouchDesigner writes the feed (None if cn_feed_dir is not on the share)."""
++    return config.to_share(cfg, container_path(cfg, unit, mode))
++
++
++def project_frames_per_loop(tp, project_rate):
++    """Timeline frames in one loop at the project's own frame rate (float)."""
++    return tp["loop_beats"] * tempo.frames_per_beat(tp["bpm"], project_rate)
++
++
++def frame_plan(tp, total, project_rate, loop_start):
++    """Timeline frame to show for every render frame.
++
++    tp            tempo.plan() dict, or None when the length is manual
++    total         number of render frames Deforum will render (max_frames)
++    project_rate  the timeline's frame rate (usually 60)
++    loop_start    timeline frame where the loop starts (usually 1)
++
++    Returns {"frames": [timeline frame per render frame], "step": project frames
++    per render frame, "loop": project frames per loop or None, "warnings": [...]}.
++    With a tempo plan the frames wrap around the loop, so the overlap tail shows
++    the start of the loop again (the same periodicity the prompt and modulation
++    schedules have). Raises ValueError when the render rate cannot be sampled
++    from the timeline.
++    """
++    total = max(1, int(total))
++    project_rate = float(project_rate)
++    render_fps = float(tp["render_fps"]) if tp else project_rate
++    step = project_rate / render_fps
++    if step < 1.0 - _EPS:
++        raise ValueError("the timeline runs at %g fps, below the %g fps render rate, so it cannot be sampled"
++                         % (project_rate, render_fps))
++    if abs(step - round(step)) > _EPS:
++        raise ValueError("timeline rate %g fps is not a whole multiple of the %g fps render rate"
++                         % (project_rate, render_fps))
++    step = int(round(step))
++    warnings = []
++
++    loop = None
++    if tp:
++        exact = project_frames_per_loop(tp, project_rate)
++        loop = max(1, int(round(exact)))
++        if abs(exact - round(exact)) > _EPS:
++            warnings.append("one loop is %.3f timeline frames at %g fps; the feed loop will drift"
++                            % (exact, project_rate))
++    frames = []
++    for k in range(total):
++        offset = k * step
++        if loop:
++            offset %= loop
++        frames.append(int(loop_start) + offset)
++    return {"frames": frames, "step": step, "loop": loop, "warnings": warnings}
++
++
++def describe(plan):
++    frames = plan["frames"]
++    text = "%d frames, timeline %d..%d" % (len(frames), min(frames), max(frames))
++    if plan["step"] > 1:
++        text += " every %d" % plan["step"]
++    if plan["loop"] and len(frames) * plan["step"] > plan["loop"]:
++        text += ", wrapping at %d" % plan["loop"]
++    return text
++
++
++def verify(expected, actual):
++    """(ok, message) for a recorded file's frame count."""
++    if actual is None:
++        return True, "frame count not checked (cv2 or the file is unavailable)"
++    if actual < expected:
++        return False, "recorded %d frames, expected %d" % (actual, expected)
++    if actual > expected:
++        return True, "recorded %d frames, expected %d; the extra frames are ignored by Deforum" % (actual, expected)
++    return True, "%d frames" % actual
++
++
++def is_video(path):
++    return posixpath.splitext(str(path).replace("\\", "/"))[1].lower() in (
++        ".mov", ".mpeg", ".mp4", ".m4v", ".avi", ".mpg", ".webm")
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 7f5e17f..390bf3b 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -22,6 +22,7 @@ from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
+ 
+ import math
+ 
++from . import feed
+ from . import modulation
+ from . import prompt_seq
+ from . import schedules
+@@ -296,23 +297,27 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             and "padding_mode" not in values:
+         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
+ 
+-    # --- ControlNet: unit 1 from the UI (empty strings are meaningful here), 2-5 off --
+-    for field in schema.cn_fields(1):
+-        raw = values.get(field.api, field.default)
+-        try:
+-            settings[field.key] = coerce(field, raw)
+-        except (TypeError, ValueError):
+-            settings[field.key] = coerce(field, field.default)
+-            warnings.append("%s: could not read %r, used %r" % (field.td_name, raw, field.default))
+-    # Deforum parses every unit's schedules even when the unit is off, so units 2-5
+-    # get unit 1's defaults with the unit number swapped; only `enabled` is False.
+-    for unit in range(2, CN_UNITS + 1):
++    # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
++    # Deforum parses every unit's schedules even when the unit is off, so a unit the
++    # UI does not have (or an old UI without it) gets unit 1's defaults with the unit
++    # number swapped; only `enabled` is False. Empty strings are meaningful here.
++    for unit in range(1, CN_UNITS + 1):
+         for field in schema.cn_fields(1):
+-            if field.api == "cn_1_enabled":
+-                continue
++            api = field.api.replace("cn_1_", "cn_%d_" % unit, 1)
+             key = field.key.replace("cn_1_", "cn_%d_" % unit, 1)
+-            settings[key] = coerce(field, field.default)
+-        settings["cn_%d_enabled" % unit] = False
++            known = unit == 1 or api in values
++            if field.api == "cn_1_enabled" and not known:
++                settings[key] = False
++                continue
++            raw = values.get(api, field.default) if known else field.default
++            try:
++                settings[key] = coerce(field, raw)
++            except (TypeError, ValueError):
++                settings[key] = coerce(field, field.default)
++                warnings.append("%s: could not read %r, used %r" % (field.td_name.replace("Cn1", "Cn%d" % unit),
++                                                                  raw, field.default))
++        if _as_bool(settings.get("cn_%d_enabled" % unit, False)):
++            _check_cn_guide(values, unit, settings, total, frame_counter, warnings)
+ 
+     # --- prompts ------------------------------------------------------------------------
+     sequence = None
+@@ -399,6 +404,32 @@ def _count(counter, path, label, warnings):
+     return frames
+ 
+ 
++def _check_cn_guide(values, unit, settings, total, frame_counter, warnings):
++    """Warn when an enabled unit's guide video is shorter than the render.
++
++    Deforum reads video frame k for render frame k; past the end of the video the
++    unit gets no image. TOP feeds are verified when they are recorded, so only
++    plain files are checked here.
++    """
++    if feed.mode_of(values, unit) != feed.FILE or frame_counter is None:
++        return
++    path = _text(settings.get("cn_%d_vid_path" % unit, ""))
++    if not feed.is_video(path):
++        return
++    try:
++        frames = frame_counter(path)
++    except Exception as exc:
++        warnings.append("ControlNet %d guide %s: frame count failed (%s)" % (unit, path, exc))
++        return
++    if frames is None:
++        warnings.append("ControlNet %d guide %s is not readable from TouchDesigner; length not checked"
++                        % (unit, path))
++    elif frames < total:
++        warnings.append("ControlNet %d guide has %d frames but the render needs %d; the last %d frames "
++                        "get no guidance (record a longer feed or use Guide Source: TOP)"
++                        % (unit, frames, total, total - frames))
++
++
+ def summary(result):
+     s = result["request"]["deforum_settings"]
+     plan = result["plan"]
+@@ -417,5 +448,7 @@ def summary(result):
+                     if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
+     if moving:
+         parts.append("mod: " + ", ".join(moving))
+-    parts.append("CN1 %s" % ("on: " + str(s.get("cn_1_model")) if s.get("cn_1_enabled") else "off"))
++    active = ["CN%d %s" % (u, s.get("cn_%d_model" % u)) for u in range(1, CN_UNITS + 1)
++              if s.get("cn_%d_enabled" % u)]
++    parts.append(", ".join(active) if active else "CN off")
+     return " | ".join(parts)
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 75f0137..c5698cd 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -25,7 +25,9 @@ value is Deforum 5d63a339's own default unless noted. An LCM checkpoint wants
+ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ """
+ 
+-from . import modulation, tempo
++import re
++
++from . import feed, modulation, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -37,12 +39,14 @@ PAGE_DIFFUSION = "Diffusion"
+ PAGE_NOISE = "Noise & Color"
+ PAGE_FLOW = "Flow & Anti-blur"
+ PAGE_MODS = "Mod Matrix"
+-PAGE_CN1 = "ControlNet Unit 1"
++CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
++PAGE_CNS = ["ControlNet Unit %d" % n for n in range(1, CN_UI_UNITS + 1)]
++PAGE_CN1 = PAGE_CNS[0]
+ PAGE_PIPELINE = "Pipeline"
+ 
+ PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
+               PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
+-              PAGE_CN1, PAGE_PIPELINE]
++              ] + PAGE_CNS + [PAGE_PIPELINE]
+ 
+ # Kinds understood by build_master_ui.py and payload.py
+ STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
+@@ -75,9 +79,7 @@ def _default_label(api_name):
+     if api_name == "H":
+         return "Height"
+     label = api_name.replace("_schedule", "").replace("_", " ").title()
+-    if label.startswith("Cn 1 "):
+-        label = label[len("Cn 1 "):]
+-    return label
++    return re.sub(r"^Cn \d ", "", label)
+ 
+ 
+ class Field(object):
+@@ -196,6 +198,37 @@ def _slot_fields(n):
+     ]
+ 
+ 
++def _cn_unit_fields(n):
++    """ControlNet unit n: the Deforum cn_n_* keys, plus the TD-only feed_n_* guide source."""
++    p, page = "cn_%d_" % n, PAGE_CNS[n - 1]
++    f = "feed_%d_" % n
++    return [
++        F(p + "enabled", False, page, TOGGLE),
++        F(f + "mode", feed.FILE, page, MENU, menu=feed.MODES, labels=feed.MODE_LABELS,
++          label="Guide Source", target=None),
++        F(f + "top", "", page, STR, label="Source TOP (path, e.g. /project1/final_out)", target=None),
++        F(f + "info", "", page, STATUS, label="Last Feed", target=None),
++        F(p + "module", "none", page, STR),
++        F(p + "model", "ctrl_v1p_qr_monster_v2", page, STR),
++        F(p + "vid_path", "/opt/a1111/td_masks/mask_01.mov", page, STR),
++        F(p + "mask_vid_path", "", page, STR),
++        F(p + "weight", 1.0, page, FLOAT, norm=(0, 2), as_schedule=True),
++        F(p + "guidance_start", 0.0, page, FLOAT, norm=(0, 1), as_schedule=True),
++        F(p + "guidance_end", 1.0, page, FLOAT, norm=(0, 1), as_schedule=True),
++        F(p + "processor_res", 512, page, INT, norm=(64, 2048)),
++        F(p + "threshold_a", 0.5, page, FLOAT, norm=(0, 255)),
++        F(p + "threshold_b", 0.5, page, FLOAT, norm=(0, 255)),
++        F(p + "resize_mode", "Inner Fit (Scale to Fit)", page, MENU,
++          menu=["Inner Fit (Scale to Fit)", "Outer Fit (Shrink to Fit)", "Just Resize"]),
++        F(p + "control_mode", "Balanced", page, MENU,
++          menu=["Balanced", "My prompt is more important", "ControlNet is more important"]),
++        F(p + "low_vram", False, page, TOGGLE),
++        F(p + "pixel_perfect", True, page, TOGGLE),
++        F(p + "overwrite_frames", True, page, TOGGLE),
++        F(p + "loopback_mode", False, page, TOGGLE),
++    ]
++
++
+ FIELDS = [
+     # --- Tempo -----------------------------------------------------------------
+     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
+@@ -298,29 +331,9 @@ FIELDS = [
+       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
+     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
+     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
+-] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
+-
+-    # --- ControlNet Unit 1 ---------------------------------------------------------
+-    F("cn_1_enabled", False, CN, TOGGLE),
+-    F("cn_1_module", "none", CN, STR),
+-    F("cn_1_model", "ctrl_v1p_qr_monster_v2", CN, STR),
+-    F("cn_1_vid_path", "/opt/a1111/td_masks/mask_01.mov", CN, STR),
+-    F("cn_1_mask_vid_path", "", CN, STR),
+-    F("cn_1_weight", 1.0, CN, FLOAT, norm=(0, 2), as_schedule=True),
+-    F("cn_1_guidance_start", 0.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
+-    F("cn_1_guidance_end", 1.0, CN, FLOAT, norm=(0, 1), as_schedule=True),
+-    F("cn_1_processor_res", 512, CN, INT, norm=(64, 2048)),
+-    F("cn_1_threshold_a", 0.5, CN, FLOAT, norm=(0, 255)),
+-    F("cn_1_threshold_b", 0.5, CN, FLOAT, norm=(0, 255)),
+-    F("cn_1_resize_mode", "Inner Fit (Scale to Fit)", CN, MENU,
+-      menu=["Inner Fit (Scale to Fit)", "Outer Fit (Shrink to Fit)", "Just Resize"]),
+-    F("cn_1_control_mode", "Balanced", CN, MENU,
+-      menu=["Balanced", "My prompt is more important", "ControlNet is more important"]),
+-    F("cn_1_low_vram", False, CN, TOGGLE),
+-    F("cn_1_pixel_perfect", True, CN, TOGGLE),
+-    F("cn_1_overwrite_frames", True, CN, TOGGLE),
+-    F("cn_1_loopback_mode", False, CN, TOGGLE),
+-    # ComfyUI preprocessing of the init video into the CN1 guide video.
++] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] \
++  + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
++    # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------
+     F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),
+     F("comfy_preprocessor", "PiDiNetPreprocessor", CN, MENU, menu=COMFY_PREPROCESSORS, target=None),
+ 
+@@ -332,6 +345,10 @@ FIELDS = [
+     F("loop_out_overlap", "0", PL, STATUS, label="Loaded loop overlap (frames)", target=None),
+     F("loop_out_rate", "1", PL, STATUS, label="Loaded file frames per output frame", target=None),
+     F("loop_offset", 0, PL, INT, norm=(0, 480), label="Loop Player Offset (frames)", target=None),
++    F("feed_loop_start", 0, PL, INT, norm=(0, 1000),
++      label="Feed: loop start frame (0 = timeline start)", target=None),
++    F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
++      label="Feed: recording method", target=None),
+ ]
+ 
+ BY_API = dict((f.api, f) for f in FIELDS)
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index acfccee..50806e3 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -9,6 +9,7 @@ Entry points (each called from a thin DAT in scripts/):
+     load_latest(root)       LoadVideo button        loadvideo_exec.py
+     export_payload(root)    dry run, no POST        export_deforum_payload.py
+     preprocess_only(root)   ComfyUI only            comfy_preprocessor_payload_exec.py
++    capture_tick(root)      every frame             feed_capture_exec.py  (records TOP guide feeds)
+     cancel / status / doctor                        textport helpers
+ 
+ ``root`` is the COMP holding the network (/project1). Pipeline state lives in
+@@ -26,6 +27,7 @@ import traceback
+ 
+ from . import comfy
+ from . import config
++from . import feed
+ from . import payload
+ from . import schema
+ from . import tempo
+@@ -40,8 +42,12 @@ COMFY_RUNNING = "comfy_running"
+ DEFORUM_SUBMITTED = "deforum_submitted"
+ DEFORUM_RUNNING = "deforum_running"
+ WAITING_FILE = "waiting_for_file"
+-BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE)
++CAPTURING = "capturing"            # stepping the timeline and recording TOP guide feeds
++WAITING_FEED = "waiting_for_feed"  # recorded; waiting for the movie files to be finalised
++BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE,
++        CAPTURING, WAITING_FEED)
+ LOST_CONTACT_S = 120.0
++FEED_FINALIZE_TIMEOUT_S = 60.0
+ 
+ # Operators this controller talks to, relative to root.
+ NAMES = {
+@@ -54,6 +60,7 @@ NAMES = {
+     "models": "available_models",
+     "movie": "moviefilein1",
+     "folder": "folder_monitor",
++    "feed_exec": "feed_capture_exec",   # Execute DAT, Frame End -> capture_tick()
+ }
+ # Inside the Deforum COMP
+ INNER = {
+@@ -63,6 +70,8 @@ INNER = {
+     "head": "loop_head",              # loop player: Movie File In at the playhead
+     "tail": "loop_tail",              # loop player: Movie File In one loop later
+ }
++FEED_SELECT = "feed%d_sel"            # Select TOP per ControlNet unit (set to the source TOP)
++FEED_OUT = "feed%d_out"               # Movie File Out TOP per unit (records the guide movie)
+ 
+ RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
+ INTERP_FALLBACK_S = 30.0
+@@ -269,20 +278,31 @@ def queue(root):
+     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
+         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
+         return
++    if st.get("state") == CAPTURING:
++        _abort_capture(root, st)          # stale capture: put the timeline back first
+     try:
+         values, result = build(root, cfg)
+         for warning in result["warnings"]:
+             log("warning: " + warning)
+-        if _wants_preprocess(values):
+-            if _start_preprocess(root, cfg, values, result, st, then_render=True):
+-                return
+-            values, result = build(root, cfg)  # cache hit changed Cn1vidpath
+-        _submit_deforum(root, cfg, result, st)
++        if feed.requests(values):
++            if _start_feed(root, cfg, values, result, st):
++                return                    # resumes in _after_feed() once the movies are ready
++            values, result = build(root, cfg)   # stills changed the Vid Path pars
++        _render_stage(root, cfg, st, values, result)
+     except Exception as exc:
+         traceback.print_exc()
+         _fail(root, st, "queue failed: %s" % exc)
+ 
+ 
++def _render_stage(root, cfg, st, values, result):
++    """ComfyUI preprocess (optional), then the Deforum batch."""
++    if _wants_preprocess(values):
++        if _start_preprocess(root, cfg, values, result, st, then_render=True):
++            return
++        values, result = build(root, cfg)  # cache hit changed Cn1vidpath
++    _submit_deforum(root, cfg, result, st)
++
++
+ def preprocess_only(root):
+     cfg = config.load()
+     st = _state(root)
+@@ -311,6 +331,8 @@ def cancel(root):
+     elif st.get("state") in (COMFY_SUBMITTED, COMFY_RUNNING):
+         _op(root, "comfy").request(config.comfy_url(cfg, "/interrupt"), "POST",
+                                    header=JSON_HEADERS, data="{}")
++    elif st.get("state") in (CAPTURING, WAITING_FEED):
++        _abort_capture(root, st)
+     _finish(root, st, "cancelled (was %s)" % st.get("state", IDLE))
+ 
+ 
+@@ -326,6 +348,10 @@ def _wants_preprocess(values):
+     if not payload._as_bool(values.get("cn_1_enabled", False)):
+         log("ComfyUI preprocess is on but ControlNet unit 1 is off; skipping preprocess")
+         return False
++    if feed.mode_of(values, 1) != feed.FILE:
++        log("ComfyUI preprocess reads video_init_path, not a TOP feed; skipping it for unit 1 "
++            "(use ControlNet's own module, e.g. depth_midas, on the feed instead)")
++        return False
+     return True
+ 
+ 
+@@ -369,12 +395,310 @@ def _submit_deforum(root, cfg, result, st):
+     log("render submitted: " + payload.summary(result))
+ 
+ 
+-def _set_cn_video(root, container_path):
+-    par = getattr(_op(root, "ui").par, "Cn1vidpath", None)
++def _set_cn_video(root, container_path, unit=1):
++    par = getattr(_op(root, "ui").par, "Cn%dvidpath" % unit, None)
+     if par is not None:
+         _set_constant(par, container_path)
+ 
+ 
++# --------------------------------------------------------------------------- ControlNet feeds
++#
++# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The
++# timeline is paused and stepped one frame at a time, because the loop is locked
++# to the project frames:
++#
++#   settle   timeline set to the first frame; wait two frames so a full frame cooks there
++#   armed    Movie File Out TOPs set to record + pause (the file opens)
++#   record   every Frame End: check the timeline is where we put it, pulse Add Frame,
++#            move to the next planned frame; the last pulse stops recording
++#   (WAITING_FEED) the movie files are finalised, counted and handed to the CN units
++#
++# Built-in TouchDesigner API used: op('/').time.{frame, play, rate, start},
++# project.realTime, Select TOP .top, Movie File Out TOP .file/.record/.pause/.addframe,
++# TOP.save(). Anything missing raises a message naming it. Pipeline > "Feed: recording
++# method" = continuous skips pause/Add Frame and records every cooked frame instead.
++
++def _timeline(root):
++    top = root.op("/")
++    timeline = getattr(top, "time", None)
++    if timeline is None:
++        raise RuntimeError("cannot reach the project timeline (op('/').time)")
++    return timeline
++
++
++def _realtime(value=None):
++    """Return project.realTime; set it first when `value` is given. None outside TouchDesigner."""
++    try:
++        import td
++        project = td.project
++        previous = getattr(project, "realTime", None)
++    except Exception:
++        return None
++    if value is not None:
++        try:
++            project.realTime = value
++        except Exception:
++            pass
++    return previous
++
++
++def _resolve_top(root, path, unit):
++    if not path:
++        raise RuntimeError("ControlNet %d: Source TOP is empty (e.g. /project1/final_out)" % unit)
++    found = root.op(path)
++    if found is None:
++        raise RuntimeError("ControlNet %d: Source TOP %r not found" % (unit, path))
++    return found
++
++
++def _par(op_, name):
++    par = getattr(op_.par, name, None) if op_ is not None else None
++    if par is None:
++        raise RuntimeError("%s has no parameter %r; set the feed up by hand or tell the maintainer which "
++                           "TouchDesigner build this is" % (getattr(op_, "name", op_), name))
++    return par
++
++
++def _feed_plan(root, values, result):
++    """(feed.frame_plan(...), timeline rate) for the render in `result`."""
++    timeline = _timeline(root)
++    rate = float(getattr(timeline, "rate", 60.0) or 60.0)
++    start = int(float(values.get("feed_loop_start", 0) or 0)) or int(getattr(timeline, "start", 1) or 1)
++    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start), rate
++
++
++def _feed_ops(ui, unit):
++    sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
++    if sel is None or out is None:
++        raise RuntimeError("the deforum COMP has no %s / %s; run builder_master_ui"
++                           % (FEED_SELECT % unit, FEED_OUT % unit))
++    return sel, out
++
++
++def _set_feed_info(root, unit, text):
++    _set_par(_op(root, "ui"), "Feed%dinfo" % unit, text)
++
++
++def _start_feed(root, cfg, values, result, st):
++    """Capture every TOP-sourced guide. True when a recording is now running."""
++    wants = feed.requests(values)
++    for want in wants:
++        if want.mode == feed.TOP_STILL:
++            _capture_still(root, cfg, want)
++    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
++    return bool(loops) and _begin_loop_capture(root, cfg, values, result, loops)
++
++
++def _feed_target(cfg, want):
++    share = feed.share_path(cfg, want.unit, want.mode)
++    if share is None:
++        raise RuntimeError("cn_feed_dir %s is not under config path_map; TouchDesigner cannot write there"
++                           % cfg["cn_feed_dir"])
++    os.makedirs(os.path.dirname(share), exist_ok=True)
++    return share, feed.container_path(cfg, want.unit, want.mode)
++
++
++def _capture_still(root, cfg, want):
++    top = _resolve_top(root, want.top, want.unit)
++    share, container = _feed_target(cfg, want)
++    top.save(share)
++    if not os.path.isfile(share):
++        raise RuntimeError("ControlNet %d: %s.save() wrote nothing to %s" % (want.unit, want.top, share))
++    _set_cn_video(root, container, want.unit)
++    _set_feed_info(root, want.unit, "still %s" % time.strftime("%H:%M:%S"))
++    log("ControlNet %d guide: still from %s -> %s" % (want.unit, want.top, container))
++
++
++def _begin_loop_capture(root, cfg, values, result, loops):
++    ui = _op(root, "ui")
++    exec_dat = root.op(NAMES["feed_exec"])
++    if exec_dat is None:
++        raise RuntimeError("no %s DAT: run setup_network" % NAMES["feed_exec"])
++    for name in ("active", "frameend"):
++        par = getattr(exec_dat.par, name, None)
++        if par is not None and not par.eval():
++            raise RuntimeError("%s.%s is off, so the capture would never advance" % (exec_dat.name, name))
++
++    timeline = _timeline(root)
++    plan, rate = _feed_plan(root, values, result)
++    for warning in plan["warnings"]:
++        log("warning: " + warning)
++
++    method = feed.method_of(values)
++    units = []
++    for want in loops:
++        sel, out = _feed_ops(ui, want.unit)
++        _resolve_top(root, want.top, want.unit)
++        share, container = _feed_target(cfg, want)
++        if os.path.isfile(share):
++            os.remove(share)                  # so "file exists" below means "this recording"
++        _set_constant(_par(sel, "top"), want.top)
++        _set_constant(_par(out, "file"), share)
++        for name, value in (("type", "movie"), ("pause", 0), ("record", 0)):
++            par = getattr(out.par, name, None)
++            if par is not None:
++                _set_constant(par, value)
++        _par(out, "record")
++        if method == feed.ADD_FRAME:
++            _par(out, "addframe")
++            _par(out, "pause")
++        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container})
++
++    now = time.time()
++    st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
++          "j": 0, "since_set": 0, "submitted": now, "updated": now,
++          "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
++    _save(root, st)
++    timeline.play = False
++    timeline.frame = plan["frames"][0]
++    _set_status(root, "feed: recording 0/%d" % len(plan["frames"]))
++    log("recording ControlNet feed%s %s from %s: %s (timeline %g fps, method %s)" % (
++        "s" if len(units) > 1 else "", ",".join(str(u["unit"]) for u in units),
++        ", ".join(sorted(set(u["top"] for u in units))), feed.describe(plan), rate, method))
++    return True
++
++
++def capture_tick(root):
++    """Frame End callback (feed_capture_exec). Does nothing unless a capture is running."""
++    st = _state(root)
++    if st.get("state") != CAPTURING:
++        return
++    try:
++        _capture_step(root, st)
++    except Exception as exc:
++        traceback.print_exc()
++        _abort_capture(root, st)
++        _fail(root, st, "feed capture failed: %s" % exc)
++
++
++def _capture_step(root, st):
++    ui = _op(root, "ui")
++    timeline = _timeline(root)
++    frames = st["frames"]
++    outs = [_feed_ops(ui, u["unit"])[1] for u in st["units"]]
++    st["updated"] = time.time()
++    st["since_set"] = st.get("since_set", 0) + 1
++    phase = st["phase"]
++
++    if phase == "settle":
++        # The first callback may still belong to the frame the timeline was set in;
++        # two callbacks guarantee a whole frame was cooked at frames[0].
++        if st["since_set"] >= 2:
++            if int(timeline.frame) != frames[0]:
++                raise RuntimeError("the timeline moved to %s while waiting to start (expected %d); "
++                                   "is something else driving it?" % (timeline.frame, frames[0]))
++            for out in outs:
++                if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
++                    _set_constant(out.par.pause, 1)
++                _set_constant(out.par.record, 1)
++            st["phase"] = "armed"
++        _save(root, st)
++        return
++
++    # "armed" and "record" both land here. In "armed" a frame has cooked since record (+pause)
++    # were set, so the movie files are open: Add Frame is safe, and in the continuous method
++    # that cooked frame (still at frames[0]) is the first recorded one.
++    j = st["j"]
++    if int(timeline.frame) != frames[j]:
++        raise RuntimeError("recording frame %d: the timeline is at %s, expected %d; something else is "
++                           "moving it (a playing Timer, Time CHOP or script?)" % (j, timeline.frame, frames[j]))
++    if st.get("method", feed.ADD_FRAME) == feed.ADD_FRAME:
++        for out in outs:
++            out.par.addframe.pulse()
++    j += 1
++    st["j"], st["phase"] = j, "record"
++    if j <= 3 or j == len(frames):
++        log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), frames[j - 1]))
++    if j < len(frames):
++        timeline.frame = frames[j]
++        st["since_set"] = 0
++        if j % 30 == 0:
++            _set_status(root, "feed: recording %d/%d" % (j, len(frames)))
++        _save(root, st)
++        return
++
++    for out in outs:
++        _set_constant(out.par.record, 0)
++    _restore_timeline(root, st.get("restore"))
++    now = time.time()
++    st.update(state=WAITING_FEED, waiting_since=now, updated=now, sizes={}, restore=None)
++    _save(root, st)
++    _set_status(root, "feed: finalising")
++    log("feed recorded (%d frames); waiting for the movie files" % len(frames))
++
++
++def _restore_timeline(root, restore):
++    if not restore:
++        return
++    try:
++        timeline = _timeline(root)
++        timeline.frame = restore["frame"]
++        timeline.play = restore["play"]
++    except Exception as exc:
++        log("could not restore the timeline: %s" % exc)
++    if restore.get("realtime") is not None:
++        _realtime(restore["realtime"])
++
++
++def _abort_capture(root, st):
++    """Stop recording and give the timeline back. Safe to call twice."""
++    ui = _op(root, "ui")
++    for u in st.get("units", []):
++        try:
++            out = ui.op(FEED_OUT % u["unit"])
++            if out is not None and getattr(out.par, "record", None) is not None:
++                _set_constant(out.par.record, 0)
++        except Exception as exc:
++            log("could not stop feed %s: %s" % (u.get("unit"), exc))
++    _restore_timeline(root, st.get("restore"))
++    st["restore"] = None
++    _save(root, st)
++
++
++def _poll_feed(root, cfg, st):
++    """Wait for the recorded movies to settle, check their length, then render."""
++    now = time.time()
++    sizes, stable = dict(st.get("sizes") or {}), True
++    for u in st["units"]:
++        size = os.path.getsize(u["share"]) if os.path.isfile(u["share"]) else -1
++        if size <= 0 or sizes.get(str(u["unit"])) != size:
++            stable = False
++        sizes[str(u["unit"])] = size
++    st["sizes"] = sizes
++    if not stable:
++        if now - st.get("waiting_since", now) > FEED_FINALIZE_TIMEOUT_S:
++            _fail(root, st, "the recorded feed %s did not appear within %ds (is the Movie File Out codec "
++                            "available on this licence?)" % (st["units"][0]["share"], FEED_FINALIZE_TIMEOUT_S))
++            return
++        _save(root, st)
++        return
++
++    expected, counter = len(st["frames"]), _frame_counter(cfg)
++    for u in st["units"]:
++        try:
++            actual = counter(u["container"])
++        except Exception as exc:
++            log("ControlNet %d feed: frame count failed (%s)" % (u["unit"], exc))
++            actual = None
++        ok, message = feed.verify(expected, actual)
++        if not ok:
++            _fail(root, st, "ControlNet %d feed: %s (%s)" % (u["unit"], message, u["share"]))
++            return
++        log("ControlNet %d feed ready: %s (%s)" % (u["unit"], u["container"], message))
++        _set_cn_video(root, u["container"], u["unit"])
++        _set_feed_info(root, u["unit"], "%d frames @ %s" % (expected, time.strftime("%H:%M:%S")))
++    _after_feed(root, cfg, st)
++
++
++def _after_feed(root, cfg, st):
++    try:
++        values, result = build(root, cfg)
++        _render_stage(root, cfg, st, values, result)
++    except Exception as exc:
++        traceback.print_exc()
++        _fail(root, st, "render after the feed failed: %s" % exc)
++
++
+ # --------------------------------------------------------------------------- polling
+ 
+ def tick(root):
+@@ -405,6 +729,11 @@ def tick(root):
+     elif current == WAITING_FILE:
+         _try_load(root, cfg, st)
+         return
++    elif current == WAITING_FEED:
++        _poll_feed(root, cfg, st)
++        return
++    elif current == CAPTURING:
++        return  # driven every frame by feed_capture_exec; cancel() aborts it
+     _save(root, st)
+ 
+ 
+@@ -660,7 +989,7 @@ def preview(root):
+     parameters first, then the prompt keys) and logs the summary and warnings.
+     """
+     cfg = config.load()
+-    _values, result = build(root, cfg)
++    values, result = build(root, cfg)
+     for warning in result["warnings"]:
+         log("warning: " + warning)
+     order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
+@@ -677,10 +1006,32 @@ def preview(root):
+     for api, (how, sched) in rows:
+         if how != "constant":
+             log("%-28s %-10s %s" % (api, how, sched if len(sched) < 160 else sched[:157] + "..."))
++    held = ["%s %s" % (api.replace("_schedule", ""), result["schedules"][api][1])
++            for api in ("strength_schedule", "cfg_scale_schedule", "noise_schedule")
++            if api in result["schedules"] and result["schedules"][api][0] == "constant"]
++    if held:
++        log("held (also in schedule_preview): " + " | ".join(held))
++    _log_feed_plan(root, values, result)
+     log("preview: " + payload.summary(result))
+     return result
+ 
+ 
++def _log_feed_plan(root, values, result):
++    wants = feed.requests(values)
++    for want in wants:
++        if want.mode == feed.TOP_STILL:
++            log("feed: ControlNet %d takes one still from %s at Queue" % (want.unit, want.top or "(no TOP set)"))
++    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
++    if loops:
++        try:
++            plan, rate = _feed_plan(root, values, result)
++            log("feed: ControlNet %s record %s from %s at Queue (timeline %g fps)" % (
++                ",".join(str(w.unit) for w in loops), feed.describe(plan),
++                ", ".join(sorted(set(w.top or "(no TOP set)" for w in loops))), rate))
++        except Exception as exc:
++            log("feed: cannot plan the recording: %s" % exc)
++
++
+ def bake(root):
+     """Bake button: the CHOP bake now happens at Queue time, so this previews it."""
+     return preview(root)
+@@ -688,6 +1039,37 @@ def bake(root):
+ 
+ # --------------------------------------------------------------------------- diagnostics
+ 
++def _doctor_feeds(root, cfg, ui, values):
++    """TOP guide feeds: which units use them, whether the pieces they need exist."""
++    wants = feed.requests(values)
++    for unit in range(1, feed.UNITS + 1):
++        mode = feed.mode_of(values, unit)
++        if mode == feed.FILE:
++            continue
++        want = [w for w in wants if w.unit == unit]
++        top = str(values.get("feed_%d_top" % unit, "") or "")
++        found = root.op(top) is not None if top else False
++        log("ControlNet %d guide: %s from %s [%s]%s" % (
++            unit, mode, top or "(no Source TOP)", "TOP found" if found else "TOP NOT FOUND",
++            "" if want else " (unit is off, so it will not be recorded)"))
++        sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
++        if mode == feed.TOP_LOOP and (sel is None or out is None):
++            log("  %s / %s missing from the COMP: run builder_master_ui" % (FEED_SELECT % unit, FEED_OUT % unit))
++    if any(w.mode == feed.TOP_LOOP for w in wants):
++        exec_dat = root.op(NAMES["feed_exec"])
++        if exec_dat is None:
++            log("%s missing: run setup_network (the loop recorder steps on its Frame End)" % NAMES["feed_exec"])
++        try:
++            timeline = _timeline(root)
++            log("timeline: %g fps, starts at frame %s, frame %s" % (
++                float(getattr(timeline, "rate", 0) or 0), getattr(timeline, "start", "?"), timeline.frame))
++        except Exception as exc:
++            log("timeline unreadable: %s" % exc)
++    if wants:
++        folder = config.to_share(cfg, cfg["cn_feed_dir"] + "/")
++        log("feeds are written to %s (container %s)" % (folder, cfg["cn_feed_dir"]))
++
++
+ def doctor(root):
+     """Print what the pipeline can and cannot see. Safe to run any time."""
+     cfg = config.load()
+@@ -717,6 +1099,7 @@ def doctor(root):
+                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
+         rows = read_prompt_rows(ui)
+         log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
++        _doctor_feeds(root, cfg, ui, values)
+     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
+         container_path = str(values.get(api, "") or "")
+         if not container_path:
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index a3dbfc6..962470d 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -60,7 +60,10 @@ class Op(object):
+ 
+     # COMP
+     def op(self, name):
+-        return self.children.get(name)
++        found = self.children.get(name)
++        if found is None and isinstance(name, str) and "/" in name.strip("/"):
++            found = self.children.get(name.rsplit("/", 1)[-1])   # absolute paths: last component
++        return found
+ 
+     def add(self, child):
+         self.children[child.name] = child
+@@ -105,6 +108,44 @@ class Op(object):
+         return list(self.channels)
+ 
+ 
++class Timeline(object):
++    """op('/').time"""
++
++    def __init__(self, frame=1, play=True, rate=60.0, start=1):
++        self.frame, self.play, self.rate, self.start = frame, play, rate, start
++
++
++class FakeTop(Op):
++    """A source TOP; save() writes a file like TOP.save()."""
++
++    def __init__(self, name, parent=None):
++        Op.__init__(self, name, parent)
++        self.saved = []
++
++    def save(self, path):
++        with open(path, "wb") as fh:
++            fh.write(b"png")
++        self.saved.append(path)
++        return path
++
++
++class FakeMfo(Op):
++    """Movie File Out TOP: Add Frame records the timeline frame the source shows right now."""
++
++    def __init__(self, name, parent, timeline):
++        Op.__init__(self, name, parent, file=Par("file", ""), type=Par("type", "movie"),
++                    record=Par("record", 0), pause=Par("pause", 0))
++        self.recorded = []
++        self.par.addframe = Par("addframe", 0)
++        self.par.addframe.pulse = self._add_frame
++        self.timeline = timeline
++
++    def _add_frame(self):
++        self.par.addframe.pulses += 1
++        if self.par.record.val and self.par.pause.val:
++            self.recorded.append(self.timeline.frame)
++
++
+ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+     """A /project1 with the ops td_controller uses.
+ 
+@@ -122,7 +163,8 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+         if field.kind == schema.MOD and comp:
+             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
+     if comp:
+-        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate"):
++        for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
++                     "Feed1info", "Feed2info", "Feed3info"):
+             ui_pars.setdefault(name, "")
+     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
+     if comp:
+@@ -133,6 +175,15 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+         ui.add(Op("schedule_preview", ui))
+         for name in ("loop_head", "loop_tail"):
+             ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
++        root.timeline = Timeline()
++        top = root.add(Op("/", root))
++        top.time = root.timeline
++        root.add(FakeTop("final_out", root))
++        root.add(Op("feed_capture_exec", root, active=Par("active", True), frameend=Par("frameend", True)))
++        for unit in (1, 2, 3):
++            ui.add(Op("feed%d_sel" % unit, ui, top=Par("top", "")))
++            ui.add(FakeMfo("feed%d_out" % unit, ui, root.timeline))
++
+     for name in ("webclient_deforum", "webclient_progress", "webclient_comfyui"):
+         root.add(Op(name, root, callbacks=None))
+     root.add(Op("deforum_prompts", root))
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index 1ffa9f4..ffd57e0 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -163,6 +163,10 @@ BUILTINS = {
+                        ("indexunit", "Menu", "frames", ("indices", "frames", "seconds", "fraction")),
+                        ("reloadpulse", "Pulse", 0, ())],
+     "crossTOP": [("cross", "Float", 0, ())],
++    "selectTOP": [("top", "Str", "", ())],
++    "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
++                        ("record", "Toggle", False, ()), ("pause", "Toggle", False, ()),
++                        ("addframe", "Pulse", 0, ())],
+     "textDAT": [("file", "Str", "", ()), ("syncfile", "Toggle", False, ())],
+ }
+ 
+@@ -171,7 +175,8 @@ def run_builder(root, scripts_dir, out):
+     me = Node("textDAT", "builder_master_ui", root, BUILTINS["textDAT"])
+     me.par.file.val = scripts_dir + "/build_master_ui.py"
+     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
+-    for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP"):
++    for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
++                 "selectTOP", "moviefileoutTOP"):
+         env[kind] = kind
+     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
+         with open(BUILDER, encoding="utf-8") as fh:
+@@ -241,6 +246,18 @@ class BuilderTest(unittest.TestCase):
+         self.assertIsNotNone(comp.op("in_mod"))
+         self.assertFalse(any("NOTE loop_" in line for line in self.log))
+ 
++    def test_feed_ops_per_unit(self):
++        comp = self.build()
++        for unit in (1, 2, 3):
++            sel, rec = comp.op("feed%d_sel" % unit), comp.op("feed%d_out" % unit)
++            self.assertIsNotNone(sel)
++            self.assertIs(rec.inputConnectors[0].source, sel)
++            self.assertEqual(rec.par.type.val, "movie")
++            self.assertEqual(getattr(comp.par, "Feed%dmode" % unit).val, "file")
++            self.assertTrue(hasattr(comp.par, "Cn%dvidpath" % unit))
++        self.assertFalse(any("NOTE feed" in line for line in self.log))
++        self.assertEqual(comp.par.Feedloopstart.val, 0)
++
+     def test_rebuild_keeps_values_and_tables(self):
+         comp = self.build()
+         comp.par.Bpm.val = 150.0
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index f36783e..3e58d35 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -267,5 +267,218 @@ class TempoCompTest(ControllerTest.__bases__[0]):
+         self.assertEqual(ctl._op(root, "ui").name, "Deforum_UI")
+ 
+ 
++FEED_UI = dict(TEMPO_UI, mod1_active=False, cn_1_enabled=True, feed_1_mode="top_loop",
++               feed_1_top="/project1/final_out", feed_loop_start=0)
++
++
++class FeedTest(ControllerTest.__bases__[0]):
++    """ControlNet guide feeds recorded from a TOP at Queue."""
++
++    setUp = ControllerTest.setUp
++    state = ControllerTest.state
++    tick = ControllerTest.tick
++
++    def make(self, **overrides):
++        self.root = make_network(dict(FEED_UI, **overrides), comp=True,
++                                 prompt_rows=[("0", "gold", "")])
++        self.ui = self.root.op("deforum")
++        self.timeline = self.root.timeline
++        self.out = self.ui.op("feed1_out")
++        return self.ui
++
++    def record_all(self, limit=500):
++        """Run Frame End callbacks until the recording finishes (one callback per TD frame)."""
++        for _ in range(limit):
++            if self.state() != ctl.CAPTURING:
++                return
++            ctl.capture_tick(self.root)
++        self.fail("capture never finished")
++
++    def posts(self):
++        return self.root.op("webclient_deforum").requests
++
++    def feed_file(self, n=1):
++        path = self.share + "/td_masks/feeds/cn%d_feed.mp4" % n
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "wb") as fh:
++            fh.write(b"x" * 200)
++        return path
++
++    def test_loop_capture_end_to_end(self):
++        ui = self.make()
++        self.timeline.frame, self.timeline.play = 42, True
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.CAPTURING)
++        self.assertEqual(self.posts(), [], "nothing is rendered before the guide exists")
++        self.assertEqual((self.timeline.play, self.timeline.frame), (False, 1))
++        self.assertEqual(ui.op("feed1_sel").par.top.val, "/project1/final_out")
++        self.assertEqual(self.out.par.file.val, self.share + "/td_masks/feeds/cn1_feed.mp4")
++
++        self.record_all()
++        self.assertEqual(self.state(), ctl.WAITING_FEED)
++        # 75 render frames at 30 fps from a 60 fps timeline: every second frame, wrapping at 120.
++        expected = [1 + (2 * k) % 120 for k in range(75)]
++        self.assertEqual(self.out.recorded, expected)
++        self.assertEqual(self.out.par.addframe.pulses, 75)
++        self.assertEqual(self.out.par.record.val, 0)
++        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 42), "timeline given back")
++        self.assertEqual(self.posts(), [])
++
++        path = self.feed_file()
++        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
++            self.tick()                                  # size seen once
++            self.assertEqual(self.state(), ctl.WAITING_FEED)
++            self.tick()                                  # size stable -> verified -> render
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        s = json.loads(self.posts()[0][2])["deforum_settings"]
++        self.assertEqual(s["cn_1_vid_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
++        self.assertIs(s["cn_1_enabled"], True)
++        self.assertEqual(s["max_frames"], 75)
++        self.assertEqual(ui.par.Cn1vidpath.val, "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
++        self.assertIn("75 frames", ui.par.Feed1info.val)
++        self.assertTrue(os.path.isfile(path))
++
++    def test_continuous_method_records_every_cooked_frame(self):
++        ui = self.make(feed_method="continuous")
++        ctl.queue(self.root)
++        for _ in range(500):
++            if self.state() != ctl.CAPTURING:
++                break
++            for unit in (1, 2, 3):                      # a TD frame cooks, then Frame End fires
++                mfo = ui.op("feed%d_out" % unit)
++                if mfo.par.record.val and not mfo.par.pause.val:
++                    mfo.recorded.append(self.timeline.frame)
++            ctl.capture_tick(self.root)
++        self.assertEqual(self.state(), ctl.WAITING_FEED)
++        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
++        self.assertEqual(self.out.par.addframe.pulses, 0)
++
++    def test_two_units_record_in_one_pass(self):
++        ui = self.make(cn_2_enabled=True, feed_2_mode="top_loop", feed_2_top="/project1/final_out",
++                       cn_2_vid_path="")
++        ctl.queue(self.root)
++        self.record_all()
++        self.assertEqual(ui.op("feed2_out").recorded, self.out.recorded)
++        self.assertEqual(ui.op("feed2_out").par.file.val, self.share + "/td_masks/feeds/cn2_feed.mp4")
++
++    def test_feed_too_short_stops_the_render(self):
++        self.make()
++        ctl.queue(self.root)
++        self.record_all()
++        self.feed_file()
++        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 70):
++            self.tick()
++            self.tick()
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("recorded 70 frames, expected 75", self.root.storage[ctl.STATE_KEY]["last_result"])
++        self.assertEqual(self.posts(), [])
++
++    def test_feed_file_never_appears(self):
++        self.make()
++        ctl.queue(self.root)
++        self.record_all()
++        self.root.storage[ctl.STATE_KEY]["waiting_since"] = time.time() - ctl.FEED_FINALIZE_TIMEOUT_S - 1
++        self.tick()
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("did not appear", self.root.storage[ctl.STATE_KEY]["last_result"])
++
++    def test_timeline_moved_by_someone_else_aborts_and_restores(self):
++        self.make()
++        self.timeline.frame, self.timeline.play = 7, True
++        ctl.queue(self.root)
++        for _ in range(10):
++            ctl.capture_tick(self.root)
++        self.timeline.frame = 500                       # a script / Timer moved it
++        ctl.capture_tick(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("something else is moving it", self.root.storage[ctl.STATE_KEY]["last_result"])
++        self.assertEqual(self.out.par.record.val, 0)
++        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
++        self.assertEqual(self.posts(), [])
++
++    def test_cancel_during_capture(self):
++        self.make()
++        self.timeline.frame, self.timeline.play = 7, True
++        ctl.queue(self.root)
++        for _ in range(10):
++            ctl.capture_tick(self.root)
++        ctl.cancel(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertEqual(self.out.par.record.val, 0)
++        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 7))
++        ctl.capture_tick(self.root)                     # late callbacks are harmless
++        self.assertEqual(self.timeline.frame, 7)
++
++    def test_queue_while_capturing_is_ignored(self):
++        self.make()
++        ctl.queue(self.root)
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.CAPTURING)
++        self.assertEqual(self.posts(), [])
++
++    def test_still_mode_saves_a_png_and_renders_at_once(self):
++        ui = self.make(feed_1_mode="top_still")
++        ctl.queue(self.root)
++        top = self.root.op("final_out")
++        self.assertEqual(top.saved, [self.share + "/td_masks/feeds/cn1_feed.png"])
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        s = json.loads(self.posts()[0][2])["deforum_settings"]
++        self.assertEqual(s["cn_1_vid_path"], "/opt/a1111/td_masks/feeds/cn1_feed.png")
++        self.assertEqual(self.timeline.frame, 1)        # the timeline is never touched for a still
++        self.assertTrue(ui.par.Feed1info.val.startswith("still"))
++
++    def test_missing_source_top_fails_before_touching_the_timeline(self):
++        self.make(feed_1_top="/project1/nothing")
++        self.timeline.frame = 9
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("not found", self.root.storage[ctl.STATE_KEY]["last_result"])
++        self.assertEqual((self.timeline.play, self.timeline.frame), (True, 9))
++
++    def test_missing_stepper_dat_fails_with_the_fix(self):
++        self.make()
++        del self.root.children["feed_capture_exec"]
++        ctl.queue(self.root)
++        self.assertIn("run setup_network", self.root.storage[ctl.STATE_KEY]["last_result"])
++
++    def test_disabled_unit_or_file_mode_renders_normally(self):
++        self.make(cn_1_enabled=False)
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        self.assertEqual(self.out.recorded, [])
++        self.make(feed_1_mode="file")
++        ctl.cancel(self.root)
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++
++    def test_comfy_preprocess_is_skipped_for_a_top_feed(self):
++        ui = self.make(comfy_preproc_enable=True)
++        ctl.queue(self.root)
++        self.record_all()
++        self.feed_file()
++        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
++            self.tick()
++            self.tick()
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        self.assertEqual(self.root.op("webclient_comfyui").requests, [])
++
++    def test_preview_describes_the_recording_without_sending_anything(self):
++        self.make()
++        result = ctl.preview(self.root)
++        self.assertEqual(self.posts(), [])
++        self.assertEqual(self.state() if ctl.STATE_KEY in self.root.storage else ctl.IDLE, ctl.IDLE)
++        self.assertEqual(result["request"]["deforum_settings"]["max_frames"], 75)
++
++    def test_other_cn_units_are_sent_from_their_pages(self):
++        self.make(cn_2_enabled=True, cn_2_model="control_depth", cn_2_weight=0.7, cn_2_vid_path="/x/d.mp4")
++        result = ctl.export_payload(self.root)
++        s = result["request"]["deforum_settings"]
++        self.assertEqual((s["cn_2_model"], s["cn_2_weight"], s["cn_2_vid_path"]),
++                         ("control_depth", "0:(0.7)", "/x/d.mp4"))
++        self.assertIs(s["cn_2_enabled"], True)
++        self.assertIs(s["cn_3_enabled"], False)
++        self.assertEqual(s["cn_3_weight"], "0:(1.0)")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_feed.py b/tests/test_feed.py
+new file mode 100644
+index 0000000..609f03a
+--- /dev/null
++++ b/tests/test_feed.py
+@@ -0,0 +1,89 @@
++"""ControlNet guide feeds: the frame plan and paths (pure Python)."""
++
++import unittest
++
++from _fakes import ROOT_DIR  # noqa: F401  (puts scripts/ on sys.path)
++from tdeforum import config, feed, tempo
++
++
++class FramePlanTest(unittest.TestCase):
++    def test_cadence_120bpm_wraps_the_overlap_onto_the_loop_start(self):
++        tp = tempo.plan(bpm=120, bars=2, strategy="cadence", overlap_beats=1.0)
++        plan = feed.frame_plan(tp, tp["max_frames"], 60, 1)
++        frames = plan["frames"]
++        self.assertEqual((len(frames), plan["step"], plan["loop"]), (270, 1, 240))
++        self.assertEqual((frames[0], frames[239], frames[240], frames[269]), (1, 240, 1, 30))
++        self.assertEqual(plan["warnings"], [])
++
++    def test_interpolate_samples_every_second_timeline_frame(self):
++        tp = tempo.plan(bpm=120, bars=1, strategy="interpolate", render_fps=30, overlap_beats=1.0)
++        plan = feed.frame_plan(tp, tp["max_frames"], 60, 1)
++        frames = plan["frames"]
++        self.assertEqual((len(frames), plan["step"], plan["loop"]), (75, 2, 120))
++        self.assertEqual(frames[:3], [1, 3, 5])
++        self.assertEqual((frames[59], frames[60], frames[74]), (119, 1, 29))
++
++    def test_each_tempo_covers_one_loop_of_the_timeline(self):
++        for bpm, per_beat in ((90, 40), (120, 30), (150, 24)):
++            tp = tempo.plan(bpm=bpm, bars=1, strategy="cadence", overlap_beats=0)
++            plan = feed.frame_plan(tp, tp["max_frames"], 60, 1)
++            self.assertEqual(plan["loop"], 4 * per_beat)
++            self.assertEqual(plan["frames"][-1], 4 * per_beat)
++
++    def test_manual_length_is_sequential_from_the_start_frame(self):
++        plan = feed.frame_plan(None, 5, 60, 10)
++        self.assertEqual((plan["frames"], plan["step"], plan["loop"]), ([10, 11, 12, 13, 14], 1, None))
++
++    def test_unsamplable_rates_are_refused(self):
++        tp = tempo.plan(bpm=120, bars=1, strategy="interpolate", render_fps=20)
++        with self.assertRaises(ValueError):
++            feed.frame_plan(tp, 10, 50, 1)           # 50 / 20 = 2.5
++        tp = tempo.plan(bpm=120, bars=1, strategy="cadence")
++        with self.assertRaises(ValueError):
++            feed.frame_plan(tp, 10, 30, 1)           # timeline slower than the render
++
++    def test_drifting_loop_is_reported(self):
++        tp = tempo.plan(bpm=100, bars=1, strategy="cadence")      # 4 beats = 144 frames at 60: whole
++        self.assertEqual(feed.frame_plan(tp, 10, 60, 1)["warnings"], [])
++        tp = tempo.plan(bpm=97, bars=1, strategy="cadence")
++        self.assertTrue(feed.frame_plan(tp, 10, 60, 1)["warnings"])
++
++    def test_describe(self):
++        tp = tempo.plan(bpm=120, bars=2, strategy="cadence", overlap_beats=1.0)
++        text = feed.describe(feed.frame_plan(tp, tp["max_frames"], 60, 1))
++        self.assertEqual(text, "270 frames, timeline 1..240, wrapping at 240")
++
++
++class RequestsAndPathsTest(unittest.TestCase):
++    def test_only_enabled_top_units_are_requested(self):
++        values = {"cn_1_enabled": True, "feed_1_mode": "top_loop", "feed_1_top": " /project1/final_out ",
++                  "cn_2_enabled": False, "feed_2_mode": "top_still", "feed_2_top": "/project1/x",
++                  "cn_3_enabled": True, "feed_3_mode": "file"}
++        wants = feed.requests(values)
++        self.assertEqual([(w.unit, w.mode, w.top) for w in wants], [(1, "top_loop", "/project1/final_out")])
++
++    def test_unknown_mode_is_treated_as_file(self):
++        self.assertEqual(feed.mode_of({"feed_1_mode": "bogus"}, 1), feed.FILE)
++        self.assertEqual(feed.requests({"cn_1_enabled": True, "feed_1_mode": "bogus"}), [])
++
++    def test_paths_map_to_the_share(self):
++        cfg = config.load()
++        self.assertEqual(feed.container_path(cfg, 2, feed.TOP_LOOP), "/opt/a1111/td_masks/feeds/cn2_feed.mp4")
++        self.assertEqual(feed.container_path(cfg, 1, feed.TOP_STILL), "/opt/a1111/td_masks/feeds/cn1_feed.png")
++        self.assertTrue(feed.share_path(cfg, 2, feed.TOP_LOOP).endswith("td_masks/feeds/cn2_feed.mp4"))
++        cfg = dict(cfg, cn_feed_ext=".mov")
++        self.assertTrue(feed.container_path(cfg, 1, feed.TOP_LOOP).endswith(".mov"))
++
++    def test_verify(self):
++        self.assertEqual(feed.verify(75, 75), (True, "75 frames"))
++        self.assertFalse(feed.verify(75, 70)[0])
++        self.assertTrue(feed.verify(75, 76)[0])
++        self.assertTrue(feed.verify(75, None)[0])
++
++    def test_is_video(self):
++        self.assertTrue(feed.is_video("/a/b/c.MOV"))
++        self.assertFalse(feed.is_video("/a/b/c.png"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

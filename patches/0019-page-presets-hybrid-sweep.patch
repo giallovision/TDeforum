@@ -1,0 +1,941 @@
+From b36797efab2e8058eacc5ca239eb768858ffdfd7 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 02:40:28 +0000
+Subject: [PATCH] Page Preset menus on every page (reset by the Example
+ Preset); Sweep Depth for 2D/3D Hybrid Video; four hybrid presets
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  30 ++++-
+ ROADMAP.md                        |   3 +-
+ scripts/build_master_ui.py        |   2 +-
+ scripts/tdeforum/__init__.py      |   5 +-
+ scripts/tdeforum/page_presets.py  | 213 ++++++++++++++++++++++++++++++
+ scripts/tdeforum/presets.py       |  44 ++++++
+ scripts/tdeforum/schema.py        |  18 ++-
+ scripts/tdeforum/sweep.py         |   7 +-
+ scripts/tdeforum/td_controller.py | 164 ++++++++++++++++++-----
+ scripts/ui_exec.py                |  25 ++--
+ tests/test_builder.py             |   7 +-
+ tests/test_presets.py             | 110 ++++++++++++++-
+ tests/test_sweep.py               |  19 ++-
+ 13 files changed, 582 insertions(+), 65 deletions(-)
+ create mode 100644 scripts/tdeforum/page_presets.py
+
+diff --git a/README.md b/README.md
+index c811965..d25de8d 100644
+--- a/README.md
++++ b/README.md
+@@ -110,7 +110,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
+ 
+ ### Example presets
+ 
+-*Tempo › Example Preset* (first page of the COMP) lays one of 27 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++*Tempo › Example Preset* (first page of the COMP) lays one of 31 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+ 
+ * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+ * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+@@ -144,12 +144,37 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
+ | `video_depth_peel` | Video Input - Depth peel (unorthodox) | The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it). |
+ | `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
+ | `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
++| `hybrid_flow_glow` | Hybrid - Flow glow (good) | The dream moves with the video's optical flow while a soft depth band travels away through the performer as a QR Monster glow. Needs Globals > Video Init Path. |
++| `hybrid_ghost_peel` | Hybrid - Ghost peel (good) | Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the band re-diffuses, so the scene is re-dreamed layer by layer toward you. |
++| `hybrid_camera_tide` | Hybrid - Camera tide (extreme) | Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive QR Monster hard: the space surges like a tide through the video's own depth. |
++| `hybrid_possession` | Hybrid - Possession (unorthodox) | Sticky flow measured from the generated image, a faint after-generation echo of the video and the whole depth map as relief: something else is wearing the performer's shape and movement. |
+ | `interp_seed_walk` | Interpolation - Seed walk (unorthodox) | A walk through latent space: the noise blends from seed 424242 to its neighbour and back over the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. Perfectly seamless. |
+ | `interp_beat_jolt` | Interpolation - Beat jolt (unorthodox) | On every beat the noise jumps towards another seed and relaxes back: the image flinches into a sibling version on the kick and settles, with no motion at all. |
+ | `interp_guidance_bloom` | Interpolation - Guidance bloom (unorthodox) | CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into over-defined detail and back, while a slow seed drift keeps it alive. |
+ 
+ The **unorthodox** dozen (three per mode, including **Interpolation**) lean on what only a generative feedback loop can do: zooming *out* into wrapped copies of the frame, folding the picture plane with perspective flip, moving a hallucination with a video's optical flow (*Hybrid Video* page), breathing aspect ratio / FOV that the depth warp re-paints, using the sweep as an inpainting **mask** instead of a guide (*Invert Mask* / *Overlay Mask* are on the Globals page), the whole depth map as a QR Monster relief, and in Interpolation mode (every frame drawn from noise) animating the **seed itself** with subseed strength, which closes the loop perfectly.
+ 
++### Page presets
++
++Every page except Globals starts with a **Page Preset** menu (Prompts has its Prompt Preset instead). A page preset only changes parameters on its own page, so they stack: *Motion 3D: Orbit* + *Camera: Wide lens* + *Flow: Deflicker*. Picking None on a page puts that page's values back. Picking an **Example Preset**, including None and *Re-apply*, first puts every page preset (and the Prompt Preset) back to None, so a remembered page value can never overwrite an example; then add page presets on top again.
++
++* **Tempo**: Smooth: 60 fps, cadence 4, 2-beat seam; Detailed: 60 fps, cadence 2; Fast: 30 fps + RIFE x2; Dreamy: 15 fps + RIFE x4; Long loop: 4 bars
++* **Motion 2D**: Still; Slow zoom in; Zoom out into tiles (wrap); Sideways drift (wrap); Off-centre spiral
++* **Motion 3D**: Still; Forward push; Orbit; Push and roll; Pull back (mirrored edges)
++* **Camera & Depth**: Standard lens 70 degrees; Wide lens 100 degrees (more parallax); Telephoto 35 degrees (flat, slow); Deep relief (depth weight 0.5); Perspective tilt 12 degrees
++* **Diffusion**: Steady (keep 0.8, no noise): least flicker; Balanced (keep 0.72, noise 0.015); Loose (keep 0.55, noise 0.04): keeps reinventing; Crisp LCM (CFG 2.0); Soft dream LCM (CFG 1.4, keep 0.78)
++* **Noise & Color**: Fine perlin noise; Coarse perlin (big soft blobs); Uniform noise; Colour locked (LAB); Colour free to drift
++* **Flow & Anti-blur**: Deflicker: RAFT cadence + RAFT redo (2x slower); Standard: RAFT between cadence frames; Fast: DIS Medium; Off (plain blend between cadence frames); Crisper (anti-blur 0.2)
++* **Hybrid Video**: Off; Move like the video (optical flow); Copy the video's camera (perspective); Flow + 25 % video ghost; Sticky flow (from the generated image, consistency masked)
++* **Mod Matrix**: All slots off; Kick push (slot 1: translation Z decay each beat); Breathing zoom (slot 1: zoom sine over a bar); Wobble (slot 1: pan sine over 2 beats); Regenerate on the beat (slot 2: Strength dip)
++* **Sweep Depth**: Off; Glow travelling away; Glow rushing toward; Ping-pong pulses (4 cycles, depth shaded); Depth strobe (8 hard cycles); Full depth relief (whole depth map); Peel mask (sweep drives the video mask)
++* **ControlNet Unit 1**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
++* **ControlNet Unit 2**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
++* **ControlNet Unit 3**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
++* **Pipeline**: Performance (auto-load, reuse ComfyUI results); Fresh ComfyUI results every Queue; Record TOP feeds continuously
++
++The four **Hybrid** examples run Sweep Depth on the same video that drives the motion: Sweep Depth works in 2D / 3D whenever Globals › Video Init Path is set (render frame k uses video frame k, the same frame the Hybrid Video motion reads).
++
+ ### Prompt presets
+ 
+ *Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and switches *Prompt Source* to the sequence. The rows it replaced come back when you pick **None**. The Negative Prompt (Globals) still applies.
+@@ -284,7 +309,8 @@ scripts/
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
+-    presets.py         # 27 example configurations (Example Preset drop-down)
++    presets.py         # 31 example configurations (Example Preset drop-down)
++    page_presets.py    # Page Preset drop-downs (one per page except Globals)
+     prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+diff --git a/ROADMAP.md b/ROADMAP.md
+index af43e37..ee9ece7 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,12 +46,13 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+ - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+ - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+-- [x] Example Preset drop-down: 27 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
++- [x] Example Preset drop-down: 31 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
+ - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+ 
+ - [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
+ - [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
+ - [x] Twelve unorthodox presets (2D, 3D, Video Input, Interpolation), Hybrid Video page, ten visionary prompt presets, sweep preview as COMP output 2.
++- [x] Page Preset menus on every page but Globals (reset by the Example Preset); Sweep Depth for 2D / 3D Hybrid Video; four hybrid presets.
+ - [x] LCM baseline (4 exact steps, CFG 1.8) with payload checks; presets apply when picked, Re-apply button; Video Input presets on a fixed seed; Sweep Depth grow/blur and the fast vits depth model.
+ 
+ ### 🚧 In Progress
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 1f21a4a..75cceb3 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -253,7 +253,7 @@ def build_inner(comp, values):
+     # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
+     ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
+     for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
+-                        ('pars', 'Preset Presetapply Promptedit Promptpreset Sweepshowlatest'), ('custom', 1), ('builtin', 0),
++                        ('pars', ' '.join(td_controller.ui_watched())), ('custom', 1), ('builtin', 0),
+                         ('valuechange', 1), ('onpulse', 1), ('active', 1)):
+         par = getattr(ui_exec.par, name, None)
+         if par is None:
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index e0d8cf8..b4485f3 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -12,6 +12,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``sweep``         Sweep Depth: band maths and the background render of the mask video
+ * ``presets``       example configurations for the deforum COMP (Example Preset drop-down)
+ * ``prompt_presets`` starting prompts for the Prompt Preset drop-down
++* ``page_presets``  the per-page Page Preset drop-downs
+ * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
+ * ``migrate``       old Deforum_UI values -> the COMP's parameters
+ * ``payload``       builds the Deforum batch request + frame plan
+@@ -25,10 +26,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.8.0"
++__version__ = "0.9.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/page_presets.py b/scripts/tdeforum/page_presets.py
+new file mode 100644
+index 0000000..d530f65
+--- /dev/null
++++ b/scripts/tdeforum/page_presets.py
+@@ -0,0 +1,213 @@
++"""Per-page presets: a "Page Preset" menu at the top of every deforum COMP page except Globals
++(and Prompts, whose Prompt Preset menu plays that role).
++
++A page preset only touches parameters on its own page, so they stack: e.g. Motion 3D "Orbit" +
++Camera "Wide lens" + Flow "Deflicker". Like the Example Preset, the values a page preset
++replaces are remembered and come back when you pick None on that page; the Example Preset
++(Tempo page) puts every page preset back to None before it applies anything, so a page preset's
++remembered values can never overwrite an example.
++"""
++
++NONE = "none"
++
++
++class PagePreset(object):
++    __slots__ = ("id", "label", "values")
++
++    def __init__(self, id, label, values):
++        self.id, self.label, self.values = id, label, values
++
++
++P = PagePreset
++
++
++def _slot(n, target, shape, beats, depth, sharpness=4.0, phase=0.0):
++    p = "mod%d_" % n
++    return {p + "active": True, p + "target": target, p + "shape": shape, p + "beats": beats,
++            p + "depth": depth, p + "sharpness": sharpness, p + "phase": phase}
++
++
++def _slots_off():
++    return dict(("mod%d_active" % n, False) for n in range(1, 9))
++
++
++def _cn(n, **values):
++    return dict(("cn_%d_%s" % (n, k) if not k.startswith("feed_") else "feed_%d_%s" % (n, k[5:]), v)
++                for k, v in values.items())
++
++
++_SWEEP_GLOW = {"sweep_enabled": True, "sweep_cycles": 1.0, "sweep_shape": "ramp", "sweep_direction": "forward",
++               "sweep_width": 18, "sweep_softness": 8, "sweep_grow": 6, "sweep_blur": 4.0, "sweep_trail": 8,
++               "sweep_smooth": 0.4, "sweep_fill": "white", "sweep_as_mask": False,
++               "sweep_model": "depth_anything_v2_vits"}
++
++
++def _cn_presets(n):
++    qr = {"enabled": True, "module": "none", "model": "ctrl_v1p_qr_monster_v2"}
++    return [
++        P("off", "Off", _cn(n, enabled=False)),
++        P("qr_sweep_glow", "QR Monster glow from Sweep Depth (0.75, ends 80 %)",
++          _cn(n, feed_mode="sweep", weight=0.75, guidance_start=0.0, guidance_end=0.8,
++              control_mode="Balanced", **qr)),
++        P("qr_sweep_strong", "QR Monster leads from Sweep Depth (1.1, ControlNet first)",
++          _cn(n, feed_mode="sweep", weight=1.1, guidance_start=0.0, guidance_end=1.0,
++              control_mode="ControlNet is more important", **qr)),
++        P("qr_top_loop", "QR Monster from a TOP loop (Source TOP below)",
++          _cn(n, feed_mode="top_loop", weight=0.8, guidance_start=0.0, guidance_end=0.9,
++              control_mode="Balanced", **qr)),
++        P("qr_late", "QR Monster late (starts at 30 %: detail, not layout)",
++          _cn(n, weight=0.9, guidance_start=0.3, guidance_end=1.0, control_mode="Balanced", **qr)),
++    ]
++
++
++# page name -> (slug, [presets]). Slugs name the menu parameter: pagepreset_<slug>.
++PAGES = {
++    "Tempo": ("tempo", [
++        P("smooth_cadence", "Smooth: 60 fps, cadence 4, 2-beat seam",
++          {"render_strategy": "cadence", "diffusion_cadence": 4, "seamless_loop": True,
++           "loop_overlap_beats": 2.0}),
++        P("detailed_cadence", "Detailed: 60 fps, cadence 2",
++          {"render_strategy": "cadence", "diffusion_cadence": 2, "seamless_loop": True,
++           "loop_overlap_beats": 1.0}),
++        P("fast_rife", "Fast: 30 fps + RIFE x2",
++          {"render_strategy": "interpolate", "render_fps": "30", "interp_engine": "RIFE v4.6",
++           "diffusion_cadence": 2}),
++        P("dreamy_rife", "Dreamy: 15 fps + RIFE x4",
++          {"render_strategy": "interpolate", "render_fps": "15", "interp_engine": "RIFE v4.6",
++           "diffusion_cadence": 1}),
++        P("long_loop", "Long loop: 4 bars",
++          {"loop_bars": 4, "loop_overlap_beats": 2.0}),
++    ]),
++    "Motion 2D": ("motion2d", [
++        P("still", "Still",
++          {"zoom": 1.0, "angle": 0.0, "translation_x": 0.0, "translation_y": 0.0,
++           "transform_center_x": 0.5, "transform_center_y": 0.5}),
++        P("slow_zoom", "Slow zoom in", {"zoom": 1.003, "angle": 0.1}),
++        P("zoom_out_wrap", "Zoom out into tiles (wrap)", {"zoom": 0.99, "border": "wrap"}),
++        P("drift", "Sideways drift (wrap)", {"translation_x": 1.0, "border": "wrap"}),
++        P("offcenter_spiral", "Off-centre spiral",
++          {"angle": 0.5, "zoom": 1.004, "transform_center_x": 0.3, "transform_center_y": 0.35}),
++    ]),
++    "Motion 3D": ("motion3d", [
++        P("still", "Still",
++          {"translation_z": 0.0, "rotation_3d_x": 0.0, "rotation_3d_y": 0.0, "rotation_3d_z": 0.0}),
++        P("push", "Forward push", {"translation_z": 0.6}),
++        P("orbit", "Orbit", {"rotation_3d_y": 0.15, "translation_z": 0.2, "padding_mode": "reflection"}),
++        P("roll", "Push and roll", {"rotation_3d_z": 0.3, "translation_z": 0.4}),
++        P("pull_back", "Pull back (mirrored edges)", {"translation_z": -0.6, "padding_mode": "reflection"}),
++    ]),
++    "Camera & Depth": ("camera", [
++        P("standard", "Standard lens 70 degrees",
++          {"fov_schedule": 70.0, "midas_weight": 0.2, "use_depth_warping": True,
++           "enable_perspective_flip": False}),
++        P("wide", "Wide lens 100 degrees (more parallax)", {"fov_schedule": 100.0}),
++        P("tele", "Telephoto 35 degrees (flat, slow)", {"fov_schedule": 35.0}),
++        P("deep", "Deep relief (depth weight 0.5)", {"midas_weight": 0.5, "use_depth_warping": True}),
++        P("flip_tilt", "Perspective tilt 12 degrees",
++          {"enable_perspective_flip": True, "perspective_flip_theta": 12.0, "perspective_flip_fv": 53.0}),
++    ]),
++    "Diffusion": ("diffusion", [
++        P("steady", "Steady (keep 0.8, no noise): least flicker",
++          {"strength_schedule": 0.8, "noise_schedule": 0.0, "contrast_schedule": 1.0}),
++        P("balanced", "Balanced (keep 0.72, noise 0.015)",
++          {"strength_schedule": 0.72, "noise_schedule": 0.015, "contrast_schedule": 1.0}),
++        P("loose", "Loose (keep 0.55, noise 0.04): keeps reinventing",
++          {"strength_schedule": 0.55, "noise_schedule": 0.04}),
++        P("crisp", "Crisp LCM (CFG 2.0)", {"cfg_scale_schedule": 2.0}),
++        P("soft_dream", "Soft dream LCM (CFG 1.4, keep 0.78)",
++          {"cfg_scale_schedule": 1.4, "strength_schedule": 0.78}),
++    ]),
++    "Noise & Color": ("noise", [
++        P("fine_perlin", "Fine perlin noise",
++          {"noise_type": "perlin", "perlin_w": 8, "perlin_h": 8, "perlin_octaves": 4, "perlin_persistence": 0.5}),
++        P("coarse_perlin", "Coarse perlin (big soft blobs)",
++          {"noise_type": "perlin", "perlin_w": 2, "perlin_h": 2, "perlin_octaves": 2, "perlin_persistence": 0.6}),
++        P("uniform", "Uniform noise", {"noise_type": "uniform"}),
++        P("lock_lab", "Colour locked (LAB)", {"color_coherence": "LAB", "color_force_grayscale": False}),
++        P("free_colour", "Colour free to drift", {"color_coherence": "None", "color_force_grayscale": False}),
++    ]),
++    "Flow & Anti-blur": ("flow", [
++        P("deflicker", "Deflicker: RAFT cadence + RAFT redo (2x slower)",
++          {"optical_flow_cadence": "RAFT", "cadence_flow_factor_schedule": 1.0,
++           "optical_flow_redo_generation": "RAFT", "redo_flow_factor_schedule": 1.0}),
++        P("standard", "Standard: RAFT between cadence frames",
++          {"optical_flow_cadence": "RAFT", "optical_flow_redo_generation": "None"}),
++        P("fast", "Fast: DIS Medium", {"optical_flow_cadence": "DIS Medium", "optical_flow_redo_generation": "None"}),
++        P("off", "Off (plain blend between cadence frames)",
++          {"optical_flow_cadence": "None", "optical_flow_redo_generation": "None"}),
++        P("crisp", "Crisper (anti-blur 0.2)", {"amount_schedule": 0.2, "kernel_schedule": 5, "sigma_schedule": 1.0}),
++    ]),
++    "Hybrid Video": ("hybrid", [
++        P("off", "Off", {"hybrid_motion": "None", "hybrid_composite": "None"}),
++        P("flow_puppet", "Move like the video (optical flow)",
++          {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT", "hybrid_composite": "None",
++           "hybrid_motion_use_prev_img": False, "hybrid_flow_factor_schedule": 1.0}),
++        P("camera_copy", "Copy the video's camera (perspective)",
++          {"hybrid_motion": "Perspective", "hybrid_composite": "None"}),
++        P("ghost", "Flow + 25 % video ghost",
++          {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT", "hybrid_composite": "Normal",
++           "hybrid_comp_alpha_schedule": 0.25}),
++        P("sticky", "Sticky flow (from the generated image, consistency masked)",
++          {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT", "hybrid_motion_use_prev_img": True,
++           "hybrid_flow_consistency": True, "hybrid_consistency_blur": 2}),
++    ]),
++    "Mod Matrix": ("mods", [
++        P("off", "All slots off", _slots_off()),
++        P("kick_push", "Kick push (slot 1: translation Z decay each beat)",
++          _slot(1, "translation_z", "decay", 1.0, 1.2, 5.0)),
++        P("breathing_zoom", "Breathing zoom (slot 1: zoom sine over a bar)", _slot(1, "zoom", "sine", 4.0, 0.004)),
++        P("wobble", "Wobble (slot 1: pan sine over 2 beats)", _slot(1, "rotation_3d_y", "sine", 2.0, 0.3)),
++        P("hit_regenerate", "Regenerate on the beat (slot 2: Strength dip)",
++          _slot(2, "strength_schedule", "decay", 1.0, -0.15, 5.0)),
++    ]),
++    "Sweep Depth": ("sweep", [
++        P("off", "Off", {"sweep_enabled": False}),
++        P("glow_away", "Glow travelling away", dict(_SWEEP_GLOW, sweep_mode="max")),
++        P("glow_toward", "Glow rushing toward", dict(_SWEEP_GLOW, sweep_mode="min")),
++        P("pulses", "Ping-pong pulses (4 cycles, depth shaded)",
++          dict(_SWEEP_GLOW, sweep_mode="min", sweep_cycles=4.0, sweep_shape="pingpong", sweep_width=28,
++               sweep_fill="depth", sweep_softness=12, sweep_grow=10, sweep_blur=6.0, sweep_trail=16,
++               sweep_smooth=0.3)),
++        P("strobe", "Depth strobe (8 hard cycles)",
++          dict(_SWEEP_GLOW, sweep_cycles=8.0, sweep_width=12, sweep_softness=2, sweep_grow=2, sweep_blur=1.0,
++               sweep_trail=0, sweep_smooth=0.3)),
++        P("relief", "Full depth relief (whole depth map)",
++          dict(_SWEEP_GLOW, sweep_width=255, sweep_fill="depth", sweep_softness=0, sweep_grow=0,
++               sweep_blur=2.0, sweep_trail=0, sweep_smooth=0.5)),
++        P("peel_mask", "Peel mask (sweep drives the video mask)",
++          dict(_SWEEP_GLOW, sweep_as_mask=True, sweep_width=40, sweep_softness=16, sweep_grow=10,
++               sweep_blur=8.0, sweep_trail=20)),
++    ]),
++    "ControlNet Unit 1": ("cn1", _cn_presets(1)),
++    "ControlNet Unit 2": ("cn2", _cn_presets(2)),
++    "ControlNet Unit 3": ("cn3", _cn_presets(3)),
++    "Pipeline": ("pipeline", [
++        P("performance", "Performance (auto-load, reuse ComfyUI results)",
++          {"auto_load": True, "force_preprocess": False}),
++        P("fresh", "Fresh ComfyUI results every Queue", {"force_preprocess": True}),
++        P("continuous_feed", "Record TOP feeds continuously", {"feed_method": "continuous"}),
++    ]),
++}
++
++
++def api(page):
++    return "pagepreset_" + PAGES[page][0]
++
++
++def presets_for(page):
++    return PAGES[page][1]
++
++
++def get(page, name):
++    for preset in presets_for(page):
++        if preset.id == str(name or "").strip():
++            return preset
++    return None
++
++
++def names(page):
++    return [NONE] + [p.id for p in presets_for(page)]
++
++
++def labels(page):
++    return ["None"] + [p.label for p in presets_for(page)]
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+index f2dd4c8..6b37792 100644
+--- a/scripts/tdeforum/presets.py
++++ b/scripts/tdeforum/presets.py
+@@ -95,6 +95,13 @@ _SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "depth_a
+           "cn_1_guidance_end": 0.8, "cn_1_control_mode": "Balanced",
+           "strength_schedule": 0.55, "color_coherence": "LAB"}
+ 
++# Hybrid Video base: flow from the init video, cadence 2 with RAFT between diffusions, no loop
++# (the video does not loop); the sweep keys come from _SWEEP.
++_HYBRID_FLOW = {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT", "hybrid_composite": "None",
++                "hybrid_motion_use_prev_img": False, "hybrid_flow_consistency": False,
++                "hybrid_flow_factor_schedule": 1.0, "seamless_loop": False, "diffusion_cadence": 2,
++                "optical_flow_cadence": "RAFT"}
++
+ PRESETS = [
+     # ------------------------------------------------------------------ 3D
+     Preset("3d_tunnel_roll", "3D - Tunnel roll (good)", "3D", GOOD,
+@@ -236,6 +243,43 @@ PRESETS = [
+                                    "sweep_grow": 2, "sweep_blur": 1.0, "sweep_trail": 0, "sweep_smooth": 0.3,
+                                    "strength_schedule": 0.5, "cn_1_weight": 1.0, "cn_1_guidance_end": 0.9,
+                                    "cn_1_control_mode": "ControlNet is more important"})),
++    # ------------------------------------------------------------------ Hybrid Video
++    # 2D / 3D feedback loop steered by the init video (Hybrid Video page), with Sweep Depth of the
++    # same video as a QR Monster guide or as the mask. Cadence 2 + RAFT: half the diffusions, flow
++    # in between, which is where most of the smoothness comes from.
++    Preset("hybrid_flow_glow", "Hybrid - Flow glow (good)", "2D", GOOD,
++           "The dream moves with the video's optical flow while a soft depth band travels away through the "
++           "performer as a QR Monster glow. Needs Globals > Video Init Path.",
++           _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP, {"sweep_mode": "max", "strength_schedule": 0.7,
++                                                      "noise_schedule": 0.01, "color_coherence": "LAB"})),
++    Preset("hybrid_ghost_peel", "Hybrid - Ghost peel (good)", "3D", GOOD,
++           "Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the "
++           "band re-diffuses, so the scene is re-dreamed layer by layer toward you.",
++           _merge(_SMOOTH, _3D, _HYBRID_FLOW, _SWEEP,
++                  {"translation_z": 0.3, "hybrid_composite": "Normal", "hybrid_comp_alpha_schedule": 0.25,
++                   "cn_1_enabled": False, "sweep_as_mask": True, "sweep_mode": "min", "sweep_width": 36,
++                   "sweep_softness": 14, "sweep_grow": 10, "sweep_blur": 8.0, "sweep_trail": 16,
++                   "overlay_mask": True, "invert_mask": False, "strength_schedule": 0.6,
++                   "noise_schedule": 0.015})),
++    Preset("hybrid_camera_tide", "Hybrid - Camera tide (extreme)", "3D", EXTREME,
++           "Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive "
++           "QR Monster hard: the space surges like a tide through the video's own depth.",
++           _merge(_SMOOTH, _3D, _HYBRID_FLOW, _SWEEP,
++                  {"hybrid_motion": "Perspective", "translation_z": 0.2, "sweep_mode": "min", "sweep_cycles": 4.0,
++                   "sweep_shape": "pingpong", "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 12,
++                   "sweep_grow": 10, "sweep_blur": 6.0, "sweep_trail": 16, "strength_schedule": 0.6,
++                   "noise_schedule": 0.03, "cn_1_weight": 1.0, "cn_1_guidance_end": 1.0,
++                   "cn_1_control_mode": "ControlNet is more important"})),
++    Preset("hybrid_possession", "Hybrid - Possession (unorthodox)", "2D", UNORTHODOX,
++           "Sticky flow measured from the generated image, a faint after-generation echo of the video and the "
++           "whole depth map as relief: something else is wearing the performer's shape and movement.",
++           _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP,
++                  {"hybrid_motion_use_prev_img": True, "hybrid_flow_consistency": True,
++                   "hybrid_consistency_blur": 2, "hybrid_composite": "After Generation",
++                   "hybrid_comp_alpha_schedule": 0.15, "sweep_width": 255, "sweep_fill": "depth",
++                   "sweep_softness": 0, "sweep_grow": 0, "sweep_blur": 2.0, "sweep_trail": 0,
++                   "sweep_smooth": 0.5, "cn_1_weight": 0.9, "cn_1_guidance_end": 0.7,
++                   "strength_schedule": 0.65})),
+     # ------------------------------------------------------------------ Interpolation
+     # Every frame is drawn from noise (no previous frame), so with a fixed seed a frame is a pure
+     # function of its settings: modulate the seed itself and the loop closes perfectly.
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index e7e9cd7..45f9c57 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ 
+ import re
+ 
+-from . import feed, modulation, presets, prompt_presets, sweep, tempo
++from . import feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -415,6 +415,22 @@ FIELDS = [
+       label="Feed: recording method", target=None),
+ ]
+ 
++def _with_page_presets(fields):
++    """A Page Preset menu at the top of each page that has presets (Tempo: below the Example Preset)."""
++    out, done = [], set()
++    for f in fields:
++        page = f.page
++        if page in page_presets.PAGES and page not in done and not (page == PAGE_TEMPO and f.api.startswith("preset")):
++            done.add(page)
++            out.append(F(page_presets.api(page), page_presets.NONE, page, MENU, menu=page_presets.names(page),
++                         labels=page_presets.labels(page), label="Page Preset (%s)" % page, target=None))
++        out.append(f)
++    return out
++
++
++FIELDS = _with_page_presets(FIELDS)
++PAGE_PRESET_APIS = [page_presets.api(p) for p in PAGE_ORDER if p in page_presets.PAGES]
++
+ BY_API = dict((f.api, f) for f in FIELDS)
+ BY_TD = dict((f.td_name, f) for f in FIELDS)
+ MOD_FIELDS = [f for f in FIELDS if f.kind == MOD]
+diff --git a/scripts/tdeforum/sweep.py b/scripts/tdeforum/sweep.py
+index 5fb2fbc..17b3802 100644
+--- a/scripts/tdeforum/sweep.py
++++ b/scripts/tdeforum/sweep.py
+@@ -48,6 +48,8 @@ MODEL_LABELS = ["Depth Anything V2 small (vits, fast)", "Depth Anything V2 base
+                 "MiDaS", "Zoe"]
+ DEPTH_RESOLUTION = 512      # ComfyUI detect resolution for the sweep depth (the mask is resized anyway)
+ VIDEO_INPUT = "Video Input"
++# 2D / 3D: the init video is the Hybrid Video source; render frame k shows its frame k too.
++SWEEP_MODES = (VIDEO_INPUT, "2D", "3D")
+ RENDER_VERSION = 3          # bump when the pixels a job produces change
+ FOURCCS = ("mp4v", "avc1")  # first one the OpenCV build can open wins
+ _EPS = 1e-9
+@@ -113,8 +115,9 @@ def check(values):
+     """None when Sweep Depth can run, else why not (shown to the user)."""
+     if not enabled(values):
+         return "Guide Source is Sweep Depth but Sweep Depth is switched off (Sweep Depth page > On)"
+-    if str(values.get("animation_mode", "")) != VIDEO_INPUT:
+-        return "Sweep Depth needs Animation Mode = Video Input (it sweeps the depth of the init video)"
++    if str(values.get("animation_mode", "")) not in SWEEP_MODES:
++        return ("Sweep Depth needs Animation Mode = Video Input, or 2D / 3D with a Video Init Path "
++                "(Hybrid Video): it sweeps the depth of the init video")
+     if not str(values.get("video_init_path", "") or "").strip():
+         return "Sweep Depth needs a Video Init Path (Globals page)"
+     return None
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 24ddacd..8ef691a 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -30,6 +30,7 @@ from . import comfy
+ from . import config
+ from . import feed
+ from . import payload
++from . import page_presets
+ from . import presets
+ from . import prompt_presets
+ from . import schema
+@@ -57,6 +58,7 @@ COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give
+ COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
+ FEED_FINALIZE_TIMEOUT_S = 60.0
+ PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
++PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
+ PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
+ FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
+ CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+@@ -200,41 +202,17 @@ def apply_preset(root, force=False):
+     selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
+     stored = root.fetch(PRESET_KEY, None, search=False)
+     stored = dict(stored) if isinstance(stored, dict) else {}
+-    if selected == stored.get("applied", presets.NONE) and not (force and selected != presets.NONE):
++    if selected == stored.get("applied", presets.NONE) and not force:
+         return False
+ 
+-    restored = 0
+-    for name, value in (stored.get("backup") or {}).items():
+-        par = getattr(ui.par, name, None)
+-        if par is not None and _is_constant(par):
+-            par.val = value
+-            restored += 1
+-
++    pages = reset_page_presets(root)   # last on, first off: page presets sit on top of the example
++    restored = _restore_backup(ui, stored.get("backup"))
+     preset, backup, changed, kept = presets.get(selected), {}, 0, []
++    if preset is None and not restored and not pages and selected == stored.get("applied", presets.NONE):
++        return False
+     if preset is not None:
+         defaults = dict((f.api, f.default) for f in schema.FIELDS)
+-        for api, value in presets.resolve(preset, defaults).items():
+-            field = schema.BY_API.get(api)
+-            if field is None:
+-                log("preset %s: unknown parameter %r skipped" % (preset.id, api))
+-                continue
+-            targets = [(field.td_name, _coerce_par(field, value))]
+-            if field.kind == schema.MOD:
+-                targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
+-            for name, new in targets:
+-                par = getattr(ui.par, name, None)
+-                if par is None:
+-                    continue
+-                if not _is_constant(par):
+-                    kept.append(name)
+-                    continue
+-                if field.menu and name == field.td_name and new not in field.menu:
+-                    log("preset %s: %r is not a choice for %s, skipped" % (preset.id, new, name))
+-                    continue
+-                if par.val != new:
+-                    backup[name] = par.val
+-                    par.val = new
+-                    changed += 1
++        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id)
+     root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
+     if preset is None:
+         text = "None (restored %d parameters)" % restored
+@@ -250,6 +228,132 @@ def apply_preset(root, force=False):
+     return True
+ 
+ 
++def _restore_backup(ui, backup):
++    restored = 0
++    for name, value in (backup or {}).items():
++        par = getattr(ui.par, name, None)
++        if par is not None and _is_constant(par):
++            par.val = value
++            restored += 1
++    return restored
++
++
++def _lay_values(ui, values, what):
++    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept)."""
++    backup, changed, kept = {}, 0, []
++    for api, value in values.items():
++        field = schema.BY_API.get(api)
++        if field is None:
++            log("preset %s: unknown parameter %r skipped" % (what, api))
++            continue
++        targets = [(field.td_name, _coerce_par(field, value))]
++        if field.kind == schema.MOD:
++            targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
++        for name, new in targets:
++            par = getattr(ui.par, name, None)
++            if par is None:
++                continue
++            if not _is_constant(par):
++                kept.append(name)
++                continue
++            if field.menu and name == field.td_name and new not in field.menu:
++                log("preset %s: %r is not a choice for %s, skipped" % (what, new, name))
++                continue
++            if par.val != new:
++                backup[name] = par.val
++                par.val = new
++                changed += 1
++    return backup, changed, kept
++
++
++def _page_of(api_name):
++    for page in page_presets.PAGES:
++        if page_presets.api(page) == api_name:
++            return page
++    return None
++
++
++def apply_page_preset(root, page, force=False):
++    """A page's Page Preset menu: lay that page's preset over it (None puts its values back)."""
++    ui = _op(root, "ui")
++    field = schema.BY_API.get(page_presets.api(page))
++    menu = getattr(ui.par, field.td_name, None) if ui is not None and field is not None else None
++    if menu is None:
++        return False
++    selected = str(menu.eval() or page_presets.NONE).strip() or page_presets.NONE
++    allstored = dict(root.fetch(PAGE_PRESET_KEY, None, search=False) or {})
++    stored = dict(allstored.get(field.api) or {})
++    if selected == stored.get("applied", page_presets.NONE) and not (force and selected != page_presets.NONE):
++        return False
++    restored = _restore_backup(ui, stored.get("backup"))
++    preset = page_presets.get(page, selected)
++    backup, changed, kept = ({}, 0, []) if preset is None else _lay_values(ui, preset.values, field.api)
++    allstored[field.api] = {"applied": selected if preset else page_presets.NONE, "backup": backup}
++    root.store(PAGE_PRESET_KEY, allstored)
++    if preset is None:
++        log("page preset %s: None (restored %d parameters)" % (page, restored))
++    else:
++        log("page preset %s: %s (%d parameters set%s)" % (page, preset.label, changed,
++                                                          ", %d driven kept" % len(kept) if kept else ""))
++    return True
++
++
++def reset_page_presets(root):
++    """Every Page Preset (and the Prompt Preset) back to None, newest values first undone."""
++    ui = _op(root, "ui")
++    if ui is None:
++        return 0
++    allstored = dict(root.fetch(PAGE_PRESET_KEY, None, search=False) or {})
++    count = 0
++    for api_name, stored in list(allstored.items()):
++        if (stored or {}).get("applied", page_presets.NONE) != page_presets.NONE:
++            _restore_backup(ui, stored.get("backup"))
++            count += 1
++        allstored[api_name] = {"applied": page_presets.NONE, "backup": {}}
++    root.store(PAGE_PRESET_KEY, allstored)        # stored first: the menu changes below are no-ops
++    for api_name in schema.PAGE_PRESET_APIS:
++        par = getattr(ui.par, schema.BY_API[api_name].td_name, None)
++        if par is not None and str(par.eval()) != page_presets.NONE:
++            _set_constant(par, page_presets.NONE)
++    prompt_menu = getattr(ui.par, "Promptpreset", None)
++    if prompt_menu is not None and str(prompt_menu.eval()) != prompt_presets.NONE:
++        _set_constant(prompt_menu, prompt_presets.NONE)
++        apply_prompt_preset(root)
++        count += 1
++    if count:
++        log("page presets: %d put back to None" % count)
++    return count
++
++
++def on_ui_value(root, name):
++    """ui_exec: a watched menu changed."""
++    if name == "Preset":
++        return apply_preset(root)
++    if name == "Promptpreset":
++        return apply_prompt_preset(root)
++    for page in page_presets.PAGES:
++        if schema.BY_API[page_presets.api(page)].td_name == name:
++            return apply_page_preset(root, page)
++    return False
++
++
++def on_ui_pulse(root, name):
++    """ui_exec: a button on the COMP."""
++    if name == "Presetapply":
++        return apply_preset(root, force=True)
++    if name == "Promptedit":
++        return open_prompt_seq(root)
++    if name == "Sweepshowlatest":
++        return show_latest_sweep(root)
++    return False
++
++
++def ui_watched():
++    """TD names ui_exec watches."""
++    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest"] + \
++        [schema.BY_API[a].td_name for a in schema.PAGE_PRESET_APIS]
++
++
+ def apply_prompt_preset(root):
+     """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back)."""
+     ui = _op(root, "ui")
+diff --git a/scripts/ui_exec.py b/scripts/ui_exec.py
+index 0a50279..b82dbe8 100644
+--- a/scripts/ui_exec.py
++++ b/scripts/ui_exec.py
+@@ -1,11 +1,12 @@
+ # Parameter Execute DAT `ui_exec` (inside the deforum COMP; created and file-synced by
+-# build_master_ui). Watches the COMP's own buttons:
+-#   Preset         picking an Example Preset applies it at once (it is also checked at bake / Queue)
+-#   Presetapply    "Re-apply Preset": lays the selected preset over the COMP again
+-#   Promptedit     opens deforum/prompt_seq in a floating editor
+-#   Promptpreset   writes the picked visionary prompt into prompt_seq
++# build_master_ui). Watches the COMP's menus and buttons (list: td_controller.ui_watched()):
++#   Preset           the Example Preset applies when picked (also checked at bake / Queue)
++#   Presetapply      "Re-apply Preset"
++#   Pagepreset*      each page's Page Preset
++#   Promptpreset     writes the picked visionary prompt into prompt_seq
++#   Promptedit       opens deforum/prompt_seq in a floating editor
+ #   Sweepshowlatest  points sweep_preview (COMP output 2) at the newest Sweep Depth video
+-# Logic: tdeforum/td_controller.py.
++# Logic: tdeforum/td_controller.py (on_ui_value / on_ui_pulse).
+ 
+ 
+ def _ctl():
+@@ -20,18 +21,10 @@ def _ctl():
+ 
+ 
+ def onValueChange(par, prev):
+-    if par.name == 'Preset':
+-        _ctl().apply_preset(par.owner.parent())
+-    elif par.name == 'Promptpreset':
+-        _ctl().apply_prompt_preset(par.owner.parent())
++    _ctl().on_ui_value(par.owner.parent(), par.name)
+     return
+ 
+ 
+ def onPulse(par):
+-    if par.name == 'Presetapply':
+-        _ctl().apply_preset(par.owner.parent(), force=True)
+-    elif par.name == 'Promptedit':
+-        _ctl().open_prompt_seq(par.owner.parent())
+-    elif par.name == 'Sweepshowlatest':
+-        _ctl().show_latest_sweep(par.owner.parent())
++    _ctl().on_ui_pulse(par.owner.parent(), par.name)
+     return
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index 821ab36..fcd4717 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -275,8 +275,8 @@ class BuilderTest(unittest.TestCase):
+         from tdeforum import presets
+         comp = self.build()
+         self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
+-        self.assertEqual(len(presets.NAMES), 28)
+-        self.assertTrue(any("presets: 27 examples" in line for line in self.log), self.log[-6:])
++        self.assertEqual(len(presets.NAMES), 32)
++        self.assertTrue(any("presets: 31 examples" in line for line in self.log), self.log[-6:])
+ 
+     def test_sweep_preview_and_old_live_sweep_ops_removed(self):
+         comp = self.build()
+@@ -379,7 +379,8 @@ class BuilderTest(unittest.TestCase):
+         comp = self.build()
+         ui_exec = comp.op("ui_exec")
+         self.assertTrue(ui_exec.par.file.val.endswith("ui_exec.py"))
+-        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit Promptpreset Sweepshowlatest")
++        self.assertEqual(ui_exec.par.pars.val.split(), ctl.ui_watched())
++        self.assertIn("Pagepresetmotion3d", ui_exec.par.pars.val)
+         self.assertEqual(ui_exec.par.op.val, comp.path)
+         self.assertEqual((ui_exec.par.valuechange.val, ui_exec.par.onpulse.val), (1, 1))
+         for name in ("Presetapply", "Promptedit"):
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index 84698c2..c9c045c 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -4,14 +4,15 @@ import unittest
+ from _fakes import ParMode, make_network, ROOT_DIR  # noqa: F401  (puts scripts/ on sys.path)
+ import test_controller
+ from test_payload import KNOWN_KEYS, MODELS, _comp_values
+-from tdeforum import migrate, payload, presets, schema
++from tdeforum import migrate, payload, presets, schema, sweep
+ from tdeforum import td_controller as ctl
+ 
+ 
+ class PresetDataTest(unittest.TestCase):
+     def test_three_unorthodox_per_mode(self):
+         for mode in ("2D", "3D", "Video Input", "Interpolation"):
+-            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX]
++            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX
++                   and not p.id.startswith("hybrid_")]
+             self.assertEqual(len(odd), 3, mode)
+             for p in odd:
+                 self.assertIn("(unorthodox)", p.label)
+@@ -33,8 +34,25 @@ class PresetDataTest(unittest.TestCase):
+         self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
+         self.assertEqual(s["extract_nth_frame"], 1)
+ 
+-    def test_twentyseven_examples_good_and_extreme_per_mode(self):
+-        self.assertEqual(len(presets.PRESETS), 27)
++    def test_thirtyone_examples_good_and_extreme_per_mode(self):
++        self.assertEqual(len(presets.PRESETS), 31)
++
++    def test_four_hybrid_presets_use_the_video_and_the_sweep(self):
++        hybrids = [p for p in presets.PRESETS if p.id.startswith("hybrid_")]
++        self.assertEqual(len(hybrids), 4)
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for p in hybrids:
++            self.assertIn(p.mode, ("2D", "3D"))
++            self.assertNotEqual(p.values["hybrid_motion"], "None", p.id)
++            self.assertTrue(p.values["sweep_enabled"], p.id)
++            self.assertEqual(p.values["feed_1_mode"], "sweep", p.id)
++            values = _comp_values(**presets.resolve(p, defaults))
++            self.assertIsNone(sweep.check(values), p.id)
++            result = payload.build_request(values, {"0": "x"}, MODELS)
++            s = result["request"]["deforum_settings"]
++            self.assertIs(s["hybrid_generate_inputframes"], True, p.id)
++            self.assertEqual(s["diffusion_cadence"], 2, p.id)
++        self.assertTrue(presets.BY_ID["hybrid_ghost_peel"].values["sweep_as_mask"])
+         for mode in ("3D", "2D", "Video Input"):
+             levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
+             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
+@@ -303,3 +321,87 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++class PagePresetDataTest(unittest.TestCase):
++    def test_every_page_but_globals_has_a_menu_first(self):
++        from tdeforum import page_presets
++        for page in schema.PAGE_ORDER:
++            fields = [f for f in schema.FIELDS if f.page == page]
++            if page in (schema.PAGE_GLOBALS, schema.PAGE_PROMPTS):
++                self.assertFalse([f for f in fields if f.api.startswith("pagepreset")], page)
++                continue
++            self.assertIn(page, page_presets.PAGES, page)
++            menu = schema.BY_API[page_presets.api(page)]
++            first = [f.api for f in fields if not f.api.startswith("preset")][0]
++            self.assertEqual(first, menu.api, page)
++            self.assertEqual(menu.menu[0], "none")
++        self.assertIn("prompt_preset", schema.BY_API)          # the Prompts page's own preset
++
++    def test_page_presets_only_touch_their_page_with_valid_values(self):
++        from tdeforum import page_presets
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for page, (_slug, items) in page_presets.PAGES.items():
++            self.assertGreaterEqual(len(items), 3, page)
++            for preset in items:
++                for api, value in preset.values.items():
++                    field = schema.BY_API[api]
++                    self.assertEqual(field.page, page, "%s/%s: %s" % (page, preset.id, api))
++                    if field.menu:
++                        self.assertIn(value, field.menu, "%s/%s: %s" % (page, preset.id, api))
++                values = _comp_values(**dict(defaults, **preset.values))
++                result = payload.build_request(values, {"0": "x"}, MODELS)
++                bad = [w for w in result["warnings"] if "LCM" in w or "outside" in w or "-only" not in w and
++                       "int(steps" in w]
++                self.assertEqual(bad, [], "%s/%s: %s" % (page, preset.id, result["warnings"]))
++
++
++class PagePresetApplyTest(test_controller.ControllerTest.__bases__[0]):
++    setUp = test_controller.ControllerTest.setUp
++    make = ApplyPresetTest.make
++
++    def test_page_preset_applies_and_none_restores(self):
++        ui = self.make()
++        ui.par.Pagepresetmotion3d.val = "orbit"
++        self.assertTrue(ctl.on_ui_value(self.root, "Pagepresetmotion3d"))
++        self.assertEqual((ui.par.Rotation3dy.val, ui.par.Paddingmode.val), (0.15, "reflection"))
++        ui.par.Pagepresetmotion3d.val = "push"                  # switching restores first
++        ctl.on_ui_value(self.root, "Pagepresetmotion3d")
++        self.assertEqual((ui.par.Rotation3dy.val, ui.par.Translationz.val, ui.par.Paddingmode.val),
++                         (0.0, 0.6, "border"))
++        ui.par.Pagepresetmotion3d.val = "none"
++        ctl.on_ui_value(self.root, "Pagepresetmotion3d")
++        self.assertEqual(ui.par.Translationz.val, 0.0)
++
++    def test_page_presets_stack_and_the_example_preset_resets_them(self):
++        ui = self.make()
++        ui.par.Pagepresetcamera.val = "wide"
++        ctl.on_ui_value(self.root, "Pagepresetcamera")
++        ui.par.Pagepresetflow.val = "deflicker"
++        ctl.on_ui_value(self.root, "Pagepresetflow")
++        ui.par.Promptpreset.val = "cosmic_eye"
++        ctl.on_ui_value(self.root, "Promptpreset")
++        self.assertEqual((ui.par.Fovschedule.val, ui.par.Opticalflowredogeneration.val), (100.0, "RAFT"))
++        ui.par.Preset.val = "3d_tunnel_roll"
++        ctl.on_ui_value(self.root, "Preset")
++        self.assertEqual((ui.par.Pagepresetcamera.val, ui.par.Pagepresetflow.val, ui.par.Promptpreset.val),
++                         ("none", "none", "none"))
++        self.assertEqual(ui.par.Opticalflowredogeneration.val, "None")
++        self.assertEqual(ui.op("prompt_seq").rows[-1], ["0", "gold", ""])
++        self.assertEqual(ui.par.Fovschedule.val, 70.0)             # the example's own value
++        ui.par.Pagepresetcamera.val = "tele"                       # on top of the example
++        ctl.on_ui_value(self.root, "Pagepresetcamera")
++        self.assertEqual(ui.par.Fovschedule.val, 35.0)
++        ui.par.Preset.val = "none"
++        ctl.on_ui_value(self.root, "Preset")
++        self.assertEqual((ui.par.Pagepresetcamera.val, ui.par.Fovschedule.val), ("none", 70.0))
++        self.assertEqual(ui.par.Animationmode.val, "3D")
++
++    def test_reapply_with_none_clears_page_presets(self):
++        ui = self.make()
++        ui.par.Pagepresetdiffusion.val = "steady"
++        ctl.on_ui_value(self.root, "Pagepresetdiffusion")
++        self.assertEqual(ui.par.Strengthschedule.val, 0.8)
++        self.assertTrue(ctl.on_ui_pulse(self.root, "Presetapply"))
++        self.assertEqual((ui.par.Pagepresetdiffusion.val, ui.par.Strengthschedule.val),
++                         ("none", schema.BY_API["strength_schedule"].default))
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index 9da7dde..5c1e29a 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -91,7 +91,8 @@ class PlanTest(unittest.TestCase):
+         ok = {"sweep_enabled": True, "animation_mode": "Video Input", "video_init_path": "/x.mp4"}
+         self.assertIsNone(sweep.check(ok))
+         self.assertIn("switched off", sweep.check(dict(ok, sweep_enabled=False)))
+-        self.assertIn("Video Input", sweep.check(dict(ok, animation_mode="3D")))
++        self.assertIsNone(sweep.check(dict(ok, animation_mode="3D")))           # Hybrid Video source
++        self.assertIn("Video Input", sweep.check(dict(ok, animation_mode="Interpolation")))
+         self.assertIn("Video Init Path", sweep.check(dict(ok, video_init_path="")))
+ 
+ 
+@@ -293,7 +294,7 @@ class ConfigViewTest(unittest.TestCase):
+ class SchemaFeedTest(unittest.TestCase):
+     def test_fields_and_page(self):
+         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
+-        fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP]
++        fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP and not f.api.startswith("pagepreset")]
+         self.assertEqual(sorted(f.api for f in fields), sorted(
+             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
+              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
+@@ -581,8 +582,20 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.assertIn("245-255 at the start", text)
+         self.assertIn("-> ControlNet 1", text)
+ 
++    def test_hybrid_2d_render_uses_the_sweep_as_its_guide(self):
++        ui = self.make(animation_mode="2D", hybrid_motion="Optical Flow", hybrid_composite="None")
++        ctl.queue(self.root)
++        self.depth_done()
++        self.tick()
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        s = self.sent()
++        self.assertEqual((s["animation_mode"], s["hybrid_motion"]), ("2D", "Optical Flow"))
++        self.assertIs(s["hybrid_generate_inputframes"], True)
++        self.assertIn("cn_sweep_", s["cn_1_vid_path"])
++        self.assertEqual(len(read_video(config.to_share(self.cfg, s["cn_1_vid_path"]))), s["max_frames"])
++
+     def test_wrong_animation_mode_fails_with_a_reason(self):
+-        self.make(animation_mode="3D")
++        self.make(animation_mode="Interpolation")
+         ctl.queue(self.root)
+         self.assertEqual(self.root.op("webclient_comfyui").requests, [])
+         self.assertIn("Video Input", self.ui.par.Pipelinestatus.val)
+-- 
+2.43.0
+

@@ -1,0 +1,1371 @@
+From 87286d480b3e5ad5681140fd1f549063b30b053b Mon Sep 17 00:00:00 2001
+From: Claude <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 00:02:33 +0000
+Subject: [PATCH] Sweep Depth: sweeping depth band as ControlNet guide / mask
+ (Video Input)
+
+ComfyUI depth video -> sweep_depth Movie File In -> sweep_mask Script TOP,
+recorded sequentially through the TOP feed capture. New Sweep Depth page,
+Guide Source "sweep", three example presets, doctor/preview output, tests.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  22 ++-
+ ROADMAP.md                        |   4 +-
+ scripts/build_master_ui.py        |  22 +++
+ scripts/sweep_script_top.py       |  28 +++
+ scripts/tdeforum/__init__.py      |   2 +-
+ scripts/tdeforum/feed.py          |  28 ++-
+ scripts/tdeforum/presets.py       |  30 ++-
+ scripts/tdeforum/schema.py        |  27 ++-
+ scripts/tdeforum/sweep.py         | 195 +++++++++++++++++++
+ scripts/tdeforum/td_controller.py | 187 +++++++++++++++---
+ tests/_fakes.py                   |   4 +-
+ tests/test_builder.py             |  19 +-
+ tests/test_presets.py             |  20 +-
+ tests/test_sweep.py               | 309 ++++++++++++++++++++++++++++++
+ 14 files changed, 843 insertions(+), 54 deletions(-)
+ create mode 100644 scripts/sweep_script_top.py
+ create mode 100644 scripts/tdeforum/sweep.py
+ create mode 100644 tests/test_sweep.py
+
+diff --git a/README.md b/README.md
+index 861b51c..ef04442 100644
+--- a/README.md
++++ b/README.md
+@@ -106,13 +106,13 @@ Notes:
+ 
+ ### Example presets
+ 
+-*Tempo › Example Preset* (first page of the COMP) lays one of 12 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+ 
+ * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+ * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+ * Motion (2D/3D camera) and the Mod Matrix slots a preset does not mention are set to the baseline, so each example starts from a neutral camera.
+ * The values a preset replaced are remembered: pick another preset, or **None**, and press bake to get them back first. Your own tweaks after applying stay until the selection changes.
+-* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts and ControlNet are never touched.
++* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts are never touched. ControlNet is left alone too, except by the three *Depth sweep* examples (below), which take over unit 1.
+ 
+ | id | name | what it does |
+ |---|---|---|
+@@ -128,6 +128,21 @@ Notes:
+ | `2d_twirl` | 2D - Twirl (extreme) | Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2). |
+ | `video_soft_restyle` | Video Input - Soft restyle (good) | Keeps most of the init video's structure and colour; frames follow the video (needs Globals > Video Init Path). |
+ | `video_melt` | Video Input - Melt (extreme) | Loose hold on the video: heavy restyle, extra noise, no colour matching. |
++| `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep, nearest levels (245-255) to farthest (0-10): the white band seems to travel away from you. |
++| `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same the other way: farthest levels first, ending on the nearest. |
++| `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps, wide band that keeps the depth shading, strong ControlNet, loose hold. |
++
++### Sweep Depth (Animation Mode = Video Input)
++
++A moving band through the depth of your init video, recorded as a ControlNet guide (and optionally the mask video).
++
++1. **Sweep Depth** page: switch it **On**, pick a depth preprocessor, then on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
++2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`, 240 in a 240-frame project) through the same workflow as *Preprocess via ComfyUI*; the result is cached like it.
++3. TouchDesigner plays that depth video through `sweep_depth` -> the Script TOP `sweep_mask`, which keeps only the grey band for the frame being recorded (white inside the band, black elsewhere) and records one frame per render frame, exactly like the TOP feeds. The finished movie becomes the unit's `vid_path`.
++
++Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse. *Cycles* repeats it over the render, *Shape* = ping-pong goes out and back, *Direction* = reverse swaps start and end, *Band Width* / *Edge Softness* are in grey levels (of 255), *Band Fill* = Depth keeps the depth shading inside the band, *Also use as Video Mask* sets `video_mask_path` / `use_mask_video` to the same movie (the unit may then stay off). The log and the *Sweep Plan* field show the band at the first and last frame.
++
++Render frame k shows source frame `extract_from + k * nth`, and the sweep position follows k, so the sweep is recorded sequentially (the timeline is lengthened for the recording and restored, as for any feed).
+ 
+ ### Tempo
+ 
+@@ -198,7 +213,8 @@ scripts/
+     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+-    presets.py         # 12 example configurations (Example Preset drop-down)
++    sweep.py           # Sweep Depth: band maths + numpy mask for the depth video
++    presets.py         # 15 example configurations (Example Preset drop-down)
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+     comfy.py           # ComfyUI request / history parsing
+diff --git a/ROADMAP.md b/ROADMAP.md
+index a52c19a..f38b9c5 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,9 +46,11 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+ - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+ - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+-- [x] Example Preset drop-down: 12 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
++- [x] Example Preset drop-down: 15 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
+ - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+ 
++- [x] Sweep Depth (Video Input): ComfyUI depth video -> sweeping grey band -> ControlNet guide / mask video, plus three examples in the preset list. Unverified in TouchDesigner: Script TOP numpy calls, Movie File In index/preread.
++
+ ### 🚧 In Progress
+ - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
+ - [ ] Container Networking: Spin up the ComfyUI Docker container and verify volume mounts to `/opt/a1111/td_inputs` and `/td_masks`.
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 2909bbd..f701430 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -225,6 +225,28 @@ def build_inner(comp, values):
+         if kind is not None:
+             _set_menu(kind, 'movie')
+ 
++    # Sweep Depth: depth video player -> band mask. The controller sets `index` and the stored
++    # band per recorded frame (Sweep Depth page); nothing here runs until a sweep is queued.
++    depth = _get(comp, moviefileinTOP, td_controller.SWEEP_DEPTH, -300, -700)
++    mode = getattr(depth.par, 'playmode', None)
++    if mode is not None:
++        _set_menu(mode, 'specify', 'specifyindex')
++    unit = getattr(depth.par, 'indexunit', None)
++    if unit is not None:
++        _set_menu(unit, 'indices', 'index', 'frames')
++    pre = getattr(depth.par, 'prereadframes', None)
++    if pre is not None:
++        pre.val = 0
++    sweep_mask = _get(comp, scriptTOP, td_controller.SWEEP_MASK, -50, -700)
++    sweep_mask.inputConnectors[0].connect(depth)
++    callbacks = _get(comp, textDAT, 'sweep_callbacks', -50, -850)
++    callbacks.par.file.val = _scripts + '/sweep_script_top.py'
++    callbacks.par.syncfile.val = 1
++    if getattr(sweep_mask.par, 'callbacks', None) is not None:
++        sweep_mask.par.callbacks.val = callbacks
++    else:
++        say('NOTE %s has no callbacks parameter; point it at sweep_callbacks by hand' % sweep_mask.name)
++
+     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
+     cross.inputConnectors[0].connect(head)
+     cross.inputConnectors[1].connect(tail)
+diff --git a/scripts/sweep_script_top.py b/scripts/sweep_script_top.py
+new file mode 100644
+index 0000000..9bdcd4e
+--- /dev/null
++++ b/scripts/sweep_script_top.py
+@@ -0,0 +1,28 @@
++# Script TOP callbacks `sweep_callbacks` (inside the deforum COMP; created and file-synced by
++# build_master_ui). The Script TOP `sweep_mask` takes the depth video (`sweep_depth`, white =
++# near) and keeps only the grey band that td_controller stored for the frame being recorded;
++# the rest goes black. The maths is tdeforum/sweep.py.
++
++
++def _sweep():
++    import os
++    import sys
++    path = me.par.file.eval()
++    scripts = os.path.dirname(path) if path else 'T:/scripts'
++    if scripts not in sys.path:
++        sys.path.insert(0, scripts)
++    from tdeforum import sweep
++    return sweep
++
++
++def onSetupParameters(scriptOp):
++    return
++
++
++def onPulse(par):
++    return
++
++
++def onCook(scriptOp):
++    _sweep().cook(scriptOp)
++    return
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index cbdb834..33a2816 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -26,7 +26,7 @@ import sys
+ __version__ = "0.4.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/feed.py b/scripts/tdeforum/feed.py
+index 32c74fa..baade5c 100644
+--- a/scripts/tdeforum/feed.py
++++ b/scripts/tdeforum/feed.py
+@@ -23,9 +23,10 @@ import posixpath
+ from . import config
+ from . import tempo
+ 
+-FILE, TOP_LOOP, TOP_STILL = "file", "top_loop", "top_still"
+-MODES = [FILE, TOP_LOOP, TOP_STILL]
+-MODE_LABELS = ["Existing file (Vid Path)", "TOP: record the loop", "TOP: one still frame"]
++FILE, TOP_LOOP, TOP_STILL, SWEEP = "file", "top_loop", "top_still", "sweep"
++MODES = [FILE, TOP_LOOP, TOP_STILL, SWEEP]
++MODE_LABELS = ["Existing file (Vid Path)", "TOP: record the loop", "TOP: one still frame",
++               "Sweep Depth (Video Input: sweeping band of the depth video)"]
+ ADD_FRAME, CONTINUOUS = "addframe", "continuous"
+ METHODS = [ADD_FRAME, CONTINUOUS]
+ METHOD_LABELS = ["Add Frame, one pulse per planned frame (exact)",
+@@ -58,11 +59,18 @@ def mode_of(values, unit):
+ 
+ 
+ def requests(values, units=UNITS):
+-    """Enabled units whose guide must be captured from a TOP before rendering."""
++    """Units whose guide must be captured from a TOP before rendering.
++
++    Enabled units whose Guide Source is not "file". A Sweep Depth unit is also recorded while
++    it is switched off when *Sweep Depth > Also use as mask video* is on (mask-only use).
++    """
++    mask_only = _truthy(values.get("sweep_as_mask", False)) and _truthy(values.get("sweep_enabled", False))
+     out = []
+     for unit in range(1, units + 1):
+         mode = mode_of(values, unit)
+-        if mode != FILE and _truthy(values.get("cn_%d_enabled" % unit, False)):
++        if mode == FILE:
++            continue
++        if _truthy(values.get("cn_%d_enabled" % unit, False)) or (mode == SWEEP and mask_only):
+             out.append(Request(unit, mode, str(values.get("feed_%d_top" % unit, "") or "").strip()))
+     return out
+ 
+@@ -91,13 +99,15 @@ def project_frames_per_loop(tp, project_rate):
+     return tp["loop_beats"] * tempo.frames_per_beat(tp["bpm"], project_rate)
+ 
+ 
+-def frame_plan(tp, total, project_rate, loop_start):
++def frame_plan(tp, total, project_rate, loop_start, wrap=True):
+     """Timeline frame to show for every render frame.
+ 
+     tp            tempo.plan() dict, or None when the length is manual
+     total         number of render frames Deforum will render (max_frames)
+     project_rate  the timeline's frame rate (usually 60)
+     loop_start    timeline frame where the loop starts (usually 1)
++    wrap          False: frames run on past the loop (Sweep Depth needs each render frame
++                  to be its own timeline frame; the recorder lengthens the timeline)
+ 
+     Returns {"frames": [timeline frame per render frame], "step": project frames
+     per render frame, "loop": project frames per loop or None, "warnings": [...]}.
+@@ -129,10 +139,10 @@ def frame_plan(tp, total, project_rate, loop_start):
+     frames = []
+     for k in range(total):
+         offset = k * step
+-        if loop:
++        if loop and wrap:
+             offset %= loop
+         frames.append(int(loop_start) + offset)
+-    return {"frames": frames, "step": step, "loop": loop, "warnings": warnings}
++    return {"frames": frames, "step": step, "loop": loop, "wrap": bool(wrap), "warnings": warnings}
+ 
+ 
+ def describe(plan):
+@@ -140,7 +150,7 @@ def describe(plan):
+     text = "%d frames, timeline %d..%d" % (len(frames), min(frames), max(frames))
+     if plan["step"] > 1:
+         text += " every %d" % plan["step"]
+-    if plan["loop"] and len(frames) * plan["step"] > plan["loop"]:
++    if plan["loop"] and plan.get("wrap", True) and len(frames) * plan["step"] > plan["loop"]:
+         text += ", wrapping at %d" % plan["loop"]
+     return text
+ 
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+index 9589191..37c4bdd 100644
+--- a/scripts/tdeforum/presets.py
++++ b/scripts/tdeforum/presets.py
+@@ -14,7 +14,9 @@ the TouchDesigner side:
+   beat the preset's base value).
+ 
+ Never touched: seed and seed behaviour (the baseline is Iterate +1, seed 424242), sampler,
+-steps, CFG, size, model, prompts, ControlNet. Tune those for your checkpoint once.
++steps, CFG, size, model, prompts. ControlNet is left alone too, except by the "Depth sweep"
++examples, which switch Sweep Depth on and take over ControlNet unit 1 as its guide (they need
++Globals > Video Init Path and are put back like everything else when you choose None).
+ 
+ Units, at the 60 fps default: translation is Deforum units per frame (``translate_xyz`` =
+ -translation / 200, positive Z = forward), rotation is degrees per frame, 2D zoom is a factor per
+@@ -71,6 +73,12 @@ _3D = {"animation_mode": "3D", "use_depth_warping": True, "fov_schedule": 70.0,
+ _2D = {"animation_mode": "2D", "border": "replicate"}
+ _VIDEO = {"animation_mode": "Video Input", "seamless_loop": False, "diffusion_cadence": 1,
+           "optical_flow_cadence": "None", "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0}
++# Sweep Depth: the depth video's band is recorded as ControlNet unit 1's guide (QR Monster).
++_SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "DepthAnythingV2Preprocessor",
++          "sweep_softness": 6, "sweep_fill": "white", "sweep_shape": "ramp", "sweep_direction": "forward",
++          "feed_1_mode": "sweep", "cn_1_enabled": True, "cn_1_module": "none",
++          "cn_1_model": "ctrl_v1p_qr_monster_v2", "cn_1_guidance_start": 0.0, "cn_1_guidance_end": 1.0,
++          "cn_1_control_mode": "Balanced"}
+ 
+ PRESETS = [
+     # ------------------------------------------------------------------ 3D
+@@ -130,6 +138,26 @@ PRESETS = [
+            "Loose hold on the video: heavy restyle, extra noise, no colour matching.",
+            _merge(_VIDEO, {"strength_schedule": 0.3, "noise_schedule": 0.1, "noise_multiplier_schedule": 1.1,
+                            "color_coherence": "None"})),
++    Preset("video_depth_sweep_away", "Video Input - Depth sweep away (good)", "Video Input", GOOD,
++           "One slow sweep: a white band starts on the nearest levels (245-255) of the video's depth and "
++           "ends on the farthest (0-10), so the glow seems to travel away from you. Needs Globals > "
++           "Video Init Path; uses ControlNet unit 1.",
++           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
++                                   "sweep_mode": "max", "sweep_cycles": 1.0, "sweep_width": 14,
++                                   "cn_1_weight": 0.9})),
++    Preset("video_depth_sweep_toward", "Video Input - Depth sweep toward (good)", "Video Input", GOOD,
++           "The same, the other way: the band starts on the farthest levels and ends on the nearest, so it "
++           "seems to rush toward you.",
++           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
++                                   "sweep_mode": "min", "sweep_cycles": 1.0, "sweep_width": 14,
++                                   "cn_1_weight": 0.9})),
++    Preset("video_depth_sweep_pulses", "Video Input - Depth sweep pulses (extreme)", "Video Input", EXTREME,
++           "Four out-and-back sweeps with a wide band that keeps the depth shading, strong ControlNet, "
++           "loose hold on the video: the picture pulses through the depth layers.",
++           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.4, "noise_schedule": 0.08, "color_coherence": "None",
++                                   "sweep_mode": "min", "sweep_cycles": 4.0, "sweep_shape": "pingpong",
++                                   "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 10,
++                                   "cn_1_weight": 1.3, "cn_1_control_mode": "ControlNet is more important"})),
+ ]
+ 
+ BY_ID = dict((p.id, p) for p in PRESETS)
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 1e58430..fbbe71f 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ 
+ import re
+ 
+-from . import feed, modulation, presets, tempo
++from . import feed, modulation, presets, sweep, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -40,6 +40,7 @@ PAGE_DIFFUSION = "Diffusion"
+ PAGE_NOISE = "Noise & Color"
+ PAGE_FLOW = "Flow & Anti-blur"
+ PAGE_MODS = "Mod Matrix"
++PAGE_SWEEP = "Sweep Depth"
+ CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
+ PAGE_CNS = ["ControlNet Unit %d" % n for n in range(1, CN_UI_UNITS + 1)]
+ PAGE_CN1 = PAGE_CNS[0]
+@@ -47,7 +48,7 @@ PAGE_PIPELINE = "Pipeline"
+ 
+ PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
+               PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
+-              ] + PAGE_CNS + [PAGE_PIPELINE]
++              PAGE_SWEEP] + PAGE_CNS + [PAGE_PIPELINE]
+ 
+ # Kinds understood by build_master_ui.py and payload.py
+ STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
+@@ -121,6 +122,7 @@ F = Field
+ TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
+     PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
+     PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
++SW = PAGE_SWEEP
+ 
+ COMFY_PREPROCESSORS = [
+     "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
+@@ -336,7 +338,26 @@ FIELDS = [
+       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
+     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
+     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
+-] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] \
++] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
++
++    # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------
++    F("sweep_enabled", False, SW, TOGGLE, label="Sweep Depth On", target=None),
++    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
++      target=None),
++    F("sweep_mode", sweep.MAX, SW, MENU, menu=sweep.MODES, labels=sweep.MODE_LABELS, label="Mode", target=None),
++    F("sweep_cycles", 1.0, SW, FLOAT, norm=(0.25, 16), label="Cycles (sweeps over the render)", target=None),
++    F("sweep_shape", sweep.RAMP, SW, MENU, menu=sweep.SHAPES, labels=sweep.SHAPE_LABELS, label="Shape",
++      target=None),
++    F("sweep_direction", sweep.FORWARD, SW, MENU, menu=sweep.DIRECTIONS, labels=sweep.DIRECTION_LABELS,
++      label="Direction", target=None),
++    F("sweep_width", 10, SW, INT, norm=(1, 128), label="Band Width (grey levels of 255)", target=None),
++    F("sweep_softness", 0, SW, INT, norm=(0, 64), label="Edge Softness (grey levels)", target=None),
++    F("sweep_fill", sweep.WHITE, SW, MENU, menu=sweep.FILLS, labels=sweep.FILL_LABELS, label="Band Fill",
++      target=None),
++    F("sweep_as_mask", False, SW, TOGGLE, label="Also use as Video Mask", target=None),
++    F("sweep_depth_path", "", SW, STATUS, label="Depth Video", target=None),
++    F("sweep_info", "", SW, STATUS, label="Sweep Plan", target=None),
++] \
+   + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
+     # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------
+     F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),
+diff --git a/scripts/tdeforum/sweep.py b/scripts/tdeforum/sweep.py
+new file mode 100644
+index 0000000..64c8d0f
+--- /dev/null
++++ b/scripts/tdeforum/sweep.py
+@@ -0,0 +1,195 @@
++"""Sweep Depth: a moving band through a depth video, recorded as a ControlNet / mask video.
++
++The idea (Animation Mode = Video Input): ComfyUI turns the init video into a depth video
++(white = near, black = far, the DepthAnything / MiDaS convention). Frame by frame a *band*
++of grey levels is kept white and everything outside it goes black. The band slides through
++the whole 0-255 range over the length of the render, so the white sweep seems to travel
++away from the viewer (mode ``max``: starts on the nearest levels 245-255 and ends on 0-10)
++or towards the viewer (mode ``min``: the opposite).
++
++This module is the pure part: settings, the position of the band for each render frame, and
++the mask itself (numpy). td_controller.py records the result through the same timeline-stepped
++capture as the TOP feeds (the Script TOP ``sweep_mask`` inside the deforum COMP calls
++:func:`cook`; ``sweep_depth`` is the Movie File In TOP that plays the depth video).
++"""
++
++MAX, MIN = "max", "min"
++MODES = [MAX, MIN]
++MODE_LABELS = ["Max: nearest (white) levels first, sweeps away from the viewer",
++               "Min: farthest (black) levels first, sweeps toward the viewer"]
++RAMP, PINGPONG = "ramp", "pingpong"
++SHAPES = [RAMP, PINGPONG]
++SHAPE_LABELS = ["Ramp (every cycle restarts)", "Ping-pong (every cycle goes out and back)"]
++FORWARD, REVERSE = "forward", "reverse"
++DIRECTIONS = [FORWARD, REVERSE]
++DIRECTION_LABELS = ["Forward (as the mode says)", "Reverse (swap start and end)"]
++WHITE, DEPTH = "white", "depth"
++FILLS = [WHITE, DEPTH]
++FILL_LABELS = ["White (a flat white band)", "Depth (keep the depth shading inside the band)"]
++# ComfyUI AIO_Preprocessor names that make a depth map (comfyui_controlnet_aux).
++MODELS = ["DepthAnythingV2Preprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]
++VIDEO_INPUT = "Video Input"
++SCRIPT_BAND_KEY = "sweep_band"     # Script TOP storage: (lo, hi, softness, fill)
++_EPS = 1e-9
++
++
++def _truthy(value):
++    if isinstance(value, str):
++        return value.strip().lower() in ("1", "true", "yes", "on")
++    return bool(value)
++
++
++def _num(value, default):
++    try:
++        return float(value)
++    except (TypeError, ValueError):
++        return float(default)
++
++
++class Settings(object):
++    __slots__ = ("mode", "cycles", "shape", "direction", "width", "softness", "fill", "model")
++
++    def __init__(self, mode=MAX, cycles=1.0, shape=RAMP, direction=FORWARD, width=10,
++                 softness=0, fill=WHITE, model=MODELS[0]):
++        self.mode = mode if mode in MODES else MAX
++        self.cycles = max(0.05, float(cycles))
++        self.shape = shape if shape in SHAPES else RAMP
++        self.direction = direction if direction in DIRECTIONS else FORWARD
++        self.width = min(255.0, max(1.0, float(width)))
++        self.softness = min(128.0, max(0.0, float(softness)))
++        self.fill = fill if fill in FILLS else WHITE
++        self.model = model if model else MODELS[0]
++
++
++def from_values(values):
++    """Settings from COMP values (the sweep_* fields); missing keys use the defaults."""
++    get = values.get
++    return Settings(
++        mode=str(get("sweep_mode", MAX)), cycles=_num(get("sweep_cycles", 1), 1),
++        shape=str(get("sweep_shape", RAMP)), direction=str(get("sweep_direction", FORWARD)),
++        width=_num(get("sweep_width", 10), 10), softness=_num(get("sweep_softness", 0), 0),
++        fill=str(get("sweep_fill", WHITE)), model=str(get("sweep_model", MODELS[0]) or MODELS[0]))
++
++
++def enabled(values):
++    return _truthy(values.get("sweep_enabled", False))
++
++
++def check(values):
++    """None when Sweep Depth can run, else why not (shown to the user)."""
++    if not enabled(values):
++        return "Guide Source is Sweep Depth but Sweep Depth is switched off (Sweep Depth page > On)"
++    if str(values.get("animation_mode", "")) != VIDEO_INPUT:
++        return "Sweep Depth needs Animation Mode = Video Input (it sweeps the depth of the init video)"
++    if not str(values.get("video_init_path", "") or "").strip():
++        return "Sweep Depth needs a Video Init Path (Globals page)"
++    return None
++
++
++def position(k, total, s):
++    """Where the band is at render frame k: 0 = the start band, 1 = the end band.
++
++    ``ramp``: one sweep per cycle, restarting each cycle; the very last frame of a whole number
++    of cycles lands on 1 so a single cycle really ends on the far band.
++    ``pingpong``: a cycle goes 0 -> 1 -> 0.
++    """
++    total = max(1, int(total))
++    u = k / float(total - 1) if total > 1 else 0.0
++    phase = u * s.cycles
++    if s.shape == PINGPONG:
++        x = (phase * 2.0) % 2.0
++        p = x if x <= 1.0 else 2.0 - x
++    else:
++        p = phase % 1.0
++        if u >= 1.0 - _EPS and phase > 0 and abs(phase - round(phase)) < 1e-6:
++            p = 1.0
++    if s.direction == REVERSE:
++        p = 1.0 - p
++    return min(1.0, max(0.0, p))
++
++
++def band(p, mode, width):
++    """(lo, hi) of the white band in 0..1 grey for position p (width in 0-255 levels)."""
++    w = min(1.0, max(1.0 / 255.0, float(width) / 255.0))
++    top = (1.0 - p * (1.0 - w)) if mode == MAX else (w + p * (1.0 - w))
++    return top - w, top
++
++
++def levels(lo, hi):
++    return "%d-%d" % (round(lo * 255), round(hi * 255))
++
++
++def plan(values, total, extract_from=0, nth=1, depth_frames=None):
++    """Per render frame: depth-video index and band.
++
++    Returns {"settings", "indices", "bands": [(lo, hi, softness_0_1, fill)], "warnings"}.
++    ``extract_from`` / ``nth`` are Deforum's Video Input frame window (render frame k plays
++    source frame extract_from + k * nth); indices are clamped to the depth video's length.
++    """
++    s = from_values(values)
++    total = max(1, int(total))
++    extract_from, nth = max(0, int(extract_from or 0)), max(1, int(nth or 1))
++    indices, bands, warnings = [], [], []
++    clipped = 0
++    for k in range(total):
++        i = extract_from + k * nth
++        if depth_frames and i > depth_frames - 1:
++            i, clipped = depth_frames - 1, clipped + 1
++        indices.append(i)
++        lo, hi = band(position(k, total, s), s.mode, s.width)
++        bands.append((lo, hi, s.softness / 255.0, s.fill))
++    if clipped:
++        warnings.append("the depth video has %d frames; the last %d render frames repeat its final frame"
++                        % (depth_frames, clipped))
++    return {"settings": s, "indices": indices, "bands": bands, "warnings": warnings}
++
++
++def describe(sweep_plan):
++    s, bands = sweep_plan["settings"], sweep_plan["bands"]
++    first, last = bands[0], bands[-1]
++    return "%s sweep, %g cycle%s (%s), band %d levels wide: %s at the start, %s at the end of %d frames" % (
++        s.mode, s.cycles, "" if s.cycles == 1 else "s", s.shape, round(s.width),
++        levels(first[0], first[1]), levels(last[0], last[1]), len(bands))
++
++
++def mask(depth, lo, hi, softness=0.0, fill=WHITE):
++    """Band mask of a grey image (numpy float array, 0..1): 1 inside [lo, hi], 0 outside.
++
++    ``softness`` (0..1 grey) feathers both edges with a smoothstep; ``fill`` DEPTH multiplies
++    the mask by the depth so the band keeps its shading. Half a grey level of tolerance
++    keeps 8-bit values on the band edges inside it.
++    """
++    import numpy as np
++    half = 0.5 / 255.0
++    d = np.asarray(depth, dtype=np.float32)
++    if softness <= _EPS:
++        inside = ((d >= lo - half) & (d <= hi + half)).astype(np.float32)
++    else:
++        def smooth(x):
++            x = np.clip(x, 0.0, 1.0)
++            return x * x * (3.0 - 2.0 * x)
++        rise = smooth((d - (lo - softness - half)) / (softness + half))
++        fall = smooth(((hi + softness + half) - d) / (softness + half))
++        inside = (rise * fall).astype(np.float32)
++    return inside * d if fill == DEPTH else inside
++
++
++def mask_rgba(rgba, lo, hi, softness=0.0, fill=WHITE):
++    """(h, w, 4+) float image in, grey (h, w, 4) float32 mask image out (alpha 1)."""
++    import numpy as np
++    rgba = np.asarray(rgba, dtype=np.float32)
++    grey = rgba[..., :3].mean(axis=2) if rgba.ndim == 3 and rgba.shape[2] >= 3 else rgba.reshape(rgba.shape[:2])
++    out = mask(grey, lo, hi, softness, fill)
++    result = np.empty(out.shape + (4,), dtype=np.float32)
++    result[..., 0] = result[..., 1] = result[..., 2] = out
++    result[..., 3] = 1.0
++    return result
++
++
++def cook(script_op):
++    """Script TOP callback body: band-mask the first input using the stored band."""
++    sources = list(script_op.inputs)
++    if not sources:
++        return
++    lo, hi, softness, fill = script_op.fetch(SCRIPT_BAND_KEY, (1.0 - 10.0 / 255.0, 1.0, 0.0, WHITE))
++    script_op.copyNumpyArray(mask_rgba(sources[0].numpyArray(delayed=False), lo, hi, softness, fill))
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index f505a02..0b05b0b 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -31,6 +31,7 @@ from . import feed
+ from . import payload
+ from . import presets
+ from . import schema
++from . import sweep
+ from . import tempo
+ 
+ STATE_KEY = "tdeforum_pipeline"
+@@ -72,9 +73,12 @@ INNER = {
+     "preview": "schedule_preview",    # table written by preview()
+     "head": "loop_head",              # loop player: Movie File In at the playhead
+     "tail": "loop_tail",              # loop player: Movie File In one loop later
++    "sweep_depth": "sweep_depth",     # Sweep Depth: Movie File In playing the depth video
++    "sweep_mask": "sweep_mask",       # Sweep Depth: Script TOP that band-masks it
+ }
+ FEED_SELECT = "feed%d_sel"            # Select TOP per ControlNet unit (set to the source TOP)
+ FEED_OUT = "feed%d_out"               # Movie File Out TOP per unit (records the guide movie)
++SWEEP_DEPTH, SWEEP_MASK = "sweep_depth", "sweep_mask"   # Movie File In + Script TOP inside the COMP
+ 
+ RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
+ INTERP_FALLBACK_S = 30.0
+@@ -361,7 +365,6 @@ def queue(root):
+     cfg = config.load()
+     resync(root, cfg)
+     _apply_preset_safely(root)
+-    apply_preset(root)
+     st = _state(root)
+     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
+         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
+@@ -372,16 +375,37 @@ def queue(root):
+         values, result = build(root, cfg)
+         for warning in result["warnings"]:
+             log("warning: " + warning)
+-        if feed.requests(values):
+-            if _start_feed(root, cfg, values, result, st):
+-                return                    # resumes in _after_feed() once the movies are ready
+-            values, result = build(root, cfg)   # stills changed the Vid Path pars
+-        _render_stage(root, cfg, st, values, result)
++        if _start_sweep_depth(root, cfg, values, result, st):
++            return                        # resumes in _on_comfy() once the depth video exists
++        if sweep.enabled(values):
++            values, result = build(root, cfg)   # a cache hit just stored the depth video path
++        _feed_and_render(root, cfg, st, values, result)
+     except Exception as exc:
+         traceback.print_exc()
+         _fail(root, st, "queue failed: %s" % exc)
+ 
+ 
++def _feed_and_render(root, cfg, st, values, result):
++    """TOP guide feeds (recorded first), then the ComfyUI preprocess of unit 1, then Deforum."""
++    if feed.requests(values):
++        if _start_feed(root, cfg, values, result, st):
++            return                        # resumes in _after_feed() once the movies are ready
++        values, result = build(root, cfg)   # stills changed the Vid Path pars
++    _render_stage(root, cfg, st, values, result)
++
++
++def _start_sweep_depth(root, cfg, values, result, st):
++    """Sweep Depth needs a depth video of the init video: ask ComfyUI for it (cached).
++
++    True when a ComfyUI job was submitted (the pipeline resumes when it finishes)."""
++    if not [w for w in feed.requests(values) if w.mode == feed.SWEEP]:
++        return False
++    problem = sweep.check(values)
++    if problem:
++        raise RuntimeError(problem)
++    return _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep")
++
++
+ def _render_stage(root, cfg, st, values, result):
+     """ComfyUI preprocess (optional), then the Deforum batch."""
+     if _wants_preprocess(values):
+@@ -443,7 +467,7 @@ def _wants_preprocess(values):
+     return True
+ 
+ 
+-def _start_preprocess(root, cfg, values, result, st, then_render):
++def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1"):
+     """Submit the ComfyUI job. Returns False if nothing was submitted."""
+     try:
+         with open(cfg["comfy_template"], "r", encoding="utf-8") as fh:
+@@ -453,11 +477,14 @@ def _start_preprocess(root, cfg, values, result, st, then_render):
+         return False
+ 
+     force = payload._as_bool(values.get("force_preprocess", False))
+-    job = comfy.build_prompt(template, cfg, values, result["plan"], force=force,
++    job_values = values
++    if purpose == "sweep":        # same workflow, a depth preprocessor instead of unit 1's
++        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model)
++    job = comfy.build_prompt(template, cfg, job_values, result["plan"], force=force,
+                              stamp=time.strftime("%Y%m%d%H%M%S"))
+     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
+     if not force and job["cache_key"] in cache:
+-        _set_cn_video(root, cache[job["cache_key"]])
++        _store_preprocessed(root, cache[job["cache_key"]], purpose)
+         log("preprocess cache hit: %s" % cache[job["cache_key"]])
+         return False
+ 
+@@ -465,13 +492,21 @@ def _start_preprocess(root, cfg, values, result, st, then_render):
+                                header=JSON_HEADERS, data=json.dumps(job["body"]))
+     now = time.time()
+     st = {"state": COMFY_SUBMITTED, "submitted": now, "updated": now,
+-          "cache_key": job["cache_key"], "then_render": then_render}
++          "cache_key": job["cache_key"], "then_render": then_render, "purpose": purpose}
+     _save(root, st)
+     _set_status(root, "preprocessing: submitted")
+-    log("ComfyUI preprocess submitted: %s (%s frames)" % (job["cache_key"], result["plan"]["source_frames"]))
++    log("ComfyUI %s submitted: %s (%s frames)" % ("depth preprocess" if purpose == "sweep" else "preprocess",
++                                                  job["cache_key"], result["plan"]["source_frames"]))
+     return True
+ 
+ 
++def _store_preprocessed(root, container_path, purpose):
++    if purpose == "sweep":
++        _set_par(_op(root, "ui"), "Sweepdepthpath", container_path)
++    else:
++        _set_cn_video(root, container_path)
++
++
+ def _submit_deforum(root, cfg, result, st):
+     _write_runtime_json(cfg, "last_deforum_payload.json", result["request"])
+     _op(root, "deforum").request(config.deforum_url(cfg, "/deforum_api/batches"), "POST",
+@@ -491,16 +526,19 @@ def _set_cn_video(root, container_path, unit=1):
+ 
+ # --------------------------------------------------------------------------- ControlNet feeds
+ #
+-# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The
+-# timeline is paused and stepped one frame at a time, because the loop is locked
+-# to the project frames:
++# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The timeline
++# keeps PLAYING (a paused TouchDesigner cooks nothing, so no Frame End would ever fire);
++# every Frame End the recorder looks at the frame shown and only records the planned one:
+ #
+-#   settle   timeline set to the first frame; wait two frames so a full frame cooks there
+-#   armed    Movie File Out TOPs set to record + pause (the file opens)
+-#   record   every Frame End: check the timeline is where we put it, pulse Add Frame,
+-#            move to the next planned frame; the last pulse stops recording
++#   settle   a few frames so the Select / Movie File Out TOPs cook; then arm record + pause
++#            and jump to the first planned frame
++#   record   every Frame End: if the timeline shows the planned frame pulse Add Frame and
++#            line up the next one (a jump if it is not simply +1); otherwise jump and retry
+ #   (WAITING_FEED) the movie files are finalised, counted and handed to the CN units
+ #
++# Sweep Depth units are recorded the same way, from the Script TOP sweep_mask; before each
++# frame cooks, _sweep_apply() sets the depth video index and the band for that render frame.
++#
+ # Built-in TouchDesigner API used: op('/').time.{frame, play, rate, start},
+ # project.realTime, Select TOP .top, Movie File Out TOP .file/.record/.pause/.addframe,
+ # TOP.save(). Anything missing raises a message naming it. Pipeline > "Feed: recording
+@@ -573,12 +611,12 @@ def _par(op_, name):
+     return par
+ 
+ 
+-def _feed_plan(root, values, result):
++def _feed_plan(root, values, result, wrap=True):
+     """(feed.frame_plan(...), timeline rate) for the render in `result`."""
+     timeline = _timeline(root)
+     rate = float(getattr(timeline, "rate", 60.0) or 60.0)
+     start = int(float(values.get("feed_loop_start", 0) or 0)) or int(getattr(timeline, "start", 1) or 1)
+-    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start), rate
++    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start, wrap), rate
+ 
+ 
+ def _feed_ops(ui, unit):
+@@ -599,7 +637,7 @@ def _start_feed(root, cfg, values, result, st):
+     for want in wants:
+         if want.mode == feed.TOP_STILL:
+             _capture_still(root, cfg, want)
+-    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
++    loops = [w for w in wants if w.mode in (feed.TOP_LOOP, feed.SWEEP)]
+     return bool(loops) and _begin_loop_capture(root, cfg, values, result, loops)
+ 
+ 
+@@ -623,6 +661,50 @@ def _capture_still(root, cfg, want):
+     log("ControlNet %d guide: still from %s -> %s" % (want.unit, want.top, container))
+ 
+ 
++def _sweep_setup(root, cfg, values, result, ui):
++    """Point the depth player at the ComfyUI depth video; return the per-frame plan to store."""
++    problem = sweep.check(values)
++    if problem:
++        raise RuntimeError(problem)
++    mfi, script = _inner(ui, SWEEP_DEPTH), _inner(ui, SWEEP_MASK)
++    if mfi is None or script is None:
++        raise RuntimeError("the deforum COMP has no %s / %s; run builder_master_ui" % (SWEEP_DEPTH, SWEEP_MASK))
++    depth = str(values.get("sweep_depth_path", "") or "").strip()
++    share = config.to_share(cfg, depth) if depth else None
++    if not share or not os.path.isfile(share):
++        raise RuntimeError("the depth video %r is not on the share (ComfyUI preprocess did not run?)" % depth)
++    _set_constant(_par(mfi, "file"), share)
++    reload_ = getattr(mfi.par, "reloadpulse", None)
++    if reload_ is not None:
++        reload_.pulse()
++    p = result["plan"]
++    plan = sweep.plan(values, p["max_frames"], p.get("extract_from_frame") or 0,
++                      p.get("extract_nth_frame") or 1, _video_frames(share))
++    for warning in plan["warnings"]:
++        log("warning: " + warning)
++    log("sweep: " + sweep.describe(plan))
++    _set_par(ui, "Sweepinfo", sweep.describe(plan))
++    return {"indices": plan["indices"], "bands": [list(b) for b in plan["bands"]]}
++
++
++def _sweep_apply(root, st, j):
++    """Show render frame j's depth frame and band (called before the frame that cooks it)."""
++    state = st.get("sweep")
++    if not state:
++        return
++    ui = _op(root, "ui")
++    mfi, script = _inner(ui, SWEEP_DEPTH), _inner(ui, SWEEP_MASK)
++    _set_constant(_par(mfi, "index"), int(state["indices"][j]))
++    lo, hi, soft, fill = state["bands"][j]
++    script.store(sweep.SCRIPT_BAND_KEY, (lo, hi, soft, fill))
++    cook = getattr(script, "cook", None)
++    if cook is not None:
++        try:
++            cook(force=True)
++        except Exception:
++            pass
++
++
+ def _begin_loop_capture(root, cfg, values, result, loops):
+     ui = _op(root, "ui")
+     exec_dat = root.op(NAMES["feed_exec"])
+@@ -634,15 +716,20 @@ def _begin_loop_capture(root, cfg, values, result, loops):
+             raise RuntimeError("%s.%s is off, so the capture would never advance" % (exec_dat.name, name))
+ 
+     timeline = _timeline(root)
+-    plan, rate = _feed_plan(root, values, result)
++    sweeping = any(w.mode == feed.SWEEP for w in loops)
++    plan, rate = _feed_plan(root, values, result, wrap=not sweeping)   # a sweep never wraps
+     for warning in plan["warnings"]:
+         log("warning: " + warning)
++    sweep_state = _sweep_setup(root, cfg, values, result, ui) if sweeping else None
+ 
+     method = feed.method_of(values)
+     units = []
+     for want in loops:
+         sel, out = _feed_ops(ui, want.unit)
+-        _resolve_top(root, want.top, want.unit)
++        if want.mode == feed.SWEEP:
++            want = feed.Request(want.unit, want.mode, _inner(ui, "sweep_mask").path)
++        else:
++            _resolve_top(root, want.top, want.unit)
+         share, container = _feed_target(cfg, want)
+         if os.path.isfile(share):
+             os.remove(share)                  # so "file exists" below means "this recording"
+@@ -656,10 +743,12 @@ def _begin_loop_capture(root, cfg, values, result, loops):
+         if method == feed.ADD_FRAME:
+             _par(out, "addframe")
+             _par(out, "pause")
+-        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container})
++        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container,
++                      "mode": want.mode})
+ 
+     now = time.time()
+     st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
++          "sweep": sweep_state, "as_mask": payload._as_bool(values.get("sweep_as_mask", False)),
+           "j": 0, "since_set": 0, "submitted": now, "updated": now,
+           "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
+     # The timeline wraps at its end (a 120 frame project would jump back to 1 at frame 121),
+@@ -752,6 +841,7 @@ def _capture_step(root, st):
+                 if add_frame:
+                     _set_constant(out.par.pause, 1)
+                 _set_constant(out.par.record, 1)
++            _sweep_apply(root, st, 0)
+             timeline.frame = frames[0]
+             st.update(phase="record", off=0, just_set=True, misses=0)
+         _save(root, st)
+@@ -785,6 +875,7 @@ def _capture_step(root, st):
+     if j <= 3 or j == len(frames):
+         log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), f))
+     if j < len(frames):
++        _sweep_apply(root, st, j)         # takes effect on the frame that cooks next
+         if frames[j] != f + 1:
+             timeline.frame = frames[j] - st.get("off", 0)
+             st["just_set"] = True
+@@ -865,6 +956,12 @@ def _poll_feed(root, cfg, st):
+             return
+         log("ControlNet %d feed ready: %s (%s)" % (u["unit"], u["container"], message))
+         _set_cn_video(root, u["container"], u["unit"])
++        if u.get("mode") == feed.SWEEP and st.get("as_mask") and not st.get("mask_set"):
++            ui = _op(root, "ui")
++            _set_par(ui, "Videomaskpath", u["container"])
++            _set_par(ui, "Usemaskvideo", 1)
++            st["mask_set"] = True
++            log("Sweep Depth is also the mask video: video_mask_path = %s, use_mask_video on" % u["container"])
+         _set_feed_info(root, u["unit"], "%d frames @ %s" % (expected, time.strftime("%H:%M:%S")))
+     _after_feed(root, cfg, st)
+ 
+@@ -1048,10 +1145,17 @@ def _on_comfy(root, cfg, st, code, body, text):
+     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
+     cache[st.get("cache_key")] = container_path
+     root.store(CACHE_KEY, cache)
+-    _set_cn_video(root, container_path)
++    _store_preprocessed(root, container_path, st.get("purpose"))
+     log("preprocess done: %s" % container_path)
+ 
+-    if st.get("then_render"):
++    if st.get("purpose") == "sweep":
++        try:
++            values, result = build(root, cfg)
++            _feed_and_render(root, cfg, st, values, result)
++        except Exception as exc:
++            traceback.print_exc()
++            _fail(root, st, "after the depth video: %s" % exc)
++    elif st.get("then_render"):
+         _values, result = build(root, cfg)
+         _submit_deforum(root, cfg, result, st)
+     else:
+@@ -1215,13 +1319,24 @@ def _log_feed_plan(root, values, result):
+     for want in wants:
+         if want.mode == feed.TOP_STILL:
+             log("feed: ControlNet %d takes one still from %s at Queue" % (want.unit, want.top or "(no TOP set)"))
+-    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
++    loops = [w for w in wants if w.mode in (feed.TOP_LOOP, feed.SWEEP)]
+     if loops:
+         try:
+-            plan, rate = _feed_plan(root, values, result)
++            sweeping = any(w.mode == feed.SWEEP for w in loops)
++            plan, rate = _feed_plan(root, values, result, wrap=not sweeping)
+             log("feed: ControlNet %s record %s from %s at Queue (timeline %g fps)" % (
+                 ",".join(str(w.unit) for w in loops), feed.describe(plan),
+-                ", ".join(sorted(set(w.top or "(no TOP set)" for w in loops))), rate))
++                ", ".join(sorted(set("Sweep Depth" if w.mode == feed.SWEEP else (w.top or "(no TOP set)")
++                                     for w in loops))), rate))
++            if sweeping:
++                problem = sweep.check(values)
++                if problem:
++                    log("feed: WARNING " + problem)
++                else:
++                    p = result["plan"]
++                    log("sweep: " + sweep.describe(sweep.plan(
++                        values, p["max_frames"], p.get("extract_from_frame") or 0,
++                        p.get("extract_nth_frame") or 1)))
+         except Exception as exc:
+             log("feed: cannot plan the recording: %s" % exc)
+ 
+@@ -1243,13 +1358,23 @@ def _doctor_feeds(root, cfg, ui, values):
+         want = [w for w in wants if w.unit == unit]
+         top = str(values.get("feed_%d_top" % unit, "") or "")
+         found = root.op(top) is not None if top else False
++        if mode == feed.SWEEP:
++            top, found = "Sweep Depth", True
+         log("ControlNet %d guide: %s from %s [%s]%s" % (
+             unit, mode, top or "(no Source TOP)", "TOP found" if found else "TOP NOT FOUND",
+             "" if want else " (unit is off, so it will not be recorded)"))
+         sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
+-        if mode == feed.TOP_LOOP and (sel is None or out is None):
++        if mode == feed.SWEEP:
++            problem = sweep.check(values)
++            log("  Sweep Depth: %s" % (problem or "settings OK (%s)" % sweep.describe(sweep.plan(values, 240)).split(":")[0]))
++            depth, script = ui.op(SWEEP_DEPTH), ui.op(SWEEP_MASK)
++            if depth is None or script is None:
++                log("  %s / %s missing from the COMP: run builder_master_ui" % (SWEEP_DEPTH, SWEEP_MASK))
++            path = str(values.get("sweep_depth_path", "") or "")
++            log("  depth video: %s" % (path or "(none yet; ComfyUI makes it at Queue)"))
++        if mode in (feed.TOP_LOOP, feed.SWEEP) and (sel is None or out is None):
+             log("  %s / %s missing from the COMP: run builder_master_ui" % (FEED_SELECT % unit, FEED_OUT % unit))
+-    if any(w.mode == feed.TOP_LOOP for w in wants):
++    if any(w.mode in (feed.TOP_LOOP, feed.SWEEP) for w in wants):
+         exec_dat = root.op(NAMES["feed_exec"])
+         if exec_dat is None:
+             log("%s missing: run setup_network (the loop recorder steps on its Frame End)" % NAMES["feed_exec"])
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index b93cdab..654c712 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -186,7 +186,7 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
+     if comp:
+         for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
+-                     "Feed1info", "Feed2info", "Feed3info"):
++                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath"):
+             ui_pars.setdefault(name, "")
+     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
+     if comp:
+@@ -202,6 +202,8 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
+         top.time = root.timeline
+         root.add(FakeTop("final_out", root))
+         root.add(Op("feed_capture_exec", root, active=Par("active", True), frameend=Par("frameend", True)))
++        ui.add(Op("sweep_depth", ui, file=Par("file", ""), index=Par("index", 0), reloadpulse=0))
++        ui.add(Op("sweep_mask", ui))
+         for unit in (1, 2, 3):
+             ui.add(Op("feed%d_sel" % unit, ui, top=Par("top", "")))
+             ui.add(FakeMfo("feed%d_out" % unit, ui, root.timeline))
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index ffd57e0..20f3d87 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -164,6 +164,7 @@ BUILTINS = {
+                        ("reloadpulse", "Pulse", 0, ())],
+     "crossTOP": [("cross", "Float", 0, ())],
+     "selectTOP": [("top", "Str", "", ())],
++    "scriptTOP": [("callbacks", "Str", "", ())],
+     "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
+                         ("record", "Toggle", False, ()), ("pause", "Toggle", False, ()),
+                         ("addframe", "Pulse", 0, ())],
+@@ -176,7 +177,7 @@ def run_builder(root, scripts_dir, out):
+     me.par.file.val = scripts_dir + "/build_master_ui.py"
+     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
+     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
+-                 "selectTOP", "moviefileoutTOP"):
++                 "selectTOP", "moviefileoutTOP", "scriptTOP"):
+         env[kind] = kind
+     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
+         with open(BUILDER, encoding="utf-8") as fh:
+@@ -258,6 +259,22 @@ class BuilderTest(unittest.TestCase):
+         self.assertFalse(any("NOTE feed" in line for line in self.log))
+         self.assertEqual(comp.par.Feedloopstart.val, 0)
+ 
++    def test_sweep_depth_ops(self):
++        comp = self.build()
++        depth, script = comp.op("sweep_depth"), comp.op("sweep_mask")
++        self.assertIsNotNone(depth)
++        self.assertIs(script.inputConnectors[0].source, depth)
++        self.assertEqual(depth.par.playmode.val, "specify")
++        self.assertEqual(depth.par.indexunit.val, "indices")
++        cb = comp.op("sweep_callbacks")
++        self.assertTrue(cb.par.file.val.endswith("sweep_script_top.py"))
++        self.assertEqual(cb.par.syncfile.val, 1)
++        self.assertIs(script.par.callbacks.val, cb)
++        self.assertFalse(any("NOTE sweep" in line for line in self.log))
++        for name in ("Sweepenabled", "Sweepmode", "Sweepcycles", "Sweepwidth", "Sweepinfo"):
++            self.assertTrue(hasattr(comp.par, name), name)
++        self.assertIn("Sweep Depth", [p.name for p in comp.customPages])
++
+     def test_rebuild_keeps_values_and_tables(self):
+         comp = self.build()
+         comp.par.Bpm.val = 150.0
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index ccf93e7..dad9fdb 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -9,8 +9,8 @@ from tdeforum import td_controller as ctl
+ 
+ 
+ class PresetDataTest(unittest.TestCase):
+-    def test_twelve_examples_good_and_extreme_per_mode(self):
+-        self.assertEqual(len(presets.PRESETS), 12)
++    def test_fifteen_examples_good_and_extreme_per_mode(self):
++        self.assertEqual(len(presets.PRESETS), 15)
+         for mode in ("3D", "2D", "Video Input"):
+             levels = [p.level for p in presets.PRESETS if p.mode == mode]
+             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
+@@ -46,7 +46,21 @@ class PresetDataTest(unittest.TestCase):
+                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
+         for preset in presets.PRESETS:
+             self.assertFalse(protected & set(preset.values), preset.id)
+-            self.assertFalse([k for k in preset.values if k.startswith("cn_")], preset.id)
++            if "sweep" not in preset.id:
++                self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
++                                 preset.id)
++
++    def test_sweep_presets_switch_sweep_on_and_use_unit_one_as_the_guide(self):
++        sweeps = [p for p in presets.PRESETS if p.id.startswith("video_depth_sweep")]
++        self.assertEqual(len(sweeps), 3)
++        self.assertEqual(sorted(p.level for p in sweeps), [presets.EXTREME, presets.GOOD, presets.GOOD])
++        modes = sorted(p.values["sweep_mode"] for p in sweeps)
++        self.assertEqual(modes, ["max", "min", "min"])
++        for p in sweeps:
++            self.assertEqual(p.mode, "Video Input")
++            self.assertTrue(p.values["sweep_enabled"] and p.values["cn_1_enabled"])
++            self.assertEqual(p.values["feed_1_mode"], "sweep")
++            self.assertTrue([k for k in p.values if k.startswith("sweep_")])
+ 
+     def test_reset_keys_are_motion_or_slot_toggles(self):
+         for key in presets.RESET_KEYS:
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+new file mode 100644
+index 0000000..a185967
+--- /dev/null
++++ b/tests/test_sweep.py
+@@ -0,0 +1,309 @@
++import json
++import os
++import unittest
++from unittest import mock
++
++import numpy as np
++
++from _fakes import make_network  # noqa: F401  (puts scripts/ on sys.path)
++import test_controller
++from test_controller import FEED_UI, respond
++from tdeforum import config, feed, schema, sweep
++from tdeforum import td_controller as ctl
++
++
++def S(**kw):
++    return sweep.Settings(**kw)
++
++
++def levels(p, mode="max", width=10):
++    lo, hi = sweep.band(p, mode, width)
++    return round(lo * 255), round(hi * 255)
++
++
++class MathTest(unittest.TestCase):
++    def test_max_starts_on_245_255_and_ends_on_0_10(self):
++        self.assertEqual(levels(0.0), (245, 255))
++        self.assertEqual(levels(1.0), (0, 10))
++        lo, hi = levels(0.5)
++        self.assertTrue(0 < lo < 245 and 10 < hi < 255)
++
++    def test_min_is_the_opposite_way(self):
++        self.assertEqual(levels(0.0, "min"), (0, 10))
++        self.assertEqual(levels(1.0, "min"), (245, 255))
++
++    def test_one_ramp_over_240_frames_goes_start_to_end_monotonically(self):
++        s = S()
++        pos = [sweep.position(k, 240, s) for k in range(240)]
++        self.assertEqual((pos[0], pos[-1]), (0.0, 1.0))
++        self.assertTrue(all(b > a for a, b in zip(pos, pos[1:])))
++
++    def test_cycles_restart_and_last_frame_lands_on_the_end(self):
++        s = S(cycles=2)
++        pos = [sweep.position(k, 241, s) for k in range(241)]
++        self.assertEqual(pos[0], 0.0)
++        self.assertAlmostEqual(pos[120], 0.0, places=6)
++        self.assertEqual(pos[-1], 1.0)
++        self.assertGreater(pos[119], 0.95)
++
++    def test_pingpong_goes_out_and_back(self):
++        s = S(shape="pingpong")
++        pos = [sweep.position(k, 101, s) for k in range(101)]
++        self.assertEqual((pos[0], pos[50], pos[100]), (0.0, 1.0, 0.0))
++
++    def test_reverse_swaps_start_and_end(self):
++        s = S(direction="reverse")
++        self.assertEqual((sweep.position(0, 50, s), sweep.position(49, 50, s)), (1.0, 0.0))
++
++    def test_single_frame_and_bad_settings_are_safe(self):
++        s = S(mode="bogus", cycles=-3, width=9999, fill="x", shape="?", direction="?")
++        self.assertEqual((s.mode, s.fill, s.shape, s.direction), ("max", "white", "ramp", "forward"))
++        self.assertEqual(sweep.position(0, 1, s), 0.0)
++        lo, hi = sweep.band(0.5, "max", s.width)
++        self.assertTrue(0.0 <= lo <= hi <= 1.0)
++
++    def test_from_values_reads_the_sweep_fields(self):
++        s = sweep.from_values({"sweep_mode": "min", "sweep_cycles": "3", "sweep_width": 20,
++                               "sweep_softness": 4, "sweep_fill": "depth"})
++        self.assertEqual((s.mode, s.cycles, s.width, s.softness, s.fill), ("min", 3.0, 20.0, 4.0, "depth"))
++
++
++class PlanTest(unittest.TestCase):
++    def test_indices_follow_extract_window_and_clamp(self):
++        plan = sweep.plan({}, 10, extract_from=5, nth=2, depth_frames=20)
++        self.assertEqual(plan["indices"], [5, 7, 9, 11, 13, 15, 17, 19, 19, 19])
++        self.assertEqual(len(plan["bands"]), 10)
++        self.assertEqual(len(plan["warnings"]), 1)
++        text = sweep.describe(sweep.plan({}, 240))
++        self.assertIn("245-255 at the start", text)
++        self.assertIn("0-10 at the end of 240 frames", text)
++
++    def test_check_explains_what_is_missing(self):
++        ok = {"sweep_enabled": True, "animation_mode": "Video Input", "video_init_path": "/x.mp4"}
++        self.assertIsNone(sweep.check(ok))
++        self.assertIn("switched off", sweep.check(dict(ok, sweep_enabled=False)))
++        self.assertIn("Video Input", sweep.check(dict(ok, animation_mode="3D")))
++        self.assertIn("Video Init Path", sweep.check(dict(ok, video_init_path="")))
++
++
++class FramePlanTest(unittest.TestCase):
++    def test_sequential_plan_never_wraps_and_says_so(self):
++        with mock.patch.object(feed, "project_frames_per_loop", return_value=120):
++            tp = {"render_fps": 30.0}
++            wrapped = feed.frame_plan(tp, 100, 60, 1)
++            straight = feed.frame_plan(tp, 100, 60, 1, wrap=False)
++        self.assertEqual(wrapped["frames"][60], 1)
++        self.assertEqual(straight["frames"][60], 121)
++        self.assertIn("wrapping at 120", feed.describe(wrapped))
++        self.assertNotIn("wrapping", feed.describe(straight))
++
++
++class MaskTest(unittest.TestCase):
++    def setUp(self):
++        self.d = np.arange(256, dtype=np.float32).reshape(1, 256) / 255.0
++
++    def test_hard_band_is_inclusive(self):
++        lo, hi = sweep.band(0.0, "max", 10)
++        m = sweep.mask(self.d, lo, hi)
++        self.assertEqual(list(np.nonzero(m[0])[0]), list(range(245, 256)))
++        self.assertEqual(set(np.unique(m)), {0.0, 1.0})
++
++    def test_soft_edges_feather_outside_and_keep_the_core(self):
++        lo, hi = 100 / 255.0, 120 / 255.0
++        m = sweep.mask(self.d, lo, hi, softness=10 / 255.0)[0]
++        self.assertEqual(m[110], 1.0)
++        self.assertTrue(0.0 < m[95] < 1.0 and 0.0 < m[125] < 1.0)
++        self.assertEqual((m[50], m[200]), (0.0, 0.0))
++
++    def test_depth_fill_keeps_shading(self):
++        m = sweep.mask(self.d, 100 / 255.0, 120 / 255.0, fill="depth")[0]
++        self.assertAlmostEqual(float(m[110]), 110 / 255.0, places=5)
++        self.assertEqual(float(m[50]), 0.0)
++
++    def test_rgba_in_grey_rgba_out(self):
++        img = np.zeros((2, 3, 4), dtype=np.float32)
++        img[..., :3] = 0.97
++        img[0, 0, :3] = 0.2
++        out = sweep.mask_rgba(img, 0.95, 1.0)
++        self.assertEqual(out.shape, (2, 3, 4))
++        self.assertEqual((out[0, 0, 0], out[1, 1, 1], out[1, 1, 3]), (0.0, 1.0, 1.0))
++
++    def test_cook_uses_the_stored_band(self):
++        class Src(object):
++            def numpyArray(self, delayed=False):
++                a = np.zeros((1, 4, 4), dtype=np.float32)
++                a[0, :, :3] = np.array([0.1, 0.5, 0.9, 1.0], dtype=np.float32)[:, None]
++                a[0, :, 3] = 1.0
++                return a
++
++        class Script(object):
++            def __init__(self):
++                self.inputs, self.out, self.stored = [Src()], None, {}
++
++            def fetch(self, key, default=None):
++                return self.stored.get(key, default)
++
++            def copyNumpyArray(self, arr):
++                self.out = arr
++
++        op = Script()
++        op.stored[sweep.SCRIPT_BAND_KEY] = (0.85, 1.0, 0.0, "white")
++        sweep.cook(op)
++        self.assertEqual(list(op.out[0, :, 0]), [0.0, 0.0, 1.0, 1.0])
++
++
++class SchemaFeedTest(unittest.TestCase):
++    def test_fields_and_page(self):
++        self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
++        fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP]
++        self.assertEqual(sorted(f.api for f in fields), sorted(
++            ["sweep_enabled", "sweep_model", "sweep_mode", "sweep_cycles", "sweep_shape", "sweep_direction",
++             "sweep_width", "sweep_softness", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
++        self.assertTrue(all(f.target is None for f in fields))
++        self.assertEqual(schema.BY_API["sweep_depth_path"].td_name, "Sweepdepthpath")
++        self.assertIn(feed.SWEEP, schema.BY_API["feed_1_mode"].menu)
++
++    def test_requests_include_sweep_units(self):
++        base = {"cn_1_enabled": True, "feed_1_mode": "sweep", "sweep_enabled": True}
++        self.assertEqual([(r.unit, r.mode) for r in feed.requests(base)], [(1, "sweep")])
++        self.assertEqual(feed.requests(dict(base, cn_1_enabled=False)), [])
++        masked = feed.requests(dict(base, cn_1_enabled=False, sweep_as_mask=True))
++        self.assertEqual([(r.unit, r.mode) for r in masked], [(1, "sweep")])
++
++
++SWEEP_UI = dict(FEED_UI, animation_mode="Video Input", sweep_enabled=True, feed_1_mode="sweep",
++                feed_1_top="", cn_1_enabled=True, comfy_preproc_enable=False,
++                video_init_path="/opt/a1111/td_inputs/comfy_videos/archive/a.mp4")
++
++
++class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
++    setUp = test_controller.FeedTest.setUp
++    state = test_controller.FeedTest.state
++    tick = test_controller.FeedTest.tick
++    record_all = test_controller.FeedTest.record_all
++    step = test_controller.FeedTest.step
++    posts = test_controller.FeedTest.posts
++    feed_file = test_controller.FeedTest.feed_file
++    DEPTH = "a_1024x576_DepthAnythingV2Preprocessor_75f_00001.mp4"
++
++    def make(self, **overrides):
++        self.root = make_network(dict(SWEEP_UI, **overrides), comp=True, prompt_rows=[("0", "gold", "")])
++        self.ui = self.root.op("deforum")
++        self.timeline = self.root.timeline
++        self.out = self.ui.op("feed1_out")
++        self.depth, self.script = self.ui.op("sweep_depth"), self.ui.op("sweep_mask")
++        return self.ui
++
++    def probe(self):
++        seen = []
++        original = self.out.par.addframe.pulse
++
++        def pulse():
++            original()
++            seen.append((self.depth.par.index.val, self.script.fetch(sweep.SCRIPT_BAND_KEY)))
++        self.out.par.addframe.pulse = pulse
++        return seen
++
++    def depth_done(self):
++        comfy = self.root.op("webclient_comfyui")
++        respond(self.root, "webclient_comfyui", 200, {"prompt_id": "p1", "number": 1, "node_errors": {}})
++        self.tick()
++        path = config.to_share(self.cfg, "/opt/a1111/td_masks/preprocessed_vids/" + self.DEPTH)
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "wb") as fh:
++            fh.write(b"x" * 50)
++        respond(self.root, "webclient_comfyui", 200, {"p1": {
++            "status": {"status_str": "success", "completed": True},
++            "outputs": {"21": {"gifs": [{"filename": self.DEPTH, "subfolder": "preprocessed_vids"}]}}}})
++        return comfy
++
++    def test_depth_job_then_recording_of_every_band(self):
++        ui = self.make()
++        ctl.queue(self.root)
++        comfy = self.root.op("webclient_comfyui")
++        self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
++        job = json.loads(comfy.requests[0][2])
++        self.assertIn("DepthAnythingV2Preprocessor", json.dumps(job))
++        self.assertEqual(self.posts(), [])
++
++        seen = self.probe()
++        self.depth_done()
++        self.assertEqual(self.state(), ctl.CAPTURING)
++        self.assertEqual(ui.par.Sweepdepthpath.val, "/opt/a1111/td_masks/preprocessed_vids/" + self.DEPTH)
++        self.assertEqual(self.depth.par.file.val, config.to_share(self.cfg, ui.par.Sweepdepthpath.val))
++        self.assertEqual(self.out.par.file.val, self.share + "/td_masks/feeds/cn1_feed.mp4")
++        self.assertEqual(ui.op("feed1_sel").par.top.val, self.script.path)
++
++        self.record_all()
++        self.assertEqual(self.state(), ctl.WAITING_FEED)
++        self.assertEqual(len(seen), 75)
++        self.assertEqual([i for i, _ in seen], list(range(75)))
++        first, last = seen[0][1], seen[-1][1]
++        self.assertEqual((round(first[0] * 255), round(first[1] * 255)), (245, 255))
++        self.assertEqual((round(last[0] * 255), round(last[1] * 255)), (0, 10))
++        self.assertIn("245-255 at the start", ui.par.Sweepinfo.val)
++
++        self.feed_file()
++        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
++            self.tick()
++            self.tick()
++        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
++        s = json.loads(self.posts()[0][2])["deforum_settings"]
++        self.assertEqual(s["animation_mode"], "Video Input")
++        self.assertEqual(s["cn_1_vid_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
++        self.assertIs(s["cn_1_enabled"], True)
++        self.assertEqual(s["max_frames"], 75)
++
++    def test_cached_depth_video_skips_comfy(self):
++        self.make()
++        ctl.queue(self.root)
++        self.depth_done()
++        ctl.cancel(self.root)
++        ctl.queue(self.root)
++        posts = [r for r in self.root.op("webclient_comfyui").requests if r[0] == "POST" and r[1].endswith("/prompt")]
++        self.assertEqual(len(posts), 1, "no second /prompt")
++        self.assertEqual(self.state(), ctl.CAPTURING)
++
++    def test_mask_only_sets_the_video_mask(self):
++        ui = self.make(cn_1_enabled=False, sweep_as_mask=True, video_mask_path="/opt/a1111/td_masks/mask_01.mov")
++        ctl.queue(self.root)
++        self.depth_done()
++        self.record_all()
++        self.feed_file()
++        with mock.patch.object(ctl, "_frame_counter", return_value=lambda container: 75):
++            self.tick()
++            self.tick()
++        s = json.loads(self.posts()[0][2])["deforum_settings"]
++        self.assertIs(s["use_mask_video"], True)
++        self.assertEqual(s["video_mask_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
++        self.assertEqual(ui.par.Usemaskvideo.val, 1)
++
++    def test_preview_and_doctor_report_the_sweep(self):
++        self.make()
++        with mock.patch("builtins.print") as out:
++            ctl.preview(self.root)
++            ctl.doctor(self.root)
++        text = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
++        self.assertIn("Sweep Depth", text)
++        self.assertIn("245-255 at the start", text)
++        self.assertIn("depth video: (none yet", text)
++        self.assertNotIn("wrapping", [l for l in text.splitlines() if "feed: ControlNet" in l][0])
++
++    def test_wrong_animation_mode_fails_with_a_reason(self):
++        self.make(animation_mode="3D")
++        ctl.queue(self.root)
++        self.assertEqual(self.root.op("webclient_comfyui").requests, [])
++        self.assertIn("Video Input", self.ui.par.Pipelinestatus.val)
++
++    def test_max_and_min_bands_for_the_first_and_last_frame(self):
++        self.make(sweep_mode="min", sweep_cycles=1.0)
++        ctl.queue(self.root)
++        seen = self.probe()
++        self.depth_done()
++        self.record_all()
++        self.assertEqual((round(seen[0][1][0] * 255), round(seen[0][1][1] * 255)), (0, 10))
++        self.assertEqual((round(seen[-1][1][0] * 255), round(seen[-1][1][1] * 255)), (245, 255))
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

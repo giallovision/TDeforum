@@ -1,0 +1,318 @@
+From c2cc6b29ab3c8f0926240cc455d117951d9d7da2 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 03:56:51 +0000
+Subject: [PATCH] Show which deforum parameters are driveable (~ label) and
+ which are CHOP-linked ([CHOP], live)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  1 +
+ docs/deforum_parameters.md        | 74 +++++++++++++++----------------
+ scripts/build_master_ui.py        |  6 ++-
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/schema.py        |  7 +++
+ scripts/tdeforum/td_controller.py | 32 ++++++++++++-
+ tests/test_chop_link.py           | 17 +++++++
+ 7 files changed, 98 insertions(+), 41 deletions(-)
+
+diff --git a/README.md b/README.md
+index 09c8d05..be46d9c 100644
+--- a/README.md
++++ b/README.md
+@@ -89,6 +89,7 @@ Make whatever CHOP you like (Pattern, LFO, Noise, Animation, Script, a math chai
+ 
+ * Drop it on the **base**, not on `…raw`. A channel dropped on `…raw` is handled the same way, but a typed raw schedule always wins over a CHOP on the base (Queue warns).
+ * *Mod Matrix › CHOP Link Timing*: **Timeline** (default) renders what the parameter shows while the timeline plays, from *Pipeline › Feed Loop Start* for one loop, using the CHOP's sample rate and start (a Pattern CHOP with Length `me.time.end` is exactly right; past its end it wraps). **Whole channel = one loop** stretches the channel over the loop whatever its length (Pattern *Cycles 4* = four cycles per loop).
++* Driveable parameters have labels starting with `~`; a linked one gets `[CHOP]` after its label (live, via `mod_live`).
+ * *Mod Matrix › CHOP-linked Parameters* and the Textport (Queue, bake, `doctor()`) list what is linked; `mod_live` outputs the linked curves too.
+ 
+ Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index cd61672..77522de 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -2,11 +2,11 @@
+ 
+ Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+-Parameters marked **MOD** are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
++Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+ ## Driving a parameter with a CHOP (CHOP links)
+ 
+-Drag a channel from any CHOP (Pattern, LFO, Noise, Animation, a math chain ...) onto a MOD parameter's **float base** and choose **CHOP Reference** (`op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live; at Queue the *whole* channel is baked into that parameter's Deforum schedule, and Mod Matrix slots / the Mod CHOP still add on top.
++Drag a channel from any CHOP (Pattern, LFO, Noise, Animation, a math chain ...) onto a MOD parameter's **float base** and choose **CHOP Reference** (`op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live and its label gets `[CHOP]` (and *Mod Matrix > CHOP-linked Parameters* lists it); at Queue the *whole* channel is baked into that parameter's Deforum schedule, and Mod Matrix slots / the Mod CHOP still add on top.
+ 
+ - **Base, not raw.** A channel dropped on `<name>raw` is treated the same way, but typed text in raw always beats a CHOP on the base (Queue warns).
+ - **Maths is fine:** `op('pattern1')['chan1'] * 2 + 1` or a sum of channels is evaluated over the whole arrays. An expression that cannot be (`math.sin(...)`) falls back to its first channel, as-is, with a warning.
+@@ -94,12 +94,12 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ |---|---|---|---|
+ | `Pagepresetmotion2d` | Page Preset (Motion 2D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
+ | `Border` | Border | replicate | What fills the edges revealed by 2D motion: Replicate (stretch the edge pixels) or Wrap (tile the image). |
+-| `Zoom` | Zoom (2D, 1 = still) | 1.0 | 2D zoom factor per frame (1 = still, 1.003 = slow zoom in, below 1 = zoom out). **MOD** (raw: `Zoomraw`) |
+-| `Angle` | Angle (2D, deg/frame) | 0.0 | 2D rotation in degrees per frame. **MOD** (raw: `Angleraw`) |
+-| `Transformcenterx` | Transform Center X (2D) | 0.5 | Horizontal pivot for 2D zoom and rotation (0 = left, 1 = right). **MOD** (raw: `Transformcenterxraw`) |
+-| `Transformcentery` | Transform Center Y (2D) | 0.5 | Vertical pivot for 2D zoom and rotation (0 = top, 1 = bottom). **MOD** (raw: `Transformcenteryraw`) |
+-| `Translationx` | Translation X (2D + 3D) | 0.0 | Sideways movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationxraw`) |
+-| `Translationy` | Translation Y (2D + 3D) | 0.0 | Vertical movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationyraw`) |
++| `Zoom` | ~ Zoom (2D, 1 = still) | 1.0 | 2D zoom factor per frame (1 = still, 1.003 = slow zoom in, below 1 = zoom out). **MOD** (raw: `Zoomraw`) |
++| `Angle` | ~ Angle (2D, deg/frame) | 0.0 | 2D rotation in degrees per frame. **MOD** (raw: `Angleraw`) |
++| `Transformcenterx` | ~ Transform Center X (2D) | 0.5 | Horizontal pivot for 2D zoom and rotation (0 = left, 1 = right). **MOD** (raw: `Transformcenterxraw`) |
++| `Transformcentery` | ~ Transform Center Y (2D) | 0.5 | Vertical pivot for 2D zoom and rotation (0 = top, 1 = bottom). **MOD** (raw: `Transformcenteryraw`) |
++| `Translationx` | ~ Translation X (2D + 3D) | 0.0 | Sideways movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationxraw`) |
++| `Translationy` | ~ Translation Y (2D + 3D) | 0.0 | Vertical movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationyraw`) |
+ 
+ ## Motion 3D
+ 
+@@ -108,10 +108,10 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Pagepresetmotion3d` | Page Preset (Motion 3D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
+ | `Paddingmode` | Padding Mode | border | What fills areas the 3D camera reveals: Border (smear), Reflection (mirror) or Zeros (black). |
+ | `Samplingmode` | Sampling Mode | bicubic | Pixel interpolation for 3D warps: bicubic (sharp), bilinear or nearest. |
+-| `Translationz` | Translation Z (3D push) | 0.0 | Camera push per frame (positive = forward into the image). **MOD** (raw: `Translationzraw`) |
+-| `Rotation3dx` | Rotation 3D X (tilt, deg/frame) | 0.0 | Camera tilt in degrees per frame. **MOD** (raw: `Rotation3dxraw`) |
+-| `Rotation3dy` | Rotation 3D Y (pan, deg/frame) | 0.0 | Camera pan in degrees per frame. **MOD** (raw: `Rotation3dyraw`) |
+-| `Rotation3dz` | Rotation 3D Z (roll, deg/frame) | 0.0 | Camera roll in degrees per frame. **MOD** (raw: `Rotation3dzraw`) |
++| `Translationz` | ~ Translation Z (3D push) | 0.0 | Camera push per frame (positive = forward into the image). **MOD** (raw: `Translationzraw`) |
++| `Rotation3dx` | ~ Rotation 3D X (tilt, deg/frame) | 0.0 | Camera tilt in degrees per frame. **MOD** (raw: `Rotation3dxraw`) |
++| `Rotation3dy` | ~ Rotation 3D Y (pan, deg/frame) | 0.0 | Camera pan in degrees per frame. **MOD** (raw: `Rotation3dyraw`) |
++| `Rotation3dz` | ~ Rotation 3D Z (roll, deg/frame) | 0.0 | Camera roll in degrees per frame. **MOD** (raw: `Rotation3dzraw`) |
+ 
+ ## Camera & Depth
+ 
+@@ -122,14 +122,14 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Depthalgorithm` | Depth Algorithm | Midas-3-Hybrid | Depth model Deforum uses for 3D warping (MiDaS hybrid by default; Zoe/AdaBins/LeReS alternatives). |
+ | `Midasweight` | Midas Weight | 0.2 | Blend weight of MiDaS in the hybrid depth algorithms; higher = stronger depth relief. |
+ | `Enableperspectiveflip` | Enable Perspective Flip | Off | Turns on the perspective flip schedules (theta, phi, gamma, fv); without it they do nothing. |
+-| `Fovschedule` | FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |
+-| `Nearschedule` | Near (3D) | 200.0 | 3D near clipping distance of the depth warp. **MOD** (raw: `Nearscheduleraw`) |
+-| `Farschedule` | Far (3D) | 10000.0 | 3D far clipping distance of the depth warp. **MOD** (raw: `Farscheduleraw`) |
+-| `Aspectratioschedule` | Aspect Ratio (3D) | 1.0 | 3D aspect ratio of the camera; changing it squeezes or stretches space. **MOD** (raw: `Aspectratioscheduleraw`) |
+-| `Perspectivefliptheta` | Flip Theta | 0.0 | Perspective flip: tilt of the picture plane around the horizontal axis (degrees). **MOD** (raw: `Perspectiveflipthetaraw`) |
+-| `Perspectiveflipphi` | Flip Phi | 0.0 | Perspective flip: tilt around the vertical axis (degrees). **MOD** (raw: `Perspectiveflipphiraw`) |
+-| `Perspectiveflipgamma` | Flip Gamma | 0.0 | Perspective flip: rotation in the picture plane (degrees). **MOD** (raw: `Perspectiveflipgammaraw`) |
+-| `Perspectiveflipfv` | Flip FV | 53.0 | Perspective flip: field of view of the virtual camera looking at the plane. **MOD** (raw: `Perspectiveflipfvraw`) |
++| `Fovschedule` | ~ FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |
++| `Nearschedule` | ~ Near (3D) | 200.0 | 3D near clipping distance of the depth warp. **MOD** (raw: `Nearscheduleraw`) |
++| `Farschedule` | ~ Far (3D) | 10000.0 | 3D far clipping distance of the depth warp. **MOD** (raw: `Farscheduleraw`) |
++| `Aspectratioschedule` | ~ Aspect Ratio (3D) | 1.0 | 3D aspect ratio of the camera; changing it squeezes or stretches space. **MOD** (raw: `Aspectratioscheduleraw`) |
++| `Perspectivefliptheta` | ~ Flip Theta | 0.0 | Perspective flip: tilt of the picture plane around the horizontal axis (degrees). **MOD** (raw: `Perspectiveflipthetaraw`) |
++| `Perspectiveflipphi` | ~ Flip Phi | 0.0 | Perspective flip: tilt around the vertical axis (degrees). **MOD** (raw: `Perspectiveflipphiraw`) |
++| `Perspectiveflipgamma` | ~ Flip Gamma | 0.0 | Perspective flip: rotation in the picture plane (degrees). **MOD** (raw: `Perspectiveflipgammaraw`) |
++| `Perspectiveflipfv` | ~ Flip FV | 53.0 | Perspective flip: field of view of the virtual camera looking at the plane. **MOD** (raw: `Perspectiveflipfvraw`) |
+ 
+ ## Diffusion
+ 
+@@ -143,16 +143,16 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Enableddimetascheduling` | Enable DDIM Eta Scheduling | Off | Lets the DDIM Eta schedule apply (DDIM samplers only). |
+ | `Enableancestraletascheduling` | Enable Ancestral Eta Scheduling | Off | Lets the Ancestral Eta schedule apply (ancestral samplers only). |
+ | `Enableclipskipscheduling` | Enable CLIP Skip Scheduling | Off | Lets the CLIP Skip schedule apply. |
+-| `Strengthschedule` | Strength (keep of previous frame) | 0.65 | How much of the previous frame is kept (0.8 = keep 80 %, re-imagine 20 %). The main smoothness vs. change control. **MOD** (raw: `Strengthscheduleraw`) |
+-| `Noiseschedule` | Noise | 0.02 | Fresh noise added to each frame before diffusing; more = more new detail and more flicker. **MOD** (raw: `Noisescheduleraw`) |
+-| `Contrastschedule` | Contrast | 1.0 | Contrast applied to each frame before diffusing (1 = unchanged); above 1 builds up contrast over time. **MOD** (raw: `Contrastscheduleraw`) |
+-| `Cfgscaleschedule` | CFG Scale (LCM: 1.5-2) | 1.8 | How strongly the prompt is followed. LCM checkpoints want 1.5-2; higher burns. **MOD** (raw: `Cfgscalescheduleraw`) |
+-| `Stepsschedule` | Steps (needs Enable Steps Scheduling) | 25.0 | Steps per frame over time (needs Enable Steps Scheduling). **MOD** (raw: `Stepsscheduleraw`) |
+-| `Noisemultiplierschedule` | Noise Multiplier | 1.0 | Multiplier on the sampler's own noise; 1 = unchanged. **MOD** (raw: `Noisemultiplierscheduleraw`) |
+-| `Subseedstrengthschedule` | Subseed Strength (needs Enable Subseed) | 0.0 | 0..1 blend from the seed's noise to the subseed's noise (needs Enable Subseed). **MOD** (raw: `Subseedstrengthscheduleraw`) |
+-| `Ddimetaschedule` | DDIM Eta (needs Enable) | 0.0 | DDIM eta: randomness of DDIM sampling (needs Enable). **MOD** (raw: `Ddimetascheduleraw`) |
+-| `Ancestraletaschedule` | Ancestral Eta (needs Enable) | 1.0 | Ancestral eta: randomness of ancestral samplers (needs Enable). **MOD** (raw: `Ancestraletascheduleraw`) |
+-| `Clipskipschedule` | CLIP Skip (needs Enable) | 2.0 | How many final CLIP layers to skip when encoding the prompt (needs Enable). **MOD** (raw: `Clipskipscheduleraw`) |
++| `Strengthschedule` | ~ Strength (keep of previous frame) | 0.65 | How much of the previous frame is kept (0.8 = keep 80 %, re-imagine 20 %). The main smoothness vs. change control. **MOD** (raw: `Strengthscheduleraw`) |
++| `Noiseschedule` | ~ Noise | 0.02 | Fresh noise added to each frame before diffusing; more = more new detail and more flicker. **MOD** (raw: `Noisescheduleraw`) |
++| `Contrastschedule` | ~ Contrast | 1.0 | Contrast applied to each frame before diffusing (1 = unchanged); above 1 builds up contrast over time. **MOD** (raw: `Contrastscheduleraw`) |
++| `Cfgscaleschedule` | ~ CFG Scale (LCM: 1.5-2) | 1.8 | How strongly the prompt is followed. LCM checkpoints want 1.5-2; higher burns. **MOD** (raw: `Cfgscalescheduleraw`) |
++| `Stepsschedule` | ~ Steps (needs Enable Steps Scheduling) | 25.0 | Steps per frame over time (needs Enable Steps Scheduling). **MOD** (raw: `Stepsscheduleraw`) |
++| `Noisemultiplierschedule` | ~ Noise Multiplier | 1.0 | Multiplier on the sampler's own noise; 1 = unchanged. **MOD** (raw: `Noisemultiplierscheduleraw`) |
++| `Subseedstrengthschedule` | ~ Subseed Strength (needs Enable Subseed) | 0.0 | 0..1 blend from the seed's noise to the subseed's noise (needs Enable Subseed). **MOD** (raw: `Subseedstrengthscheduleraw`) |
++| `Ddimetaschedule` | ~ DDIM Eta (needs Enable) | 0.0 | DDIM eta: randomness of DDIM sampling (needs Enable). **MOD** (raw: `Ddimetascheduleraw`) |
++| `Ancestraletaschedule` | ~ Ancestral Eta (needs Enable) | 1.0 | Ancestral eta: randomness of ancestral samplers (needs Enable). **MOD** (raw: `Ancestraletascheduleraw`) |
++| `Clipskipschedule` | ~ CLIP Skip (needs Enable) | 2.0 | How many final CLIP layers to skip when encoding the prompt (needs Enable). **MOD** (raw: `Clipskipscheduleraw`) |
+ 
+ ## Noise & Color
+ 
+@@ -176,11 +176,11 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Opticalflowcadence` | Optical Flow Cadence | RAFT | How the in-between (cadence) frames are made: None (plain blend) or an optical-flow method (RAFT is best) that moves pixels along the motion. |
+ | `Opticalflowredogeneration` | Optical Flow Redo Generation | None | Renders each diffused frame twice and uses optical flow between them to stabilise it (less flicker, about 2x slower). |
+ | `Kernelschedule` | Anti-blur Kernel (odd) | 5 | Anti-blur sharpening kernel size (odd number). |
+-| `Cadenceflowfactorschedule` | Cadence Flow Factor | 1.0 | Strength of the optical flow applied to cadence frames (1 = full). **MOD** (raw: `Cadenceflowfactorscheduleraw`) |
+-| `Redoflowfactorschedule` | Redo Flow Factor | 1.0 | Strength of the flow used by Redo Generation. **MOD** (raw: `Redoflowfactorscheduleraw`) |
+-| `Amountschedule` | Anti-blur Amount | 0.1 | Anti-blur sharpening amount, fights the softening that accumulates over many frames. **MOD** (raw: `Amountscheduleraw`) |
+-| `Sigmaschedule` | Anti-blur Sigma | 1.0 | Anti-blur blur radius used to build the sharpening mask. **MOD** (raw: `Sigmascheduleraw`) |
+-| `Thresholdschedule` | Anti-blur Threshold | 0.0 | Anti-blur threshold: only edges above it are sharpened. **MOD** (raw: `Thresholdscheduleraw`) |
++| `Cadenceflowfactorschedule` | ~ Cadence Flow Factor | 1.0 | Strength of the optical flow applied to cadence frames (1 = full). **MOD** (raw: `Cadenceflowfactorscheduleraw`) |
++| `Redoflowfactorschedule` | ~ Redo Flow Factor | 1.0 | Strength of the flow used by Redo Generation. **MOD** (raw: `Redoflowfactorscheduleraw`) |
++| `Amountschedule` | ~ Anti-blur Amount | 0.1 | Anti-blur sharpening amount, fights the softening that accumulates over many frames. **MOD** (raw: `Amountscheduleraw`) |
++| `Sigmaschedule` | ~ Anti-blur Sigma | 1.0 | Anti-blur blur radius used to build the sharpening mask. **MOD** (raw: `Sigmascheduleraw`) |
++| `Thresholdschedule` | ~ Anti-blur Threshold | 0.0 | Anti-blur threshold: only edges above it are sharpened. **MOD** (raw: `Thresholdscheduleraw`) |
+ 
+ ## Hybrid Video
+ 
+@@ -192,9 +192,9 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Hybridmotionuseprevimg` | Flow from the previous generated image | Off | Measures flow between the previous generated frame and the video frame, which pulls the image towards the video's layout. |
+ | `Hybridflowconsistency` | Hybrid Flow Consistency | Off | Masks out pixels where the flow is unreliable (occlusions) to reduce tearing. |
+ | `Hybridconsistencyblur` | Hybrid Consistency Blur | 2 | Softens the flow-consistency mask. |
+-| `Hybridflowfactorschedule` | Hybrid Flow Factor | 1.0 | Scales the borrowed motion (0.5 = half the video's motion, 2 = exaggerated). **MOD** (raw: `Hybridflowfactorscheduleraw`) |
++| `Hybridflowfactorschedule` | ~ Hybrid Flow Factor | 1.0 | Scales the borrowed motion (0.5 = half the video's motion, 2 = exaggerated). **MOD** (raw: `Hybridflowfactorscheduleraw`) |
+ | `Hybridcomposite` | Hybrid Composite (mix the video in) | None | Blends the video's pixels into each frame before diffusion: Normal, Before Motion or After Generation; None = motion only. |
+-| `Hybridcompalphaschedule` | Composite Alpha | 0.5 | How much of the video frame is blended in by Hybrid Composite (0..1). **MOD** (raw: `Hybridcompalphascheduleraw`) |
++| `Hybridcompalphaschedule` | ~ Composite Alpha | 0.5 | How much of the video frame is blended in by Hybrid Composite (0..1). **MOD** (raw: `Hybridcompalphascheduleraw`) |
+ 
+ ## Mod Matrix
+ 
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 1c906fb..0bba36b 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -99,7 +99,7 @@ def _help(p, text):
+ 
+ 
+ def create(page, field, section=False):
+-    name, label = field.td_name, field.label
++    name, label = field.td_name, field.ui_label
+     kind = field.kind
+     if kind == schema.MENU:
+         p = page.appendMenu(name, label=label)[0]
+@@ -139,7 +139,7 @@ def create(page, field, section=False):
+         _help(p, 'Base value. Drop a CHOP channel on it (CHOP Reference or Export CHOP) and the whole '
+                  'channel is baked into the schedule at Queue (Mod Matrix > CHOP Timing); the Mod Matrix '
+                  'and the Mod CHOP add beat-locked motion on top.')
+-        raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
++        raw = page.appendStr(field.raw_td_name, label='     raw schedule')[0]
+         raw.default = ''
+         _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
+                    'When not empty it is sent verbatim and the base + modulation are ignored. '
+@@ -424,6 +424,8 @@ def run():
+     for note in notes:
+         say('NOTE ' + note)
+     menu = getattr(comp.par, 'Preset', None)
++    say('driveable (labels start with "%s", %d): drag a CHOP channel onto one (CHOP Reference / Export CHOP); '
++        'it then shows%s and the whole channel is baked at Queue' % (schema.MOD_MARK.strip(), len(schema.MOD_FIELDS), schema.LINK_MARK))
+     say('presets: %d examples in the Example Preset menu (Tempo page), pages: %s' % (
+         len(getattr(menu, 'menuNames', []) or []) - 1 if menu is not None else 0,
+         ', '.join(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2:-len(schema.PAGE_CNS)])))
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 1906a82..9e83f28 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -27,7 +27,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.10.0"
++__version__ = "0.10.1"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 42f325e..7bb0125 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -61,6 +61,8 @@ STATUS = "status"          # read-only string written by the controller
+ PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
+ 
+ RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
++MOD_MARK = "~ "            # label prefix of driveable (MOD) parameters on the COMP
++LINK_MARK = "  [CHOP]"     # label suffix while a CHOP channel drives the parameter
+ MOD_SLOTS = 8
+ 
+ 
+@@ -112,6 +114,11 @@ class Field(object):
+     def td_name(self):
+         return td_name(self.api)
+ 
++    @property
++    def ui_label(self):
++        """Label on the COMP: driveable parameters are marked with MOD_MARK."""
++        return (MOD_MARK + self.label) if self.kind == MOD else self.label
++
+     @property
+     def raw_td_name(self):
+         return self.td_name + RAW_SUFFIX
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index e70d097..8913618 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -499,6 +499,35 @@ def read_links(ui, values):
+     return links
+ 
+ 
++_SHOWN_LINKS = {}
++
++
++def show_links(ui, links):
++    """Make CHOP links visible on the COMP: '[CHOP]' after a linked parameter's label and the
++    Mod Matrix > CHOP-linked Parameters line. Only touches labels when the set changes."""
++    if ui is None:
++        return
++    key = getattr(ui, "path", id(ui))
++    current = dict((api, link.get("par")) for api, link in links.items())
++    if _SHOWN_LINKS.get(key) == current:
++        return
++    _SHOWN_LINKS[key] = current
++    for field in schema.MOD_FIELDS:
++        linked = field.api in links
++        for name in (field.td_name, field.raw_td_name):
++            par = getattr(ui.par, name, None)
++            if par is None or not hasattr(par, "label"):
++                continue
++            base = field.ui_label if name == field.td_name else "     raw schedule"
++            want = base + (schema.LINK_MARK if linked and current[field.api] == name else "")
++            try:
++                if par.label != want:
++                    par.label = want
++            except Exception:
++                pass
++    _set_par(ui, "Choplinksinfo", describe_links(links))
++
++
+ def describe_links(links):
+     if not links:
+         return "none (drag a CHOP channel onto a schedule parameter: CHOP Reference or Export)"
+@@ -586,7 +615,7 @@ def build(root, cfg):
+         raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
+     values = read_ui(ui)
+     links = read_links(ui, values)
+-    _set_par(ui, "Choplinksinfo", describe_links(links))
++    show_links(ui, links)
+     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
+     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
+                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
+@@ -1868,6 +1897,7 @@ def mod_live_cook(script_op):
+         loop_frame = float(chan[0]) if chan is not None else 0.0
+         values = read_ui(ui)
+         links = read_links(ui, values)
++        show_links(ui, links)
+         live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame,
+                                    script_op.time.rate, links)
+         script_op.clear()
+diff --git a/tests/test_chop_link.py b/tests/test_chop_link.py
+index 8d78b77..621fb09 100644
+--- a/tests/test_chop_link.py
++++ b/tests/test_chop_link.py
+@@ -143,6 +143,23 @@ class LinkControllerTest(unittest.TestCase):
+         self.assertEqual(result["schedules"]["zoom"][0], "chop")
+         self.assertTrue(result["schedules"]["zoom"][1].startswith("0:(1.00000), 1:(1.00100)"))
+ 
++    def test_linked_labels(self):
++        tz = schema.BY_API["translation_z"]
++        self.ui.par.Translationz = Par("Translationz", 0.0, ParMode.EXPRESSION, "op('pattern1')['chan1']")
++        self.ui.par.Translationz.label = tz.ui_label
++        self.ui.par.Zoom.label = schema.BY_API["zoom"].ui_label
++        self.assertTrue(tz.ui_label.startswith(schema.MOD_MARK))
++        self.ui.par.Choplinksinfo = Par("Choplinksinfo", "")
++        values = ctl.read_ui(self.ui)
++        ctl.show_links(self.ui, ctl.read_links(self.ui, values))
++        self.assertEqual(self.ui.par.Translationz.label, tz.ui_label + schema.LINK_MARK)
++        self.assertEqual(self.ui.par.Zoom.label, schema.BY_API["zoom"].ui_label)
++        self.assertIn("Translationz", self.ui.par.Choplinksinfo.val)
++        self.ui.par.Translationz.mode = ParMode.CONSTANT                 # unlinked: the mark goes away
++        ctl.show_links(self.ui, ctl.read_links(self.ui, ctl.read_ui(self.ui)))
++        self.assertEqual(self.ui.par.Translationz.label, tz.ui_label)
++        self.assertTrue(self.ui.par.Choplinksinfo.val.startswith("none"))
++
+     def test_timeline_timing_uses_feed_loop_start(self):
+         self.root.timeline = None
+         self.ui.time = type("T", (), {"rate": 60.0, "start": 1})()
+-- 
+2.43.0
+

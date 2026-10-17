@@ -1,0 +1,242 @@
+From c3a6bd85e62708f7e03dcef7df1046c9176dac9f Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 00:09:34 +0000
+Subject: [PATCH] Sweep Depth: pre-made depth video, depth-video-only Queue;
+ preset/version diagnostics
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  2 ++
+ scripts/build_master_ui.py        |  6 +++++
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/schema.py        |  3 +++
+ scripts/tdeforum/sweep.py         |  4 ++++
+ scripts/tdeforum/td_controller.py | 30 +++++++++++++++++++++----
+ tests/test_builder.py             |  7 ++++++
+ tests/test_sweep.py               | 37 ++++++++++++++++++++++++++++++-
+ 8 files changed, 85 insertions(+), 6 deletions(-)
+
+diff --git a/README.md b/README.md
+index ef04442..a7a3125 100644
+--- a/README.md
++++ b/README.md
+@@ -140,6 +140,8 @@ A moving band through the depth of your init video, recorded as a ControlNet gui
+ 2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`, 240 in a 240-frame project) through the same workflow as *Preprocess via ComfyUI*; the result is cached like it.
+ 3. TouchDesigner plays that depth video through `sweep_depth` -> the Script TOP `sweep_mask`, which keeps only the grey band for the frame being recorded (white inside the band, black elsewhere) and records one frame per render frame, exactly like the TOP feeds. The finished movie becomes the unit's `vid_path`.
+ 
++The depth video is made from the **Video Init Path** itself (not from unit 1's preprocessed video), named after the init video, size, model and frame count, so the same settings reuse it (*Force ComfyUI re-preprocess* remakes it). To prepare it beforehand switch on *Queue only makes the depth video*: Queue stops once it exists and the *Depth Video* field shows its path. To use a depth video you made yourself, put its container path in *Pre-made Depth Video*; ComfyUI is then skipped.
++
+ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse. *Cycles* repeats it over the render, *Shape* = ping-pong goes out and back, *Direction* = reverse swaps start and end, *Band Width* / *Edge Softness* are in grey levels (of 255), *Band Fill* = Depth keeps the depth shading inside the band, *Also use as Video Mask* sets `video_mask_path` / `use_mask_video` to the same movie (the unit may then stay off). The log and the *Sweep Plan* field show the band at the first and last frame.
+ 
+ Render frame k shows source frame `extract_from + k * nth`, and the sweep position follows k, so the sweep is recorded sequentially (the timeline is lengthened for the recording and restored, as for any feed).
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index f701430..4257788 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -31,7 +31,9 @@ _scripts = os.path.dirname(_path) if _path else 'T:/scripts'
+ if _scripts not in sys.path:
+     sys.path.insert(0, _scripts)
+ 
++import importlib
+ import tdeforum
++tdeforum = importlib.reload(tdeforum)      # a cached older __init__ would reload an old module list
+ tdeforum.reload_all()
+ from tdeforum import migrate, payload, prompt_seq, schema, td_controller
+ 
+@@ -346,6 +348,10 @@ def run():
+         say('  dropped %s (%s)' % (name, schema.RETIRED_TD_NAMES.get(name, 'not in schema')))
+     for note in notes:
+         say('NOTE ' + note)
++    menu = getattr(comp.par, 'Preset', None)
++    say('presets: %d examples in the Example Preset menu (Tempo page), pages: %s' % (
++        len(getattr(menu, 'menuNames', []) or []) - 1 if menu is not None else 0,
++        ', '.join(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2:-len(schema.PAGE_CNS)])))
+     try:
+         tp = payload.tempo_plan(values)
+         say('tempo: ' + (tdeforum.tempo.describe(tp) if tp else 'manual length'))
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 33a2816..5275166 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -23,7 +23,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.4.0"
++__version__ = "0.5.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index fbbe71f..a0416aa 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -342,6 +342,9 @@ FIELDS = [
+ 
+     # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------
+     F("sweep_enabled", False, SW, TOGGLE, label="Sweep Depth On", target=None),
++    F("sweep_depth_video", "", SW, STR, label="Pre-made Depth Video (container path; empty = make it from Video Init Path)",
++      target=None),
++    F("sweep_prepare_only", False, SW, TOGGLE, label="Queue only makes the depth video (no render)", target=None),
+     F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
+       target=None),
+     F("sweep_mode", sweep.MAX, SW, MENU, menu=sweep.MODES, labels=sweep.MODE_LABELS, label="Mode", target=None),
+diff --git a/scripts/tdeforum/sweep.py b/scripts/tdeforum/sweep.py
+index 64c8d0f..ea3fe4a 100644
+--- a/scripts/tdeforum/sweep.py
++++ b/scripts/tdeforum/sweep.py
+@@ -75,6 +75,10 @@ def enabled(values):
+     return _truthy(values.get("sweep_enabled", False))
+ 
+ 
++def prepare_only(values):
++    return _truthy(values.get("sweep_prepare_only", False))
++
++
+ def check(values):
+     """None when Sweep Depth can run, else why not (shown to the user)."""
+     if not enabled(values):
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 0b05b0b..6ca58cc 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -22,6 +22,7 @@ import glob
+ import json
+ import os
+ import re
++import sys
+ import time
+ import traceback
+ 
+@@ -395,15 +396,30 @@ def _feed_and_render(root, cfg, st, values, result):
+ 
+ 
+ def _start_sweep_depth(root, cfg, values, result, st):
+-    """Sweep Depth needs a depth video of the init video: ask ComfyUI for it (cached).
++    """Sweep Depth needs a depth video of the init video.
+ 
+-    True when a ComfyUI job was submitted (the pipeline resumes when it finishes)."""
+-    if not [w for w in feed.requests(values) if w.mode == feed.SWEEP]:
++    Normally ComfyUI makes it from Video Init Path (cached). A Pre-made Depth Video path skips
++    ComfyUI. "Queue only makes the depth video" stops after this stage.
++
++    True when the pipeline should stop here (a ComfyUI job was submitted and resumes in
++    _on_comfy(), or the depth video was all that was asked for)."""
++    wants = [w for w in feed.requests(values) if w.mode == feed.SWEEP]
++    prepare = sweep.enabled(values) and sweep.prepare_only(values)
++    if not wants and not prepare:
+         return False
+     problem = sweep.check(values)
+     if problem:
+         raise RuntimeError(problem)
+-    return _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep")
++    premade = str(values.get("sweep_depth_video", "") or "").strip()
++    if premade:
++        _store_preprocessed(root, premade, "sweep")
++        log("Sweep Depth uses the pre-made depth video %s" % premade)
++    elif _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep"):
++        return True
++    if prepare:
++        _finish(root, st, "depth video ready: %s" % (premade or _op(root, "ui").par.Sweepdepthpath.eval()))
++        return True
++    return False
+ 
+ 
+ def _render_stage(root, cfg, st, values, result):
+@@ -1151,6 +1167,9 @@ def _on_comfy(root, cfg, st, code, body, text):
+     if st.get("purpose") == "sweep":
+         try:
+             values, result = build(root, cfg)
++            if sweep.prepare_only(values):
++                _finish(root, st, "depth video ready: %s" % container_path)
++                return
+             _feed_and_render(root, cfg, st, values, result)
+         except Exception as exc:
+             traceback.print_exc()
+@@ -1394,6 +1413,9 @@ def doctor(root):
+     cfg = config.load()
+     resync(root, cfg)
+     log("share root %s | scripts %s | runtime %s" % (cfg["share_root"], cfg["scripts_dir"], cfg["runtime_dir"]))
++    log("tdeforum %s | %d example presets | sweep depth page %s" % (
++        getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
++        "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
+     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
+     ui = _op(root, "ui")
+     values = read_ui(ui) if ui is not None else {}
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index 20f3d87..fc8a98c 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -259,6 +259,13 @@ class BuilderTest(unittest.TestCase):
+         self.assertFalse(any("NOTE feed" in line for line in self.log))
+         self.assertEqual(comp.par.Feedloopstart.val, 0)
+ 
++    def test_preset_menu_and_report(self):
++        from tdeforum import presets
++        comp = self.build()
++        self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
++        self.assertEqual(len(presets.NAMES), 16)
++        self.assertTrue(any("presets: 15 examples" in line for line in self.log), self.log[-6:])
++
+     def test_sweep_depth_ops(self):
+         comp = self.build()
+         depth, script = comp.op("sweep_depth"), comp.op("sweep_mask")
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index a185967..b395289 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -157,7 +157,7 @@ class SchemaFeedTest(unittest.TestCase):
+         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
+         fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP]
+         self.assertEqual(sorted(f.api for f in fields), sorted(
+-            ["sweep_enabled", "sweep_model", "sweep_mode", "sweep_cycles", "sweep_shape", "sweep_direction",
++            ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode", "sweep_cycles", "sweep_shape", "sweep_direction",
+              "sweep_width", "sweep_softness", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
+         self.assertTrue(all(f.target is None for f in fields))
+         self.assertEqual(schema.BY_API["sweep_depth_path"].td_name, "Sweepdepthpath")
+@@ -278,6 +278,41 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.assertEqual(s["video_mask_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
+         self.assertEqual(ui.par.Usemaskvideo.val, 1)
+ 
++    def test_premade_depth_video_skips_comfy(self):
++        premade = "/opt/a1111/td_masks/preprocessed_vids/mine_depth.mp4"
++        path = config.to_share(self.cfg, premade)
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "wb") as fh:
++            fh.write(b"x" * 50)
++        ui = self.make(sweep_depth_video=premade)
++        ctl.queue(self.root)
++        self.assertEqual(self.root.op("webclient_comfyui").requests, [])
++        self.assertEqual(self.state(), ctl.CAPTURING)
++        self.assertEqual(ui.par.Sweepdepthpath.val, premade)
++        self.assertEqual(self.depth.par.file.val, path)
++
++    def test_prepare_only_makes_the_depth_video_and_stops(self):
++        ui = self.make(sweep_prepare_only=True)
++        ctl.queue(self.root)
++        self.depth_done()
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("depth video ready", ui.par.Pipelinestatus.val)
++        self.assertEqual(self.posts(), [])
++        self.assertEqual(self.out.recorded, [])
++        self.assertTrue(ui.par.Sweepdepthpath.val.endswith(self.DEPTH))
++        # the second press hits the cache and also stops
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertEqual(self.posts(), [])
++
++    def test_prepared_depth_video_is_used_by_the_next_queue(self):
++        self.make(sweep_prepare_only=True)
++        ctl.queue(self.root)
++        self.depth_done()
++        self.ui.par.Sweepprepareonly.val = 0
++        ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.CAPTURING)
++
+     def test_preview_and_doctor_report_the_sweep(self):
+         self.make()
+         with mock.patch("builtins.print") as out:
+-- 
+2.43.0
+

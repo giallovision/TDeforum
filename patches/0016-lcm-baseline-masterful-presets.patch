@@ -1,0 +1,1107 @@
+From 6720089538b44af360dd6b0470366a05040f76f0 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 01:19:48 +0000
+Subject: [PATCH] LCM baseline with exact img2img steps; presets apply when
+ picked and are retuned; sweep grow/blur and fast vits depth
+
+Steps 4 / CFG 1.8 / noise 0.02 baselines (versioned one-time migration),
+img2img_fix_steps option, payload checks for LCM CFG, img2img step count and
+Video Input cadence. ui_exec Parameter Execute DAT applies the Example Preset
+on pick, adds Re-apply Preset and Edit prompt_seq. Video Input presets use a
+fixed seed and cadence 1; depth sweep presets use vits, grow and blur.
+OpenCV tests skip when cv2 is missing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         | 26 +++++---
+ ROADMAP.md                        |  1 +
+ scripts/build_master_ui.py        | 20 ++++++-
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/comfy.py         | 10 +++-
+ scripts/tdeforum/migrate.py       | 46 +++++++++-----
+ scripts/tdeforum/payload.py       | 25 ++++++++
+ scripts/tdeforum/presets.py       | 99 +++++++++++++++++--------------
+ scripts/tdeforum/schema.py        | 23 ++++---
+ scripts/tdeforum/sweep.py         | 52 +++++++++++++---
+ scripts/tdeforum/td_controller.py | 30 ++++++++--
+ scripts/ui_exec.py                | 31 ++++++++++
+ tests/test_builder.py             | 32 +++++++++-
+ tests/test_payload.py             | 48 +++++++++++++++
+ tests/test_presets.py             | 54 ++++++++++++++++-
+ tests/test_sweep.py               | 22 ++++++-
+ 16 files changed, 424 insertions(+), 97 deletions(-)
+ create mode 100644 scripts/ui_exec.py
+
+diff --git a/README.md b/README.md
+index 3489b68..24feffe 100644
+--- a/README.md
++++ b/README.md
+@@ -104,15 +104,19 @@ Notes:
+ * `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
+ * Units 1-3 have pages; units 4-5 stay available through the payload only.
+ 
++### LCM baseline
++
++The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept.
++
+ ### Example presets
+ 
+-*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+ 
+ * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+ * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+ * Motion (2D/3D camera) and the Mod Matrix slots a preset does not mention are set to the baseline, so each example starts from a neutral camera.
+-* The values a preset replaced are remembered: pick another preset, or **None**, and press bake to get them back first. Your own tweaks after applying stay until the selection changes.
+-* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts are never touched. ControlNet is left alone too, except by the three *Depth sweep* examples (below), which take over unit 1.
++* The values a preset replaced are remembered: pick another preset, or **None**, to get them back. Your own tweaks after applying stay until the selection changes or you press *Re-apply Preset*.
++* The seed (424242), sampler, steps, CFG, size, model and prompts are never touched. Seed behaviour stays **Iterate (+1)**, except in the Video Input examples, which use **Fixed**: one seed on every video frame is what stops video-to-video from boiling. ControlNet is left alone too, except by the three *Depth sweep* examples, which switch Sweep Depth on and take over unit 1 (QR Monster, weight 0.75, guidance ending at 80 %).
+ 
+ | id | name | what it does |
+ |---|---|---|
+@@ -126,18 +130,18 @@ Notes:
+ | `2d_scroll` | 2D - Scroll (good) | Sideways scroll with wrapped edges, so the picture tiles instead of smearing. |
+ | `2d_spiral_crash` | 2D - Spiral crash (extreme) | Fast zoom and spin with low keep: the image keeps collapsing into new structure. |
+ | `2d_twirl` | 2D - Twirl (extreme) | Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2). |
+-| `video_soft_restyle` | Video Input - Soft restyle (good) | Keeps most of the init video's structure and colour; frames follow the video (needs Globals > Video Init Path). |
+-| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video: heavy restyle, extra noise, no colour matching. |
+-| `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep, nearest levels (245-255) to farthest (0-10): the white band seems to travel away from you. |
+-| `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same the other way: farthest levels first, ending on the nearest. |
+-| `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps, wide band that keeps the depth shading, strong ControlNet, loose hold. |
++| `video_soft_restyle` | Video Input - Soft restyle (good) | Every video frame restyled with the same seed: keeps the video's structure and colour, no boiling (needs Globals > Video Init Path). |
++| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video and a new seed every frame: heavy restyle that boils on purpose. |
++| `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep: a soft glowing band starts on the nearest depth (white) and travels to the farthest, so it seems to move away from you. Needs Globals > Video Init Path; takes over ControlNet unit 1. |
++| `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same, the other way: the band starts on the farthest depth and ends on the nearest, so it seems to rush toward you. |
++| `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps of a wide band that keeps the depth shading and leaves long trails; ControlNet leads, so the picture pulses through the depth layers. |
+ 
+ ### Sweep Depth (Animation Mode = Video Input)
+ 
+ A moving band through the depth of your init video, rendered as a ControlNet guide (and optionally the mask video).
+ 
+ 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
+-2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Preprocessor* you picked, through the same workflow as *Preprocess via ComfyUI*. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
++2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
+ 3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`. Same depth video + same look + same frames = cache hit, no re-render.
+ 4. Then the render is submitted as usual.
+ 
+@@ -147,6 +151,7 @@ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a
+ |---|---|
+ | Cycles / Shape / Direction | sweeps over the render; ping-pong goes out and back; reverse swaps start and end |
+ | Band Width / Edge Softness | in grey levels (of 255); softness feathers both edges |
++| Grow / Blur | widen the band shapes by N px, then soften them (Gaussian, px): QR Monster reads a soft glow better than a hard stencil |
+ | Trail | frames the band keeps glowing after it passed (fades to 5 %); 0 = a clean band |
+ | Depth Smoothing | blends each depth frame with the previous ones (0-0.9), so per-frame depth flicker does not make the band jitter |
+ | Band Fill | white, or the depth shading inside the band |
+@@ -201,6 +206,8 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
+ * in prompt weights (backticks) every letter `t` is replaced by the frame number, so avoid functions containing a `t` (`tanh`, `sqrt`); `sin`, `cos`, `exp`, `abs` are fine;
+ * the anti-blur *kernel* must be odd (OpenCV), so it is a plain integer, not modulatable.
+ 
++`make test` on a machine without OpenCV skips the 28 tests that encode real video (`pip install opencv-python-headless` to run them); TouchDesigner ships its own.
++
+ ### Network map
+ 
+ | Trigger | DAT | File | Calls |
+@@ -213,6 +220,7 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
+ | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
+ | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
+ | Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
++| Example Preset, *Re-apply Preset*, *Edit prompt_seq* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
+ | `deforum/mod_live` cooks (input `beat_clock`) | `deforum/mod_live_callbacks` | `mod_live_chop.py` | `td_controller.mod_live_cook` |
+ | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
+ 
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 41b718f..302a92f 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -51,6 +51,7 @@ This document outlines the macro-architecture for our generative visual performa
+ 
+ - [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
+ - [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
++- [x] LCM baseline (4 exact steps, CFG 1.8) with payload checks; presets apply when picked, Re-apply button; Video Input presets on a fixed seed; Sweep Depth grow/blur and the fast vits depth model.
+ 
+ ### 🚧 In Progress
+ - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index 308b9dd..e2ba1c0 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -21,6 +21,8 @@
+ #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
+ #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
+ #                                    channels named after parameters (drive live visuals with it)
++#   ui_exec           Parameter Execute DAT  Example Preset applies when picked; Re-apply Preset
++#                                    and Edit prompt_seq buttons
+ # and removes ops older versions made that are no longer used (sweep_depth, sweep_mask, ...).
+ 
+ import json
+@@ -113,6 +115,9 @@ def create(page, field, section=False):
+     elif kind in (schema.FLOAT, schema.MOD):
+         p = page.appendFloat(name, label=label)[0]
+         p.default = float(field.default)
++    elif kind == schema.PULSE:
++        p = page.appendPulse(name, label=label)[0]
++        return [p]
+     else:  # str, schedule, seed, checkpoint, status
+         p = page.appendStr(name, label=label)[0]
+         p.default = str(field.default)
+@@ -242,6 +247,17 @@ def build_inner(comp, values):
+ 
+     build_clock(comp)
+ 
++    # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
++    ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
++    for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
++                        ('pars', 'Preset Presetapply Promptedit'), ('custom', 1), ('builtin', 0),
++                        ('valuechange', 1), ('onpulse', 1), ('active', 1)):
++        par = getattr(ui_exec.par, name, None)
++        if par is None:
++            say('NOTE %s has no parameter %r; set it to %r by hand' % (ui_exec.name, name, value))
++            continue
++        par.val = value
++
+     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
+     cross.inputConnectors[0].connect(head)
+     cross.inputConnectors[1].connect(tail)
+@@ -365,7 +381,8 @@ def run():
+             by_name[p.name] = p
+ 
+     kept, notes = [], []
+-    for action in migrate.plan(saved, from_old):
++    since = 0 if first else int(comp.fetch('tdeforum_baseline', 0, search=False) or 0)
++    for action in migrate.plan(saved, from_old, since):
+         if action[0] == 'note':
+             notes.append(action[1])
+             continue
+@@ -379,6 +396,7 @@ def run():
+         except Exception as exc:
+             say('could not restore %s: %s' % (name, exc))
+ 
++    comp.store('tdeforum_baseline', migrate.BASELINE_VERSION)
+     values = td_controller.read_ui(comp)
+     build_inner(comp, values)
+     write_map_table(root, comp)
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index d577868..f001cd6 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -24,7 +24,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.6.0"
++__version__ = "0.7.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
+diff --git a/scripts/tdeforum/comfy.py b/scripts/tdeforum/comfy.py
+index a84b663..de84af2 100644
+--- a/scripts/tdeforum/comfy.py
++++ b/scripts/tdeforum/comfy.py
+@@ -35,8 +35,14 @@ def build_prompt(template, cfg, values, plan, force=False, stamp=""):
+     load["select_every_nth"] = 1
+     workflow["11"]["inputs"]["width"] = width
+     workflow["11"]["inputs"]["height"] = height
+-    workflow["19"]["inputs"]["preprocessor"] = preprocessor
+-    workflow["19"]["inputs"]["resolution"] = min(width, height)
++    resolution = int(values.get("comfy_resolution") or 0) or min(width, height)
++    if preprocessor.startswith("depth_anything_v2_vit"):
++        from . import sweep           # a dedicated node: the AIO one always loads the large model
++        workflow["19"] = sweep.comfy_depth_node(preprocessor, workflow["19"]["inputs"]["image"],
++                                                min(resolution, min(width, height)))
++    else:
++        workflow["19"]["inputs"]["preprocessor"] = preprocessor
++        workflow["19"]["inputs"]["resolution"] = min(resolution, min(width, height))
+     # A new prefix changes the output node's inputs, so ComfyUI's cache can't
+     # skip writing the file when a re-preprocess is forced.
+     prefix = "preprocessed_vids/" + key + ("_" + stamp if force and stamp else "")
+diff --git a/scripts/tdeforum/migrate.py b/scripts/tdeforum/migrate.py
+index 0b01ff4..b612065 100644
+--- a/scripts/tdeforum/migrate.py
++++ b/scripts/tdeforum/migrate.py
+@@ -32,38 +32,54 @@ def _const(value):
+     return {"mode": "CONSTANT", "expr": "", "bind": "", "val": value}
+ 
+ 
+-# Baselines that changed: a saved value equal to the OLD default is not carried over, so the COMP
+-# picks up the new baseline. Anything you set to something else is kept.
++# Baselines that changed: api -> (baseline version, old default, new default). A saved value
++# equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
++# you set to something else is kept. Each bump applies once: build_master_ui stores the version
++# it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
++BASELINE_VERSION = 2
+ BASELINE_BUMPS = {
+-    "seed": ("-1", "424242"),
+-    "loop_seeds": (True, False),
++    "seed": (1, "-1", "424242"),
++    "loop_seeds": (1, True, False),
++    # 2: LCM checkpoints (4 steps, CFG 1.5-2, little noise) and the fast depth model.
++    "steps": (2, 10, 4),
++    "cfg_scale_schedule": (2, 7.0, 1.8),
++    "noise_schedule": (2, 0.065, 0.02),
++    "noise_multiplier_schedule": (2, 1.05, 1.0),
++    "sweep_model": (2, "DepthAnythingV2Preprocessor", "depth_anything_v2_vits"),
+ }
+ 
+ 
+-def _is_old_default(field, entry):
++def _is_old_default(field, entry, since=0):
+     bump = BASELINE_BUMPS.get(field.api)
+-    if bump is None or entry.get("mode", "CONSTANT") != "CONSTANT":
++    if bump is None or bump[0] <= since or entry.get("mode", "CONSTANT") != "CONSTANT":
+         return False
+-    value = entry.get("val")
+-    if isinstance(bump[0], bool):
+-        return str(value).strip().lower() in ("1", "1.0", "true", "on") if bump[0] else \
++    old, value = bump[1], entry.get("val")
++    if isinstance(old, bool):
++        return str(value).strip().lower() in ("1", "1.0", "true", "on") if old else \
+             str(value).strip().lower() in ("0", "0.0", "false", "off", "")
+-    return str(value).strip() == bump[0]
++    if isinstance(old, (int, float)):
++        try:
++            return abs(float(value) - float(old)) < 1e-9
++        except (TypeError, ValueError):
++            return False
++    return str(value).strip() == old
++
+ 
++def plan(saved, from_old_ui, since=0):
++    """Actions that move ``saved`` onto the new COMP's parameters.
+ 
+-def plan(saved, from_old_ui):
+-    """Actions that move ``saved`` onto the new COMP's parameters."""
++    ``since``: the baseline version the COMP was last built with (bumps newer than it apply)."""
+     actions = []
+     for field in schema.FIELDS:
+         name = field.td_name
+-        if field.kind == schema.STATUS or name not in saved:
++        if field.kind in (schema.STATUS, schema.PULSE) or name not in saved:
+             continue
+         entry = saved[name]
+         mode = entry.get("mode", "CONSTANT")
+ 
+-        if _is_old_default(field, entry):
++        if _is_old_default(field, entry, since):
+             bump = BASELINE_BUMPS[field.api]
+-            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[0], bump[1])))
++            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[1], bump[2])))
+             continue
+ 
+         if field.kind == schema.MOD and from_old_ui:
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 12e8508..df608b7 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -282,6 +282,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     if tp and tp["seamless"]:
+         warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
+     compiled = {}
++    ranges = {}
+ 
+     for field in schema.FIELDS:
+         if field.target is None or field.api.startswith("cn_") or field.api not in values:
+@@ -307,6 +308,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+                 int(_as_number(values.get("bake_points", 0), float)))
+             settings[field.key] = sched
+             compiled[field.api] = (how, sched)
++            ranges[field.api] = bounds if bounds else None
+             _check_field(field, how, bounds, mode, field_slots, override, warnings)
+             continue
+ 
+@@ -342,6 +344,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             and "padding_mode" not in values:
+         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
+ 
++    _check_sampling(values, settings, options, ranges, mode, warnings)
++
+     # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
+     # Deforum parses every unit's schedules even when the unit is off, so a unit the
+     # UI does not have (or an old UI without it) gets unit 1's defaults with the unit
+@@ -400,6 +404,27 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+             "warnings": warnings}
+ 
+ 
++def _check_sampling(values, settings, options, ranges, mode, warnings):
++    """Settings that quietly ruin renders with LCM checkpoints (and Video Input)."""
++    sampler = _text(settings.get("sampler", ""))
++    cfg = ranges.get("cfg_scale_schedule")
++    if "lcm" in sampler.lower() and cfg and cfg[1] > 3.0:
++        warnings.append("CFG reaches %g with the LCM sampler: LCM checkpoints burn and smear above ~2 "
++                        "(use 1.5-2)" % cfg[1])
++    keep = ranges.get("strength_schedule")
++    steps = settings.get("steps")
++    if keep and isinstance(steps, int) and not _as_bool(options.get("img2img_fix_steps", False)):
++        actual = int(steps * (1.0 - min(0.999, keep[1])))
++        if actual < 3:
++            warnings.append("A1111 runs int(steps x (1 - Strength)) steps on img2img frames: %d step(s) at "
++                            "Strength %g; switch on Globals > Exact Steps" % (actual, keep[1]))
++    cadence = _as_number(settings.get("diffusion_cadence", 1), int)
++    if mode == "Video Input" and cadence > 1:
++        warnings.append("Video Input with Diffusion Cadence %d: only every %s video frame is diffused and the "
++                        "frames between are warped from it; use 1 to restyle every frame"
++                        % (cadence, {2: "2nd", 3: "3rd"}.get(cadence, "%dth" % cadence)))
++
++
+ def _loop_seeds(values, settings, tp, warnings):
+     if not (tp["seamless"] and _as_bool(values.get("loop_seeds", False))):
+         return
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+index 59615bc..5172cc5 100644
+--- a/scripts/tdeforum/presets.py
++++ b/scripts/tdeforum/presets.py
+@@ -13,10 +13,12 @@ the TouchDesigner side:
+ * a MOD parameter's ``Raw`` override is cleared while the preset is on (a raw schedule would
+   beat the preset's base value).
+ 
+-Never touched: seed and seed behaviour (the baseline is Iterate +1, seed 424242), sampler,
+-steps, CFG, size, model, prompts. ControlNet is left alone too, except by the "Depth sweep"
+-examples, which switch Sweep Depth on and take over ControlNet unit 1 as its guide (they need
+-Globals > Video Init Path and are put back like everything else when you choose None).
++Never touched: the seed itself (424242), sampler, steps, CFG, size, model, prompts. Seed
++*behaviour* stays Iterate (+1) except in the Video Input examples, which use Fixed (one seed for
++every video frame is what stops video-to-video from boiling). ControlNet is left alone too,
++except by the "Depth sweep" examples, which switch Sweep Depth on and take over ControlNet unit 1
++as its guide (they need Globals > Video Init Path and are put back like everything else when you
++choose None).
+ 
+ Units, at the 60 fps default: translation is Deforum units per frame (``translate_xyz`` =
+ -translation / 200, positive Z = forward), rotation is degrees per frame, 2D zoom is a factor per
+@@ -61,25 +63,37 @@ def _merge(*parts):
+     return out
+ 
+ 
+-# Shared by the "good" examples: carry most of the previous frame, almost no fresh noise, the
+-# depth warp helps the camera move. Extremes override what they push.
++# Tuned for the LCM baseline: 4 steps run exactly on every frame (Globals > Exact Steps), CFG 1.8,
++# sampler LCM. LCM resolves detail in very few steps, so fresh noise is kept low (it would show as
++# grain that four steps cannot clean) and Strength does the work.
++#
++# Shared by the 2D / 3D "good" examples: keep most of the previous frame, a little perlin noise
++# so detail keeps regenerating, cadence 4 with RAFT flow between diffused frames, LAB colour lock.
+ _SMOOTH = {
+-    "strength_schedule": 0.78, "noise_schedule": 0.02, "noise_multiplier_schedule": 1.0,
++    "strength_schedule": 0.75, "noise_schedule": 0.015, "noise_multiplier_schedule": 1.0,
+     "contrast_schedule": 1.0, "diffusion_cadence": 4, "optical_flow_cadence": "RAFT",
+     "color_coherence": "LAB", "loop_overlap_beats": 2.0,
+ }
+ _3D = {"animation_mode": "3D", "use_depth_warping": True, "fov_schedule": 70.0, "midas_weight": 0.3,
+        "padding_mode": "border"}
+ _2D = {"animation_mode": "2D", "border": "replicate"}
++# Video Input restyles every video frame (cadence 1). A FIXED seed puts the same noise on every
++# frame, which is what keeps a video-to-video render from boiling; Iterate (the 2D/3D baseline)
++# gives each frame new noise and flickers here.
+ _VIDEO = {"animation_mode": "Video Input", "seamless_loop": False, "diffusion_cadence": 1,
+-          "optical_flow_cadence": "None", "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0}
+-# Sweep Depth: the depth video's band is recorded as ControlNet unit 1's guide (QR Monster).
+-_SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "DepthAnythingV2Preprocessor",
+-          "sweep_softness": 6, "sweep_fill": "white", "sweep_shape": "ramp", "sweep_direction": "forward",
+-          "sweep_trail": 6, "sweep_smooth": 0.3,
++          "optical_flow_cadence": "None", "noise_schedule": 0.0, "noise_multiplier_schedule": 1.0,
++          "contrast_schedule": 1.0, "seed_behavior": "fixed"}
++# Sweep Depth: the band video becomes ControlNet unit 1's guide (QR Monster). A widened, blurred
++# band with a short trail reads as a glow to QR Monster instead of a hard stencil; guidance ends
++# at 80 % so the last steps can put detail back over the shapes.
++_SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "depth_anything_v2_vits",
++          "sweep_width": 18, "sweep_softness": 8, "sweep_grow": 6, "sweep_blur": 4.0, "sweep_fill": "white",
++          "sweep_shape": "ramp", "sweep_direction": "forward", "sweep_cycles": 1.0,
++          "sweep_trail": 8, "sweep_smooth": 0.4,
+           "feed_1_mode": "sweep", "cn_1_enabled": True, "cn_1_module": "none",
+-          "cn_1_model": "ctrl_v1p_qr_monster_v2", "cn_1_guidance_start": 0.0, "cn_1_guidance_end": 1.0,
+-          "cn_1_control_mode": "Balanced"}
++          "cn_1_model": "ctrl_v1p_qr_monster_v2", "cn_1_weight": 0.75, "cn_1_guidance_start": 0.0,
++          "cn_1_guidance_end": 0.8, "cn_1_control_mode": "Balanced",
++          "strength_schedule": 0.55, "color_coherence": "LAB"}
+ 
+ PRESETS = [
+     # ------------------------------------------------------------------ 3D
+@@ -93,25 +107,25 @@ PRESETS = [
+     Preset("3d_kick_push", "3D - Kick push (good)", "3D", GOOD,
+            "Slow drift forward plus a push on every beat (Mod slot 1) that also loosens Strength "
+            "on the hit (slot 2), so the kick regenerates detail.",
+-           _merge(_SMOOTH, _3D, {"translation_z": 0.25, "strength_schedule": 0.8},
++           _merge(_SMOOTH, _3D, {"translation_z": 0.25, "strength_schedule": 0.78},
+                   _slot(1, "translation_z", "decay", 1.0, 1.2, 5.0),
+                   _slot(2, "strength_schedule", "decay", 1.0, -0.15, 5.0))),
+     Preset("3d_warp_drive", "3D - Warp drive (extreme)", "3D", EXTREME,
+            "Fast push, wide FOV and a surge every 4 beats. Expect stretching; cadence 2 keeps up.",
+            _merge(_SMOOTH, _3D, {"translation_z": 3.0, "rotation_3d_z": 0.15, "fov_schedule": 95.0,
+-                                 "midas_weight": 0.5, "strength_schedule": 0.6, "noise_schedule": 0.04,
+-                                 "diffusion_cadence": 2, "contrast_schedule": 1.04},
++                                 "midas_weight": 0.5, "strength_schedule": 0.6, "noise_schedule": 0.03,
++                                 "diffusion_cadence": 2, "contrast_schedule": 1.02},
+                   _slot(1, "translation_z", "sine", 4.0, 1.5))),
+     Preset("3d_vortex", "3D - Vortex (extreme)", "3D", EXTREME,
+            "Fast roll while pushing in and tilting; the picture spirals and re-forms.",
+            _merge(_SMOOTH, _3D, {"rotation_3d_z": 0.9, "rotation_3d_x": 0.2, "translation_z": 1.2,
+-                                 "fov_schedule": 80.0, "strength_schedule": 0.55, "noise_schedule": 0.06,
++                                 "fov_schedule": 80.0, "strength_schedule": 0.55, "noise_schedule": 0.04,
+                                  "diffusion_cadence": 2, "padding_mode": "reflection"})),
+     Preset("3d_strobe_push", "3D - Strobe push (extreme)", "3D", EXTREME,
+            "Hard pushes on every half beat, a contrast flash and a Strength dip on the beat.",
+-           _merge(_SMOOTH, _3D, {"strength_schedule": 0.7, "noise_schedule": 0.05, "diffusion_cadence": 2},
++           _merge(_SMOOTH, _3D, {"strength_schedule": 0.7, "noise_schedule": 0.03, "diffusion_cadence": 2},
+                   _slot(1, "translation_z", "square", 0.5, 2.0, 8.0),
+-                  _slot(2, "contrast_schedule", "decay", 0.5, 0.08, 6.0),
++                  _slot(2, "contrast_schedule", "decay", 0.5, 0.06, 6.0),
+                   _slot(3, "strength_schedule", "decay", 1.0, -0.3, 5.0))),
+     # ------------------------------------------------------------------ 2D
+     Preset("2d_zoom_drift", "2D - Zoom drift (good)", "2D", GOOD,
+@@ -119,47 +133,44 @@ PRESETS = [
+            _merge(_SMOOTH, _2D, {"zoom": 1.003, "angle": 0.1})),
+     Preset("2d_scroll", "2D - Scroll (good)", "2D", GOOD,
+            "Sideways scroll with wrapped edges, so the picture tiles instead of smearing.",
+-           _merge(_SMOOTH, _2D, {"translation_x": 1.2, "strength_schedule": 0.8, "border": "wrap"})),
++           _merge(_SMOOTH, _2D, {"translation_x": 1.2, "strength_schedule": 0.78, "border": "wrap"})),
+     Preset("2d_spiral_crash", "2D - Spiral crash (extreme)", "2D", EXTREME,
+            "Fast zoom and spin with low keep: the image keeps collapsing into new structure.",
+            _merge(_SMOOTH, _2D, {"zoom": 1.02, "angle": 1.2, "strength_schedule": 0.5,
+-                                 "noise_schedule": 0.08, "diffusion_cadence": 2, "contrast_schedule": 1.02})),
++                                 "noise_schedule": 0.05, "diffusion_cadence": 2, "contrast_schedule": 1.01})),
+     Preset("2d_twirl", "2D - Twirl (extreme)", "2D", EXTREME,
+            "Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2).",
+-           _merge(_SMOOTH, _2D, {"zoom": 1.008, "strength_schedule": 0.6, "noise_schedule": 0.05,
++           _merge(_SMOOTH, _2D, {"zoom": 1.008, "strength_schedule": 0.6, "noise_schedule": 0.03,
+                                  "diffusion_cadence": 2, "border": "wrap"},
+                   _slot(1, "angle", "sine", 4.0, 2.5),
+                   _slot(2, "zoom", "decay", 1.0, 0.02, 5.0))),
+     # ------------------------------------------------------------------ Video Input
+     Preset("video_soft_restyle", "Video Input - Soft restyle (good)", "Video Input", GOOD,
+-           "Keeps most of the init video's structure and colour; frames follow the video (needs "
+-           "Globals > Video Init Path).",
+-           _merge(_VIDEO, {"strength_schedule": 0.55, "noise_schedule": 0.0, "color_coherence": "Video Input"})),
++           "Every video frame restyled with the same seed: keeps the video's structure and colour, no "
++           "boiling (needs Globals > Video Init Path).",
++           _merge(_VIDEO, {"strength_schedule": 0.6, "color_coherence": "Video Input"})),
+     Preset("video_melt", "Video Input - Melt (extreme)", "Video Input", EXTREME,
+-           "Loose hold on the video: heavy restyle, extra noise, no colour matching.",
+-           _merge(_VIDEO, {"strength_schedule": 0.3, "noise_schedule": 0.1, "noise_multiplier_schedule": 1.1,
++           "Loose hold on the video and a new seed every frame: heavy restyle that boils on purpose.",
++           _merge(_VIDEO, {"strength_schedule": 0.35, "noise_schedule": 0.05, "seed_behavior": "iter",
+                            "color_coherence": "None"})),
+     Preset("video_depth_sweep_away", "Video Input - Depth sweep away (good)", "Video Input", GOOD,
+-           "One slow sweep: a white band starts on the nearest levels (245-255) of the video's depth and "
+-           "ends on the farthest (0-10), so the glow seems to travel away from you. Needs Globals > "
+-           "Video Init Path; uses ControlNet unit 1.",
+-           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
+-                                   "sweep_mode": "max", "sweep_cycles": 1.0, "sweep_width": 14,
+-                                   "cn_1_weight": 0.9})),
++           "One slow sweep: a soft glowing band starts on the nearest depth (white) and travels to the "
++           "farthest, so it seems to move away from you. Needs Globals > Video Init Path; takes over "
++           "ControlNet unit 1.",
++           _merge(_VIDEO, _SWEEP, {"sweep_mode": "max"})),
+     Preset("video_depth_sweep_toward", "Video Input - Depth sweep toward (good)", "Video Input", GOOD,
+-           "The same, the other way: the band starts on the farthest levels and ends on the nearest, so it "
++           "The same, the other way: the band starts on the farthest depth and ends on the nearest, so it "
+            "seems to rush toward you.",
+-           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
+-                                   "sweep_mode": "min", "sweep_cycles": 1.0, "sweep_width": 14,
+-                                   "cn_1_weight": 0.9})),
++           _merge(_VIDEO, _SWEEP, {"sweep_mode": "min"})),
+     Preset("video_depth_sweep_pulses", "Video Input - Depth sweep pulses (extreme)", "Video Input", EXTREME,
+-           "Four out-and-back sweeps with a wide band that keeps the depth shading, strong ControlNet, "
+-           "loose hold on the video: the picture pulses through the depth layers.",
+-           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.4, "noise_schedule": 0.08, "color_coherence": "None",
++           "Four out-and-back sweeps of a wide band that keeps the depth shading and leaves long trails; "
++           "ControlNet leads, so the picture pulses through the depth layers.",
++           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.42, "noise_schedule": 0.03,
+                                    "sweep_mode": "min", "sweep_cycles": 4.0, "sweep_shape": "pingpong",
+-                                   "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 10,
+-                                   "sweep_trail": 14,
+-                                   "cn_1_weight": 1.3, "cn_1_control_mode": "ControlNet is more important"})),
++                                   "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 12,
++                                   "sweep_grow": 10, "sweep_blur": 6.0, "sweep_trail": 16, "sweep_smooth": 0.3,
++                                   "cn_1_weight": 1.1, "cn_1_guidance_end": 1.0,
++                                   "cn_1_control_mode": "ControlNet is more important"})),
+ ]
+ 
+ BY_ID = dict((p.id, p) for p in PRESETS)
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index c03113f..6da6325 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -57,6 +57,7 @@ MOD = "mod"                # float base + <Name>raw override; modulated by the M
+ SEED = "seed"              # string par (seeds overflow TD int pars); sent as int
+ CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
+ STATUS = "status"          # read-only string written by the controller
++PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
+ 
+ RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
+ MOD_SLOTS = 8
+@@ -162,11 +163,11 @@ _MODS = [
+     _mod("perspective_flip_fv", 53.0, CA, (10, 120), "Flip FV", (0.001, None)),
+     # Diffusion
+     _mod("strength_schedule", 0.65, DI, (0, 1), "Strength (keep of previous frame)", (0, 1)),
+-    _mod("noise_schedule", 0.065, DI, (0, 0.2), "Noise", (0, 1)),
++    _mod("noise_schedule", 0.02, DI, (0, 0.2), "Noise", (0, 1)),
+     _mod("contrast_schedule", 1.0, DI, (0.8, 1.2), "Contrast", (0, None)),
+-    _mod("cfg_scale_schedule", 7.0, DI, (1, 15), "CFG Scale", (0, None)),
++    _mod("cfg_scale_schedule", 1.8, DI, (1, 15), "CFG Scale (LCM: 1.5-2)", (0, None)),
+     _mod("steps_schedule", 25.0, DI, (1, 50), "Steps (needs Enable Steps Scheduling)", (1, None)),
+-    _mod("noise_multiplier_schedule", 1.05, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
++    _mod("noise_multiplier_schedule", 1.0, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
+     _mod("subseed_strength_schedule", 0.0, DI, (0, 1), "Subseed Strength (needs Enable Subseed)", (0, 1)),
+     _mod("ddim_eta_schedule", 0.0, DI, (0, 1), "DDIM Eta (needs Enable)", (0, None)),
+     _mod("ancestral_eta_schedule", 1.0, DI, (0, 1.5), "Ancestral Eta (needs Enable)", (0, None)),
+@@ -235,7 +236,8 @@ def _cn_unit_fields(n):
+ FIELDS = [
+     # --- Tempo -----------------------------------------------------------------
+     F("preset", presets.NONE, TE, MENU, menu=presets.NAMES, labels=presets.LABELS,
+-      label="Example Preset (applied on bake)", target=None),
++      label="Example Preset (applied when picked)", target=None),
++    F("preset_apply", 0, TE, PULSE, label="Re-apply Preset", target=None),
+     F("preset_info", "", TE, STATUS, label="Preset", target=None),
+     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
+     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
+@@ -262,7 +264,11 @@ FIELDS = [
+     F("sd_vae", "Automatic", G, STR, label="VAE", target="options"),
+     F("W", 1024, G, INT, norm=(0, 1920)),
+     F("H", 576, G, INT, norm=(0, 1920)),
+-    F("steps", 10, G, INT, norm=(1, 50)),
++    F("steps", 4, G, INT, norm=(1, 50), label="Steps (LCM: 4)"),
++    # A1111 runs only int(steps x denoise) steps on img2img frames (4 steps at Strength 0.65 = 1
++    # step); with this on it runs exactly `steps`, which is what LCM checkpoints need.
++    F("img2img_fix_steps", True, G, TOGGLE, label="Exact Steps on every frame (A1111 img2img_fix_steps)",
++      target="options"),
+     F("sampler", "LCM", G, STR),
+     F("scheduler", "Automatic", G, STR),
+     F("animation_mode", "3D", G, MENU, menu=["2D", "3D", "Video Input", "Interpolation"]),
+@@ -283,6 +289,7 @@ FIELDS = [
+     # --- Prompts ---------------------------------------------------------------
+     F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
+       labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
++    F("prompt_edit", 0, PR, PULSE, label="Edit prompt_seq (opens deforum/prompt_seq)", target=None),
+     F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
+ 
+     # --- Motion 2D -------------------------------------------------------------
+@@ -350,6 +357,8 @@ FIELDS = [
+       label="Direction", target=None),
+     F("sweep_width", 10, SW, INT, norm=(1, 128), label="Band Width (grey levels of 255)", target=None),
+     F("sweep_softness", 0, SW, INT, norm=(0, 64), label="Edge Softness (grey levels)", target=None),
++    F("sweep_grow", 0, SW, INT, norm=(0, 48), label="Grow (px, widens the band shapes)", target=None),
++    F("sweep_blur", 0.0, SW, FLOAT, norm=(0, 24), label="Blur (px, soft glow for ControlNet)", target=None),
+     F("sweep_trail", 0, SW, INT, norm=(0, 60), label="Trail (frames the band glows on, 0 = off)",
+       target=None),
+     F("sweep_smooth", 0.0, SW, FLOAT, norm=(0, 0.9), label="Depth Smoothing (steadier band, 0 = off)",
+@@ -357,8 +366,8 @@ FIELDS = [
+     F("sweep_fill", sweep.WHITE, SW, MENU, menu=sweep.FILLS, labels=sweep.FILL_LABELS, label="Band Fill",
+       target=None),
+     F("sweep_as_mask", False, SW, TOGGLE, label="Also use as Video Mask", target=None),
+-    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
+-      target=None),
++    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, labels=sweep.MODEL_LABELS,
++      label="Depth Model (ComfyUI)", target=None),
+     F("sweep_depth_video", "", SW, STR,
+       label="Pre-made Depth Video (container path; empty = make it from Video Init Path)", target=None),
+     F("sweep_prepare_only", False, SW, TOGGLE,
+diff --git a/scripts/tdeforum/sweep.py b/scripts/tdeforum/sweep.py
+index 052c389..5fb2fbc 100644
+--- a/scripts/tdeforum/sweep.py
++++ b/scripts/tdeforum/sweep.py
+@@ -38,10 +38,17 @@ DIRECTION_LABELS = ["Forward (as the mode says)", "Reverse (swap start and end)"
+ WHITE, DEPTH = "white", "depth"
+ FILLS = [WHITE, DEPTH]
+ FILL_LABELS = ["White (a flat white band)", "Depth (keep the depth shading inside the band)"]
+-# ComfyUI AIO_Preprocessor names that make a depth map (comfyui_controlnet_aux).
+-MODELS = ["DepthAnythingV2Preprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]
++# Depth models. depth_anything_v2_* run comfyui_controlnet_aux's DepthAnythingV2Preprocessor node
++# with that checkpoint (vits ~25M parameters: several times faster than vitl, plenty for a mask);
++# the others are AIO_Preprocessor names (the AIO DepthAnythingV2 entry always loads vitl).
++MODELS = ["depth_anything_v2_vits", "depth_anything_v2_vitb", "depth_anything_v2_vitl",
++          "DepthAnythingV2Preprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]
++MODEL_LABELS = ["Depth Anything V2 small (vits, fast)", "Depth Anything V2 base (vitb)",
++                "Depth Anything V2 large (vitl, slow)", "Depth Anything V2 via AIO (vitl, old default)",
++                "MiDaS", "Zoe"]
++DEPTH_RESOLUTION = 512      # ComfyUI detect resolution for the sweep depth (the mask is resized anyway)
+ VIDEO_INPUT = "Video Input"
+-RENDER_VERSION = 2          # bump when the pixels a job produces change
++RENDER_VERSION = 3          # bump when the pixels a job produces change
+ FOURCCS = ("mp4v", "avc1")  # first one the OpenCV build can open wins
+ _EPS = 1e-9
+ 
+@@ -61,10 +68,10 @@ def _num(value, default):
+ 
+ class Settings(object):
+     __slots__ = ("mode", "cycles", "shape", "direction", "width", "softness", "fill", "model",
+-                 "trail", "smooth")
++                 "trail", "smooth", "grow", "blur")
+ 
+     def __init__(self, mode=MAX, cycles=1.0, shape=RAMP, direction=FORWARD, width=10,
+-                 softness=0, fill=WHITE, model=MODELS[0], trail=0, smooth=0.0):
++                 softness=0, fill=WHITE, model=MODELS[0], trail=0, smooth=0.0, grow=0, blur=0.0):
+         self.mode = mode if mode in MODES else MAX
+         self.cycles = max(0.05, float(cycles))
+         self.shape = shape if shape in SHAPES else RAMP
+@@ -75,6 +82,8 @@ class Settings(object):
+         self.model = model if model else MODELS[0]
+         self.trail = min(240.0, max(0.0, float(trail)))
+         self.smooth = min(0.95, max(0.0, float(smooth)))
++        self.grow = int(min(64, max(0, round(float(grow)))))
++        self.blur = min(48.0, max(0.0, float(blur)))
+ 
+     def as_dict(self):
+         return dict((name, getattr(self, name)) for name in self.__slots__)
+@@ -88,7 +97,8 @@ def from_values(values):
+         shape=str(get("sweep_shape", RAMP)), direction=str(get("sweep_direction", FORWARD)),
+         width=_num(get("sweep_width", 10), 10), softness=_num(get("sweep_softness", 0), 0),
+         fill=str(get("sweep_fill", WHITE)), model=str(get("sweep_model", MODELS[0]) or MODELS[0]),
+-        trail=_num(get("sweep_trail", 0), 0), smooth=_num(get("sweep_smooth", 0), 0))
++        trail=_num(get("sweep_trail", 0), 0), smooth=_num(get("sweep_smooth", 0), 0),
++        grow=_num(get("sweep_grow", 0), 0), blur=_num(get("sweep_blur", 0), 0))
+ 
+ 
+ def enabled(values):
+@@ -177,6 +187,10 @@ def describe(sweep_plan):
+         s.mode, s.cycles, "" if s.cycles == 1 else "s", s.shape, round(s.width),
+         levels(first[0], first[1]), levels(last[0], last[1]), len(bands))
+     extras = []
++    if s.grow:
++        extras.append("grow %dpx" % s.grow)
++    if s.blur:
++        extras.append("blur %gpx" % s.blur)
+     if s.trail:
+         extras.append("trail %g frames" % s.trail)
+     if s.smooth:
+@@ -189,6 +203,30 @@ def trail_decay(trail_frames):
+     return math.exp(-3.0 / trail_frames) if trail_frames > 0 else 0.0
+ 
+ 
++def comfy_depth_node(model, image_link, resolution=DEPTH_RESOLUTION):
++    """The ComfyUI node that makes the depth map for ``model`` (replaces the AIO node)."""
++    if str(model).startswith("depth_anything_v2_vit"):
++        return {"class_type": "DepthAnythingV2Preprocessor",
++                "inputs": {"ckpt_name": "%s.pth" % model, "resolution": int(resolution), "image": image_link},
++                "_meta": {"title": "TD_PREPROCESSOR"}}
++    return {"class_type": "AIO_Preprocessor",
++            "inputs": {"preprocessor": model, "resolution": int(resolution), "image": image_link},
++            "_meta": {"title": "TD_PREPROCESSOR"}}
++
++
++def shape_mask(m, grow=0, blur=0.0):
++    """Widen (dilate by ``grow`` px) and soften (Gaussian, sigma ``blur`` px) a float mask."""
++    if not grow and not blur:
++        return m
++    import cv2
++    if grow:
++        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1))
++        m = cv2.dilate(m, kernel)
++    if blur:
++        m = cv2.GaussianBlur(m, (0, 0), blur)
++    return m
++
++
+ def mask(depth, lo, hi, softness=0.0, fill=WHITE):
+     """Band mask of a grey image (numpy float array, 0..1): 1 inside [lo, hi], 0 outside.
+ 
+@@ -308,7 +346,7 @@ def render(depth_path, out_path, sweep_plan, size, fps=30.0):
+                 ema = s.smooth * ema + (1.0 - s.smooth) * depth
+             else:
+                 ema = depth
+-            m = mask(ema, lo, hi, soft, fill)
++            m = shape_mask(mask(ema, lo, hi, soft, fill), s.grow, s.blur)
+             acc = m if (acc is None or not decay) else np.maximum(m, acc * decay)
+             pixels = np.clip(acc * 255.0 + 0.5, 0, 255).astype(np.uint8)
+             writer.write(cv2.cvtColor(pixels, cv2.COLOR_GRAY2BGR))
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 1c6d201..4258542 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -180,11 +180,12 @@ def _apply_preset_safely(root):
+         log("preset could not be applied: %s" % exc)
+ 
+ 
+-def apply_preset(root):
++def apply_preset(root, force=False):
+     """Lay the selected Example Preset over the deforum COMP (see presets.py). True if it changed anything.
+ 
+     Does nothing while the selection equals what was last applied, so your tweaks after applying
+-    stay. Picking another preset or None first puts back the values the last preset replaced.
++    stay (``force``, the Re-apply button, applies it again anyway). Picking another preset or None
++    first puts back the values the last preset replaced.
+     Only constant parameters are touched; driven ones (expression / bind / export) keep their driver.
+     """
+     ui = _op(root, "ui")
+@@ -194,7 +195,7 @@ def apply_preset(root):
+     selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
+     stored = root.fetch(PRESET_KEY, None, search=False)
+     stored = dict(stored) if isinstance(stored, dict) else {}
+-    if selected == stored.get("applied", presets.NONE):
++    if selected == stored.get("applied", presets.NONE) and not (force and selected != presets.NONE):
+         return False
+ 
+     restored = 0
+@@ -244,6 +245,22 @@ def apply_preset(root):
+     return True
+ 
+ 
++def open_prompt_seq(root):
++    """Prompts page > Edit prompt_seq: the table lives inside the COMP; open it in a window."""
++    ui = _op(root, "ui")
++    table = _inner(ui, "prompt_seq")
++    if table is None:
++        log("no prompt_seq inside %s: run builder_master_ui" % (ui.path if ui is not None else "the COMP"))
++        return
++    try:
++        table.openViewer()
++    except Exception as exc:
++        log("could not open %s (%s); dive into the COMP (select it, press i) to edit it" % (table.path, exc))
++    source = getattr(ui.par, "Promptsource", None)
++    if source is not None and str(source.eval()) == "json":
++        log("note: Prompts > Prompt Source is prompt.json, so prompt_seq is not used until you switch it")
++
++
+ def read_ui(ui):
+     values = {}
+     for field in schema.FIELDS:
+@@ -661,7 +678,8 @@ def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1")
+     force = payload._as_bool(values.get("force_preprocess", False))
+     job_values = values
+     if purpose == "sweep":        # same workflow, a depth preprocessor instead of unit 1's
+-        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model)
++        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model,
++                          comfy_resolution=sweep.DEPTH_RESOLUTION)
+     job = comfy.build_prompt(template, cfg, job_values, result["plan"], force=force,
+                              stamp=time.strftime("%Y%m%d%H%M%S"))
+     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
+@@ -1662,7 +1680,9 @@ def doctor(root):
+             log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
+                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
+         rows = read_prompt_rows(ui)
+-        log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
++        source = values.get("prompt_source")
++        log("prompt_seq rows: %d in %s/prompt_seq (Prompts > Edit prompt_seq opens it); prompts come from %s"
++            % (max(0, len(rows or []) - 1), ui.path, "prompt_seq" if source == "sequence" else "prompt.json"))
+         _doctor_feeds(root, cfg, ui, values)
+     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
+         container_path = str(values.get(api, "") or "")
+diff --git a/scripts/ui_exec.py b/scripts/ui_exec.py
+new file mode 100644
+index 0000000..e287d9d
+--- /dev/null
++++ b/scripts/ui_exec.py
+@@ -0,0 +1,31 @@
++# Parameter Execute DAT `ui_exec` (inside the deforum COMP; created and file-synced by
++# build_master_ui). Watches the COMP's own buttons:
++#   Preset         picking an Example Preset applies it at once (it is also checked at bake / Queue)
++#   Presetapply    "Re-apply Preset": lays the selected preset over the COMP again
++#   Promptedit     opens deforum/prompt_seq in a floating editor
++# Logic: tdeforum/td_controller.py.
++
++
++def _ctl():
++    import os
++    import sys
++    path = me.par.file.eval()
++    scripts = os.path.dirname(path) if path else 'T:/scripts'
++    if scripts not in sys.path:
++        sys.path.insert(0, scripts)
++    from tdeforum import td_controller
++    return td_controller
++
++
++def onValueChange(par, prev):
++    if par.name == 'Preset':
++        _ctl().apply_preset(par.owner.parent())
++    return
++
++
++def onPulse(par):
++    if par.name == 'Presetapply':
++        _ctl().apply_preset(par.owner.parent(), force=True)
++    elif par.name == 'Promptedit':
++        _ctl().open_prompt_seq(par.owner.parent())
++    return
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index ce41aaa..9c57a77 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -77,6 +77,9 @@ class Page(object):
+     def appendMenu(self, name, label=""):
+         return self._add(name, "Menu", "")
+ 
++    def appendPulse(self, name, label=""):
++        return self._add(name, "Pulse", 0)
++
+     def destroy(self):
+         self.comp.customPages.remove(self)
+         for p in [p for p in self.comp.customPars]:
+@@ -169,6 +172,8 @@ BUILTINS = {
+     "crossTOP": [("cross", "Float", 0, ())],
+     "selectTOP": [("top", "Str", "", ())],
+     "scriptCHOP": [("callbacks", "Str", "", ())],
++    "parameterexecuteDAT": [(n, "Str", "", ()) for n in ("file", "syncfile", "op", "pars", "custom", "builtin",
++                                                         "valuechange", "onpulse", "active")],
+     "constantCHOP": [(n % i, "Str" if n.startswith("name") else "Float", "" if n.startswith("name") else 0.0, ())
+                      for i in range(10) for n in ("name%d", "value%d")],
+     "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
+@@ -183,7 +188,7 @@ def run_builder(root, scripts_dir, out):
+     me.par.file.val = scripts_dir + "/build_master_ui.py"
+     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
+     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
+-                 "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP"):
++                 "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP", "parameterexecuteDAT"):
+         env[kind] = kind
+     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
+         with open(BUILDER, encoding="utf-8") as fh:
+@@ -339,6 +344,31 @@ class BuilderTest(unittest.TestCase):
+         self.assertEqual(comp.op("prompt_seq").rows[-1], ["8", "fire", "2"])
+         self.assertIn("values kept", "\n".join(self.log))
+ 
++    def test_lcm_baseline_bump_applies_once(self):
++        comp = self.build()
++        self.assertEqual(comp.storage["tdeforum_baseline"], 2)
++        self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
++        comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...
++        comp.par.Cfgscaleschedule.val = 7.0            # ...still at the old CFG
++        comp.par.Steps.val = 6                         # a value you chose is kept
++        comp = self.build()
++        self.assertEqual((comp.par.Cfgscaleschedule.val, comp.par.Steps.val), (1.8, 6))
++        self.assertTrue(any("Cfgscaleschedule was the old baseline (7.0); now 1.8" in l for l in self.log))
++        comp.par.Cfgscaleschedule.val = 7.0            # set on purpose after the upgrade: kept
++        comp = self.build()
++        self.assertEqual(comp.par.Cfgscaleschedule.val, 7.0)
++
++    def test_ui_exec_watches_the_buttons(self):
++        comp = self.build()
++        ui_exec = comp.op("ui_exec")
++        self.assertTrue(ui_exec.par.file.val.endswith("ui_exec.py"))
++        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit")
++        self.assertEqual(ui_exec.par.op.val, comp.path)
++        self.assertEqual((ui_exec.par.valuechange.val, ui_exec.par.onpulse.val), (1, 1))
++        for name in ("Presetapply", "Promptedit"):
++            self.assertEqual(getattr(comp.par, name).style, "Pulse")
++        self.assertFalse(any("NOTE ui_exec" in line for line in self.log))
++
+     def test_controller_reads_the_built_comp(self):
+         comp = self.build()
+         comp.par.Mod1active.val = True
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index fe2807c..350800c 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -364,3 +364,51 @@ class MigrateTest(unittest.TestCase):
+         actions = migrate.plan({"Zoom": c(1.1), "Zoomraw": c("0:(1), 9:(2)")}, from_old_ui=False)
+         sets = dict((a[1], a[2]["val"]) for a in actions if a[0] == "set")
+         self.assertEqual(sets, {"Zoom": 1.1, "Zoomraw": "0:(1), 9:(2)"})
++
++
++class SamplingChecksTest(unittest.TestCase):
++    def build(self, **overrides):
++        return payload.build_request(_comp_values(**overrides), {"0": "x"}, MODELS)
++
++    def test_defaults_are_lcm_ready_and_send_exact_steps(self):
++        result = self.build()
++        s = result["request"]["deforum_settings"]
++        self.assertEqual((s["steps"], s["cfg_scale_schedule"], s["sampler"]), (4, "0:(1.8)", "LCM"))
++        self.assertIs(result["request"]["options_overrides"]["img2img_fix_steps"], True)
++        self.assertFalse([w for w in result["warnings"] if "LCM" in w or "int(steps" in w])
++
++    def test_high_cfg_with_lcm_warns(self):
++        warnings = self.build(cfg_scale_schedule=7.0)["warnings"]
++        self.assertTrue([w for w in warnings if "CFG reaches 7 with the LCM sampler" in w], warnings)
++        self.assertFalse([w for w in self.build(cfg_scale_schedule=7.0, sampler="Euler a")["warnings"]
++                          if "LCM" in w])
++
++    def test_too_few_img2img_steps_warn_without_exact_steps(self):
++        warnings = self.build(img2img_fix_steps=False, strength_schedule=0.65)["warnings"]
++        self.assertTrue([w for w in warnings if "1 step(s) at Strength 0.65" in w], warnings)
++        self.assertFalse([w for w in self.build(strength_schedule=0.65)["warnings"] if "int(steps" in w])
++
++    def test_video_input_with_cadence_warns(self):
++        warnings = self.build(animation_mode="Video Input", diffusion_cadence=4)["warnings"]
++        self.assertTrue([w for w in warnings if "Diffusion Cadence 4" in w and "every 4th" in w], warnings)
++        self.assertFalse([w for w in self.build(animation_mode="Video Input", diffusion_cadence=1)["warnings"]
++                          if "Cadence" in w])
++
++
++class DepthNodeTest(unittest.TestCase):
++    def test_vits_uses_the_dedicated_node_at_512(self):
++        with open(os.path.join(ROOT_DIR, "scripts", "templates", "TD_CN_PreProc.json")) as fh:
++            template = json.load(fh)
++        cfg = config.load()
++        values = _comp_values(comfy_preprocessor="depth_anything_v2_vits", comfy_resolution=512)
++        plan = payload.plan_frames("Video Input", 240)
++        job = comfy.build_prompt(template, cfg, values, plan)
++        node = job["body"]["prompt"]["19"]
++        self.assertEqual(node["class_type"], "DepthAnythingV2Preprocessor")
++        self.assertEqual(node["inputs"]["ckpt_name"], "depth_anything_v2_vits.pth")
++        self.assertEqual(node["inputs"]["resolution"], 512)
++        self.assertEqual(node["inputs"]["image"], ["11", 0])
++        self.assertIn("depth_anything_v2_vits_240f", job["cache_key"])
++        aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
++        self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
++        self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index dad9fdb..17c6c66 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -42,14 +42,32 @@ class PresetDataTest(unittest.TestCase):
+                     self.assertIsInstance(value, bool)
+ 
+     def test_presets_leave_the_seed_and_checkpoint_setup_alone(self):
+-        protected = {"seed", "seed_behavior", "loop_seeds", "sampler", "scheduler", "steps", "W", "H",
++        protected = {"seed", "loop_seeds", "sampler", "scheduler", "steps", "W", "H", "img2img_fix_steps",
+                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
+         for preset in presets.PRESETS:
+             self.assertFalse(protected & set(preset.values), preset.id)
++            if preset.mode != "Video Input":
++                self.assertNotIn("seed_behavior", preset.values, preset.id)
+             if "sweep" not in preset.id:
+                 self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
+                                  preset.id)
+ 
++    def test_video_presets_hold_the_seed_and_restyle_every_frame(self):
++        for preset in presets.PRESETS:
++            if preset.mode != "Video Input":
++                continue
++            self.assertEqual(preset.values["diffusion_cadence"], 1, preset.id)
++            expected = "iter" if preset.id == "video_melt" else "fixed"
++            self.assertEqual(preset.values["seed_behavior"], expected, preset.id)
++
++    def test_good_presets_pass_the_lcm_checks(self):
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for preset in presets.PRESETS:
++            values = _comp_values(**presets.resolve(preset, defaults))
++            warnings = payload.build_request(values, {"0": "x"}, MODELS)["warnings"]
++            self.assertFalse([w for w in warnings if "LCM" in w or "int(steps" in w or "Cadence" in w],
++                             "%s: %s" % (preset.id, warnings))
++
+     def test_sweep_presets_switch_sweep_on_and_use_unit_one_as_the_guide(self):
+         sweeps = [p for p in presets.PRESETS if p.id.startswith("video_depth_sweep")]
+         self.assertEqual(len(sweeps), 3)
+@@ -61,6 +79,9 @@ class PresetDataTest(unittest.TestCase):
+             self.assertTrue(p.values["sweep_enabled"] and p.values["cn_1_enabled"])
+             self.assertEqual(p.values["feed_1_mode"], "sweep")
+             self.assertTrue([k for k in p.values if k.startswith("sweep_")])
++            self.assertEqual(p.values["sweep_model"], "depth_anything_v2_vits")
++            self.assertGreater(p.values["sweep_grow"], 0)
++            self.assertGreater(p.values["sweep_blur"], 0)
+ 
+     def test_reset_keys_are_motion_or_slot_toggles(self):
+         for key in presets.RESET_KEYS:
+@@ -76,7 +97,8 @@ class PresetDataTest(unittest.TestCase):
+             s = result["request"]["deforum_settings"]
+             self.assertEqual(s["animation_mode"], preset.mode, preset.id)
+             self.assertEqual(sorted(k for k in s if k not in KNOWN_KEYS), [], preset.id)
+-            self.assertEqual((s["seed"], s["seed_behavior"]), (424242, "iter"), preset.id)
++            behaviour = preset.values.get("seed_behavior", "iter")
++            self.assertEqual((s["seed"], s["seed_behavior"]), (424242, behaviour), preset.id)
+             json.dumps(result["request"])
+             if preset.level == presets.GOOD:
+                 bad = [w for w in result["warnings"]
+@@ -134,7 +156,7 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+         self.assertEqual(ui.par.Animationmode.val, "3D")
+         self.assertEqual((ui.par.Translationz.val, ui.par.Translationzraw.val), (0.6, ""))
+         self.assertEqual(ui.par.Zoom.val, 1.0, "motion not named by the preset goes back to baseline")
+-        self.assertEqual(ui.par.Strengthschedule.val, 0.78)
++        self.assertEqual(ui.par.Strengthschedule.val, 0.75)
+         self.assertEqual(ui.par.Seed.val, "424242")
+         self.assertIn("3D - Tunnel roll", ui.par.Presetinfo.val)
+ 
+@@ -183,6 +205,32 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+         ctl.apply_preset(self.root)
+         self.assertEqual((ui.par.Translationz.mode, ui.par.Translationz.expr), (ParMode.EXPRESSION, "op('lfo')[0]"))
+ 
++    def test_reapply_puts_the_preset_back_after_tweaks(self):
++        ui = self.make()
++        self.pick("video_depth_sweep_away")
++        ctl.apply_preset(self.root)
++        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val, ui.par.Feed1mode.val,
++                          ui.par.Cn1enabled.val), ("Video Input", 1, "sweep", 1))
++        ui.par.Animationmode.val, ui.par.Sweepenabled.val = "3D", 0       # tweaked / reset elsewhere
++        self.assertFalse(ctl.apply_preset(self.root))                     # same selection: kept
++        self.assertTrue(ctl.apply_preset(self.root, force=True))          # Re-apply Preset
++        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val), ("Video Input", 1))
++        self.pick("none")
++        ctl.apply_preset(self.root)
++        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val), ("3D", 0))
++
++    def test_reapply_with_none_selected_does_nothing(self):
++        self.make()
++        self.assertFalse(ctl.apply_preset(self.root, force=True))
++
++    def test_edit_prompt_seq_opens_the_table(self):
++        self.make()
++        table = self.ui.op("prompt_seq")
++        opened = []
++        table.openViewer = lambda: opened.append(True)
++        ctl.open_prompt_seq(self.root)
++        self.assertEqual(opened, [True])
++
+     def test_every_preset_applies_and_then_queues(self):
+         ui = self.make()
+         for preset in presets.PRESETS:
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index 632f690..c989263 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -11,10 +11,15 @@ from test_controller import FEED_UI, respond
+ from tdeforum import config, feed, modulation, payload, schema, sweep
+ from tdeforum import td_controller as ctl
+ 
+-import cv2
+ import shutil
+ import tempfile
+ 
++try:
++    import cv2
++except ImportError:          # the GPU host's system Python may not have OpenCV (TouchDesigner does)
++    cv2 = None
++NEEDS_CV2 = unittest.skipIf(cv2 is None, "OpenCV not installed (pip install opencv-python-headless)")
++
+ 
+ def S(**kw):
+     return sweep.Settings(**kw)
+@@ -157,6 +162,7 @@ def white_columns(frame, level=128):
+     return np.nonzero(frame.mean(axis=0) > level)[0]
+ 
+ 
++@NEEDS_CV2
+ class RenderTest(unittest.TestCase):
+     """The real thing: OpenCV decodes a depth video, numpy masks it, OpenCV encodes the result."""
+ 
+@@ -193,6 +199,14 @@ class RenderTest(unittest.TestCase):
+         self.assertTrue((glow > 20).any(), glow)               # ...still glow with a trail
+         self.assertTrue((glow < 250).all())
+ 
++    def test_grow_widens_and_blur_softens_the_band(self):
++        _r, plain = self.render(sweep_width=12)
++        _r, grown = self.render(sweep_width=12, sweep_grow=4)
++        _r, blurred = self.render(sweep_width=12, sweep_blur=3.0)
++        self.assertGreater(len(white_columns(grown[10])), len(white_columns(plain[10])) + 4)
++        grey = lambda f: ((f.mean(axis=0) > 20) & (f.mean(axis=0) < 235)).sum()
++        self.assertGreater(grey(blurred[10]), grey(plain[10]) + 2)
++
+     def test_output_is_resized_to_the_render_size(self):
+         _result, frames = self.render(size=(96, 48))
+         self.assertEqual(frames[0].shape, (48, 96))
+@@ -283,6 +297,7 @@ class SchemaFeedTest(unittest.TestCase):
+         self.assertEqual(sorted(f.api for f in fields), sorted(
+             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
+              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
++             "sweep_grow", "sweep_blur",
+              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
+         self.assertTrue(all(f.target is None for f in fields))
+         self.assertEqual(fields[0].api, "sweep_enabled")
+@@ -303,6 +318,7 @@ SWEEP_UI = dict(FEED_UI, animation_mode="Video Input", sweep_enabled=True, feed_
+                 video_mask_path="/opt/a1111/td_masks/mask_01.mov", use_mask_video=False, sweep_width=10)
+ 
+ 
++@NEEDS_CV2
+ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+     setUp_base = test_controller.FeedTest.setUp
+     state = test_controller.FeedTest.state
+@@ -355,7 +371,9 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         ctl.queue(self.root)
+         self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
+         job = json.loads(self.root.op("webclient_comfyui").requests[0][2])
+-        self.assertIn("DepthAnythingV2Preprocessor", json.dumps(job))
++        node = job["prompt"]["19"]
++        self.assertEqual((node["class_type"], node["inputs"]["ckpt_name"]),
++                         ("DepthAnythingV2Preprocessor", "depth_anything_v2_vits.pth"))
+         self.depth_done()
+         self.assertEqual(ui.par.Sweepdepthpath.val, self.DEPTH_CONTAINER)
+         self.assertEqual(len(self.spawned), 1)
+-- 
+2.43.0
+

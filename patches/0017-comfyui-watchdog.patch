@@ -1,0 +1,225 @@
+From 0352ab15eb909fcaf844a77b4e49b525026acdf9 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 01:32:58 +0000
+Subject: [PATCH] ComfyUI watchdog: fail on repeated poll errors or a prompt
+ ComfyUI forgot; short poll timeouts; decode at render size
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/comfy.py         |  4 ++
+ scripts/tdeforum/td_controller.py | 39 ++++++++++++++++-
+ tests/test_controller.py          | 73 +++++++++++++++++++++++++++++++
+ tests/test_payload.py             |  2 +
+ 5 files changed, 118 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index f001cd6..74b52db 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -24,7 +24,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.7.0"
++__version__ = "0.7.1"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
+diff --git a/scripts/tdeforum/comfy.py b/scripts/tdeforum/comfy.py
+index de84af2..a059749 100644
+--- a/scripts/tdeforum/comfy.py
++++ b/scripts/tdeforum/comfy.py
+@@ -33,6 +33,10 @@ def build_prompt(template, cfg, values, plan, force=False, stamp=""):
+     load["frame_load_cap"] = frames
+     load["skip_first_frames"] = 0
+     load["select_every_nth"] = 1
++    # Decode straight to the render size: a tall / 4K source would otherwise sit in RAM at full
++    # size for every frame before node 11 resizes it (a few GB for 240 frames).
++    load["custom_width"] = width
++    load["custom_height"] = height
+     workflow["11"]["inputs"]["width"] = width
+     workflow["11"]["inputs"]["height"] = height
+     resolution = int(values.get("comfy_resolution") or 0) or min(width, height)
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 4258542..34b235e 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -51,6 +51,9 @@ SWEEP_RENDERING = "sweep_rendering"  # Sweep Depth mask video rendering in a bac
+ BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE,
+         CAPTURING, WAITING_FEED, SWEEP_RENDERING)
+ LOST_CONTACT_S = 120.0
++COMFY_POLL_TIMEOUT_S = 4.0   # GET /history and /queue (TouchDesigner waits for the answer)
++COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give up with the reason
++COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
+ FEED_FINALIZE_TIMEOUT_S = 60.0
+ PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+ FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
+@@ -1215,7 +1218,8 @@ def _comfy_call(root, cfg, method, path, data=None):
+         return
+     dat = _op(root, "comfy")
+     try:
+-        code, text = _http(method, url, data)
++        # Polls are short so a hung server cannot freeze TouchDesigner for long.
++        code, text = _http(method, url, data, timeout=15.0 if method == "POST" else COMFY_POLL_TIMEOUT_S)
+     except Exception as exc:
+         on_error(root, dat, "%s %s: %s" % (method, url, exc))
+         return
+@@ -1234,6 +1238,14 @@ def on_error(root, dat, error):
+               % (config.comfy_url(cfg), error, cfg["local_file"]))
+     elif dat.name == NAMES["deforum"] and st.get("state") == DEFORUM_SUBMITTED:
+         _fail(root, st, "could not reach Deforum at %s (%s)" % (config.deforum_url(cfg), error))
++    elif dat.name == NAMES["comfy"] and st.get("state") == COMFY_RUNNING:
++        st["errors"] = st.get("errors", 0) + 1
++        if st["errors"] >= COMFY_MAX_ERRORS:
++            _fail(root, st, "lost ComfyUI while it was preprocessing (%d failed polls, last: %s). If it "
++                            "crashed, its container log says why (out of memory is the usual one); "
++                            "Queue again once it is back." % (st["errors"], error))
++            return
++        _save(root, st)
+ 
+ 
+ def _reachable(host, port, timeout=2.0):
+@@ -1321,12 +1333,19 @@ def _on_comfy(root, cfg, st, code, body, text):
+     if current != COMFY_RUNNING or not isinstance(body, dict):
+         return
+ 
++    st["errors"] = 0
++    if "queue_running" in body or "queue_pending" in body:
++        _on_comfy_queue(root, st, body)
++        return
+     state, subfolder, filename, message = comfy.parse_history(
+         body, st.get("comfy_prompt_id"), cfg["comfy_output_node"])
+     if state == "pending":
+         st["updated"] = time.time()
++        st["pending_polls"] = st.get("pending_polls", 0) + 1
+         _save(root, st)
+         _set_status(root, "preprocessing: running")
++        if st["pending_polls"] % COMFY_QUEUE_EVERY == 0:
++            _comfy_call(root, cfg, "GET", "/queue")   # is the job still there at all?
+         return
+     if state == "error":
+         _fail(root, st, "ComfyUI preprocess failed: %s" % message)
+@@ -1352,6 +1371,24 @@ def _on_comfy(root, cfg, st, code, body, text):
+         _finish(root, st, "preprocessed %s" % filename)
+ 
+ 
++def _on_comfy_queue(root, st, body):
++    """GET /queue: a prompt that is neither queued nor running (and not in /history) is gone,
++    e.g. ComfyUI restarted or crashed while working on it."""
++    pid = st.get("comfy_prompt_id")
++    listed = [item for key in ("queue_running", "queue_pending") for item in (body.get(key) or [])]
++    if any(isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == pid for item in listed):
++        st["missing"] = 0
++        _save(root, st)
++        return
++    st["missing"] = st.get("missing", 0) + 1
++    if st["missing"] >= 2:
++        _fail(root, st, "ComfyUI no longer has prompt %s (not queued, not running, no result): it restarted "
++                        "or crashed while working on it; its container log says why. Queue again to resubmit."
++              % pid)
++        return
++    _save(root, st)
++
++
+ def render_path(outdir, stamp, expect):
+     """Container path of the file to load: <ts>_RIFE_xN.mp4 / <ts>_FILM_xN.mp4 or <ts>.mp4.
+ 
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index 4a2b1e8..06fd561 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -565,3 +565,76 @@ class FeedTest(ControllerTest.__bases__[0]):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++class ComfyWatchdogTest(ControllerTest.__bases__[0]):
++    """ComfyUI going away while it preprocesses must not leave the pipeline 'busy' forever."""
++
++    setUp = ControllerTest.setUp
++    state = ControllerTest.state
++    tick = ControllerTest.tick
++
++    def running(self):
++        ui = self.root.op("Deforum_UI")
++        ui.par.Comfypreprocenable.val = True
++        ctl.queue(self.root)
++        respond(self.root, "webclient_comfyui", 200, {"prompt_id": "p1", "number": 1, "node_errors": {}})
++        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
++        return self.root.op("webclient_comfyui")
++
++    def test_repeated_connection_errors_fail_with_the_reason(self):
++        dat = self.running()
++        ctl.on_error(self.root, dat, "timed out")
++        ctl.on_error(self.root, dat, "[WinError 10054] reset")
++        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
++        ctl.on_error(self.root, dat, "[WinError 10061] refused")
++        self.assertEqual(self.state(), ctl.IDLE)
++        status = self.root.op("Deforum_UI").par.Pipelinestatus.val
++        self.assertIn("lost ComfyUI", status)
++        self.assertIn("10061", status)
++
++    def test_an_answer_resets_the_error_count(self):
++        dat = self.running()
++        ctl.on_error(self.root, dat, "timed out")
++        ctl.on_error(self.root, dat, "timed out")
++        respond(self.root, "webclient_comfyui", 200, {})            # still running
++        ctl.on_error(self.root, dat, "timed out")
++        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
++
++    def pending_polls(self, n):
++        for _ in range(n):
++            respond(self.root, "webclient_comfyui", 200, {})
++
++    def test_a_job_comfyui_forgot_fails_after_two_queue_checks(self):
++        dat = self.running()
++        self.pending_polls(ctl.COMFY_QUEUE_EVERY)
++        self.assertTrue(dat.requests[-1][1].endswith("/queue"))
++        respond(self.root, "webclient_comfyui", 200, {"queue_running": [], "queue_pending": []})
++        self.assertEqual(self.state(), ctl.COMFY_RUNNING)            # could have just finished
++        self.pending_polls(ctl.COMFY_QUEUE_EVERY)
++        respond(self.root, "webclient_comfyui", 200, {"queue_running": [], "queue_pending": []})
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("no longer has prompt p1", self.root.op("Deforum_UI").par.Pipelinestatus.val)
++
++    def test_a_queued_job_keeps_running(self):
++        self.running()
++        for _ in range(3):
++            self.pending_polls(ctl.COMFY_QUEUE_EVERY)
++            respond(self.root, "webclient_comfyui", 200,
++                    {"queue_running": [[1, "p1", {}, {}, ["21"]]], "queue_pending": []})
++        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
++
++    def test_urllib_polls_use_a_short_timeout(self):
++        self.cfg["comfy_transport"] = "urllib"
++        self.root.op("Deforum_UI").par.Comfypreprocenable.val = True
++        timeouts = []
++
++        def fake(method, url, data=None, timeout=15.0):
++            timeouts.append((method, timeout))
++            if method == "POST":
++                return 200, json.dumps({"prompt_id": "p1", "number": 1, "node_errors": {}})
++            return 200, "{}"
++        with mock.patch.object(ctl, "_http", side_effect=fake):
++            ctl.queue(self.root)
++            self.tick()
++        self.assertEqual(timeouts, [("POST", 15.0), ("GET", ctl.COMFY_POLL_TIMEOUT_S)])
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index 350800c..ac051fb 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -409,6 +409,8 @@ class DepthNodeTest(unittest.TestCase):
+         self.assertEqual(node["inputs"]["resolution"], 512)
+         self.assertEqual(node["inputs"]["image"], ["11", 0])
+         self.assertIn("depth_anything_v2_vits_240f", job["cache_key"])
++        load = job["body"]["prompt"]["10"]["inputs"]
++        self.assertEqual((load["custom_width"], load["custom_height"]), (1024, 576))
+         aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
+         self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
+         self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)
+-- 
+2.43.0
+

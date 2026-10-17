@@ -1,0 +1,91 @@
+From 983b6be32b3eb02ab29f5aca6a4fd58297cc6c45 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Fri, 16 Oct 2026 22:20:05 +0000
+Subject: [PATCH] Feed capture: lengthen a short timeline for the recording and
+ restore it
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ scripts/tdeforum/td_controller.py | 12 ++++++++++++
+ tests/_fakes.py                   |  5 ++++-
+ tests/test_controller.py          |  9 +++++++++
+ 3 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index d904379..f566e4a 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -576,6 +576,15 @@ def _begin_loop_capture(root, cfg, values, result, loops):
+     st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
+           "j": 0, "since_set": 0, "submitted": now, "updated": now,
+           "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
++    # The timeline wraps at its end (a 120 frame project would jump back to 1 at frame 121),
++    # so lengthen it for the recording and give it back afterwards.
++    need = max(plan["frames"])
++    for name in ("end", "rangeEnd"):
++        have = getattr(timeline, name, None)
++        if have is not None and have < need:
++            st["restore"][name] = have
++            setattr(timeline, name, need)
++            log("timeline %s %s -> %d for the recording (restored afterwards)" % (name, have, need))
+     _save(root, st)
+     # The timeline keeps PLAYING: a paused TouchDesigner cooks no frames, so no Frame End
+     # callback (or timer) would ever arrive. realTime is off, so every cooked frame is one
+@@ -713,6 +722,9 @@ def _restore_timeline(root, restore):
+         return
+     try:
+         timeline = _timeline(root)
++        for name in ("end", "rangeEnd"):
++            if name in restore:
++                setattr(timeline, name, restore[name])
+         timeline.frame = restore["frame"]
+         timeline.play = restore["play"]
+     except Exception as exc:
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index f1b4f9a..b93cdab 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -113,8 +113,9 @@ class Timeline(object):
+     a script set the frame since the last advance (then it shows the set value plus `lands_past`,
+     0 or 1, modelling whether a frame set inside a callback lands on the target or one past)."""
+ 
+-    def __init__(self, frame=1, play=True, rate=60.0, start=1, lands_past=0):
++    def __init__(self, frame=1, play=True, rate=60.0, start=1, lands_past=0, end=100000):
+         self._frame, self.play, self.rate, self.start = frame, play, rate, start
++        self.end = self.rangeEnd = end
+         self.lands_past, self._set = lands_past, False
+ 
+     @property
+@@ -132,6 +133,8 @@ class Timeline(object):
+                 self._frame += self.lands_past
+         elif self.play:
+             self._frame += 1
++        if self._frame > self.rangeEnd:           # a playing timeline wraps at its end
++            self._frame = self.start
+ 
+ 
+ class FakeTop(Op):
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index fc83a34..8ed7367 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -388,6 +388,15 @@ class FeedTest(ControllerTest.__bases__[0]):
+         self.assertEqual(self.state(), ctl.IDLE)
+         self.assertIn("did not appear", self.root.storage[ctl.STATE_KEY]["last_result"])
+ 
++    def test_short_timeline_is_extended_and_restored(self):
++        self.make()
++        self.timeline.end = self.timeline.rangeEnd = 60
++        ctl.queue(self.root)
++        self.assertEqual(self.timeline.rangeEnd, 119)
++        self.record_all()
++        self.assertEqual(self.out.recorded, [1 + (2 * k) % 120 for k in range(75)])
++        self.assertEqual((self.timeline.end, self.timeline.rangeEnd), (60, 60))
++
+     def test_stray_jump_is_corrected(self):
+         self.make()
+         self.timeline.frame, self.timeline.play = 47, True
+-- 
+2.43.0
+

@@ -1,0 +1,201 @@
+From bc0f8c8010be036bba5293424f76246ec06a1c3f Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 00:29:40 +0000
+Subject: [PATCH] ComfyUI calls over urllib (real error messages),
+ /system_stats probe in doctor
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ scripts/tdeforum/config.py        |  3 ++
+ scripts/tdeforum/td_controller.py | 48 +++++++++++++++++++++++++++----
+ tests/test_controller.py          |  5 +++-
+ tests/test_sweep.py               | 42 +++++++++++++++++++++++++++
+ 4 files changed, 91 insertions(+), 7 deletions(-)
+
+diff --git a/scripts/tdeforum/config.py b/scripts/tdeforum/config.py
+index a019a26..fa591e8 100644
+--- a/scripts/tdeforum/config.py
++++ b/scripts/tdeforum/config.py
+@@ -17,6 +17,9 @@ DEFAULTS = {
+     "server_host": "192.168.1.42",
+     "deforum_port": 7865,
+     "comfy_port": 8188,
++    # How TouchDesigner talks to ComfyUI: "urllib" (Python, real error messages) or "webclient"
++    # (the webclient_comfyui Web Client DAT).
++    "comfy_transport": "urllib",
+     # Container path prefix -> path relative to the share root (T:/).
+     # Mirrors the volume list in docker-compose.yml; longest prefix wins.
+     # NOTE: /opt/a1111/outputs is ./td_outputs on the host, not ./outputs.
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 33b982d..df595f1 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -457,8 +457,7 @@ def cancel(root):
+         _op(root, "progress").request(
+             config.deforum_url(cfg, "/deforum_api/jobs/%s" % st["job_id"]), "DELETE")
+     elif st.get("state") in (COMFY_SUBMITTED, COMFY_RUNNING):
+-        _op(root, "comfy").request(config.comfy_url(cfg, "/interrupt"), "POST",
+-                                   header=JSON_HEADERS, data="{}")
++        _comfy_call(root, cfg, "POST", "/interrupt", "{}")
+     elif st.get("state") in (CAPTURING, WAITING_FEED):
+         _abort_capture(root, st)
+     _finish(root, st, "cancelled (was %s)" % st.get("state", IDLE))
+@@ -504,15 +503,14 @@ def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1")
+         log("preprocess cache hit: %s" % cache[job["cache_key"]])
+         return False
+ 
+-    _op(root, "comfy").request(config.comfy_url(cfg, "/prompt"), "POST",
+-                               header=JSON_HEADERS, data=json.dumps(job["body"]))
+     now = time.time()
+     st = {"state": COMFY_SUBMITTED, "submitted": now, "updated": now,
+           "cache_key": job["cache_key"], "then_render": then_render, "purpose": purpose}
+-    _save(root, st)
++    _save(root, st)                       # before the call: the answer may arrive inside it
+     _set_status(root, "preprocessing: submitted")
+     log("ComfyUI %s submitted: %s (%s frames)" % ("depth preprocess" if purpose == "sweep" else "preprocess",
+                                                   job["cache_key"], result["plan"]["source_frames"]))
++    _comfy_call(root, cfg, "POST", "/prompt", json.dumps(job["body"]))
+     return True
+ 
+ 
+@@ -1014,7 +1012,9 @@ def tick(root):
+         _fail(root, st, "lost contact while %s (no response for %ds)" % (current, LOST_CONTACT_S))
+         return
+     elif current == COMFY_RUNNING:
+-        _op(root, "comfy").request(config.comfy_url(cfg, "/history/%s" % st["comfy_prompt_id"]), "GET")
++        _save(root, st)                   # the answer may be handled inside the call
++        _comfy_call(root, cfg, "GET", "/history/%s" % st["comfy_prompt_id"])
++        return
+     elif current == DEFORUM_RUNNING:
+         _op(root, "progress").request(
+             config.deforum_url(cfg, "/deforum_api/jobs/%s" % st["job_id"]), "GET")
+@@ -1063,6 +1063,37 @@ def on_response(root, dat, status_code, data):
+         log("response handling failed for %s: %s" % (dat.name, exc))
+ 
+ 
++def _http(method, url, data=None, timeout=15.0):
++    """(status code, body text) of a plain HTTP call from this computer; raises on no answer."""
++    import urllib.error
++    import urllib.request
++    body = data.encode("utf-8") if isinstance(data, str) else data
++    request = urllib.request.Request(url, data=body, method=method, headers=JSON_HEADERS)
++    try:
++        with urllib.request.urlopen(request, timeout=timeout) as reply:
++            return reply.status, reply.read().decode("utf-8", "replace")
++    except urllib.error.HTTPError as exc:         # an answer, just not a good one
++        return exc.code, exc.read().decode("utf-8", "replace")
++
++
++def _comfy_call(root, cfg, method, path, data=None):
++    """Send a request to ComfyUI; its answer reaches _on_comfy() either way.
++
++    Default transport is Python's urllib (ComfyUI's replies are small and quick), which also
++    says *why* a call failed. cfg["comfy_transport"] = "webclient" uses the Web Client DAT."""
++    url = config.comfy_url(cfg, path)
++    if cfg.get("comfy_transport", "urllib") == "webclient":
++        _op(root, "comfy").request(url, method, header=JSON_HEADERS, data=data)
++        return
++    dat = _op(root, "comfy")
++    try:
++        code, text = _http(method, url, data)
++    except Exception as exc:
++        on_error(root, dat, "%s %s: %s" % (method, url, exc))
++        return
++    on_response(root, dat, {"code": code}, text.encode("utf-8"))
++
++
+ def on_error(root, dat, error):
+     """A Web Client DAT could not complete a request (no answer at all, unlike an HTTP error)."""
+     log("%s request error: %s" % (dat.name, error))
+@@ -1437,6 +1468,11 @@ def doctor(root):
+         getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
+         "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
+     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
++    try:
++        code, _text = _http("GET", config.comfy_url(cfg, "/system_stats"), timeout=4.0)
++        log("ComfyUI answered GET /system_stats with HTTP %s" % code)
++    except Exception as exc:
++        log("ComfyUI GET /system_stats failed: %s" % exc)
+     log("port check from this computer: Deforum %s:%s %s | ComfyUI %s:%s %s" % (
+         cfg["server_host"], cfg["deforum_port"], _reachable(cfg["server_host"], cfg["deforum_port"]),
+         cfg["server_host"], cfg["comfy_port"], _reachable(cfg["server_host"], cfg["comfy_port"])))
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index ce6dea5..4a2b1e8 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -34,7 +34,7 @@ class ControllerTest(unittest.TestCase):
+         cfg.update(share_root=self.share + "/", runtime_dir=self.share + "/runtime",
+                    prompt_file=self.share + "/prompt.json",
+                    comfy_template=os.path.join(ROOT_DIR, "scripts", "templates", "TD_CN_PreProc.json"),
+-                   poll_interval_s=0.0)
++                   poll_interval_s=0.0, comfy_transport="webclient")
+         with open(cfg["prompt_file"], "w") as fh:
+             json.dump({"0": "liquid gold"}, fh)
+         self.cfg = cfg
+@@ -44,6 +44,9 @@ class ControllerTest(unittest.TestCase):
+         ports = mock.patch.object(ctl, "_reachable", return_value="open")
+         ports.start()
+         self.addCleanup(ports.stop)
++        http = mock.patch.object(ctl, "_http", return_value=(200, "{}"))
++        http.start()
++        self.addCleanup(http.stop)
+         self.addCleanup(shutil.rmtree, self.share)
+         self.root = make_network(dict(UI))
+ 
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index 41dca16..4075e97 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -313,6 +313,48 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         ctl.queue(self.root)
+         self.assertEqual(self.state(), ctl.CAPTURING)
+ 
++    def test_urllib_transport_runs_the_whole_depth_stage(self):
++        self.cfg["comfy_transport"] = "urllib"
++        ui = self.make()
++        path = config.to_share(self.cfg, "/opt/a1111/td_masks/preprocessed_vids/" + self.DEPTH)
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path, "wb") as fh:
++            fh.write(b"x" * 50)
++        calls = []
++
++        def fake(method, url, data=None, timeout=15.0):
++            calls.append((method, url))
++            if method == "POST":
++                return 200, json.dumps({"prompt_id": "p1", "number": 1, "node_errors": {}})
++            return 200, json.dumps({"p1": {"status": {"status_str": "success", "completed": True},
++                                           "outputs": {"21": {"gifs": [{"filename": self.DEPTH,
++                                                                        "subfolder": "preprocessed_vids"}]}}}})
++        with mock.patch.object(ctl, "_http", side_effect=fake):
++            ctl.queue(self.root)
++            self.assertEqual(self.state(), ctl.COMFY_RUNNING)
++            self.tick()
++        self.assertEqual([c[0] for c in calls], ["POST", "GET"])
++        self.assertTrue(calls[0][1].endswith(":8188/prompt") and calls[1][1].endswith("/history/p1"))
++        self.assertEqual(self.state(), ctl.CAPTURING)
++        self.assertEqual(self.root.op("webclient_comfyui").requests, [], "the Web Client DAT is not used")
++
++    def test_urllib_failure_names_the_reason(self):
++        self.cfg["comfy_transport"] = "urllib"
++        ui = self.make()
++        with mock.patch.object(ctl, "_http", side_effect=OSError("[WinError 10061] refused")):
++            ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("WinError 10061", ui.par.Pipelinestatus.val)
++
++    def test_comfy_rejection_text_reaches_the_status(self):
++        self.cfg["comfy_transport"] = "urllib"
++        ui = self.make()
++        bad = json.dumps({"error": {"message": "Prompt outputs failed validation"}, "node_errors": {}})
++        with mock.patch.object(ctl, "_http", return_value=(400, bad)):
++            ctl.queue(self.root)
++        self.assertEqual(self.state(), ctl.IDLE)
++        self.assertIn("rejected the workflow (HTTP 400)", ui.par.Pipelinestatus.val)
++
+     def test_unreachable_comfyui_fails_at_once_with_the_address(self):
+         ui = self.make()
+         ctl.queue(self.root)
+-- 
+2.43.0
+

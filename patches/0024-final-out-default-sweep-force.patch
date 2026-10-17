@@ -1,0 +1,286 @@
+From 1406e21bc7b0ccd04cad533e33b6d0ff3933a26f Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 04:29:48 +0000
+Subject: [PATCH] Every ControlNet unit's Source TOP defaults to
+ /project1/final_out; Force Re-render Sweep
+
+- feed_N_top default final_out (baseline 3: empty fields pick it up on rebuild); the Select TOP gets the resolved absolute path
+- Sweep Depth > Force Re-render Sweep (and Force Preprocess) bypass the sweep cache; sweep_preview lets go of the file first
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  3 ++-
+ docs/deforum_parameters.md        |  7 ++++---
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/feed.py          |  2 ++
+ scripts/tdeforum/migrate.py       |  6 +++++-
+ scripts/tdeforum/schema.py        |  4 +++-
+ scripts/tdeforum/td_controller.py | 35 ++++++++++++++++++++++++++++---
+ tests/test_builder.py             |  3 ++-
+ tests/test_presets.py             |  3 +++
+ tests/test_sweep.py               | 16 +++++++++++++-
+ 10 files changed, 69 insertions(+), 12 deletions(-)
+
+diff --git a/README.md b/README.md
+index be46d9c..e80cef9 100644
+--- a/README.md
++++ b/README.md
+@@ -207,7 +207,7 @@ A moving band through the depth of your init video, rendered as a ControlNet gui
+ 
+ 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
+ 2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
+-3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render.
++3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render. To render it again anyway, turn on *Force Re-render Sweep* (keeps the depth video) or *Pipeline › Force Preprocess* (remakes the depth video too) for one Queue.
+ 4. Then the render is submitted as usual.
+ 
+ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse.
+@@ -223,6 +223,7 @@ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a
+ | Also use as Video Mask | `video_mask_path` / `use_mask_video` = the same movie (the unit may then stay off) |
+ | Pre-made Depth Video | a container path of your own depth video; ComfyUI is skipped |
+ | Queue only prepares the sweep | stops after the mask video exists: look at `sweep_preview`, tweak, Queue again (cached), then switch it off to render |
++| Force Re-render Sweep | ignore the sweep cache at the next Queue (depth video reused); switch it off again afterwards |
+ 
+ Render frame k shows source frame `extract_from + k * nth`. If the depth video turns out shorter than the frames the render needs, the init video is shorter too: the controller remembers its length (doctor shows it) and plans the render to it.
+ 
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index 77522de..2e99012 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -1,6 +1,6 @@
+ # deforum COMP: parameter reference
+ 
+-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+ Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+@@ -237,6 +237,7 @@ Slots 1-8 each have the same seven parameters (`Mod1active` ... `Mod8sharpness`)
+ | `Sweepmodel` | Depth Model (ComfyUI) | depth_anything_v2_vits | Depth model ComfyUI uses for the depth video (Depth Anything V2 small is the fast default). |
+ | `Sweepdepthvideo` | Pre-made Depth Video (container path; empty = make it from Video Init Path) | (empty) | A depth video you made yourself (container path); ComfyUI is skipped. |
+ | `Sweepprepareonly` | Queue only prepares the sweep (depth + mask video, no render) | Off | Queue stops after the depth and sweep videos exist, so you can preview before rendering. |
++| `Sweepforce` | Force Re-render Sweep (ignore the sweep cache; depth video kept) | Off | Renders the sweep mask again at the next Queue even if the same one is cached (the depth video is reused). Turn it off again afterwards, or every Queue re-renders. |
+ | `Sweepdepthpath` | Depth Video | (read-only) | Read-only: the depth video in use. |
+ | `Sweepinfo` | Sweep Plan | (read-only) | Read-only: the sweep plan (bands at start/end, frames, render time). |
+ | `Sweepshowlatest` | Show Latest Sweep (sweep_preview / COMP output 2) | (button) | Points sweep_preview (COMP output 2) at the newest sweep video. |
+@@ -250,7 +251,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
+ | `Pagepresetcn1val` | Page Preset (ControlNet Unit 1) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
+ | `Cn1enabled` | Enabled | Off | Turns this ControlNet unit on. |
+ | `Feed1mode` | Guide Source | file | Where the guide video comes from: File (Vid Path), a TOP recorded as a loop or as a still, or Sweep Depth. |
+-| `Feed1top` | Source TOP (path, e.g. /project1/final_out) | (empty) | The TOP to record as the guide when Guide Source is a TOP. |
++| `Feed1top` | Source TOP (path, e.g. /project1/final_out) | /project1/final_out | The TOP to record as the guide when Guide Source is a TOP (default /project1/final_out on every unit). |
+ | `Feed1info` | Last Feed | (read-only) | Read-only: when and how the last guide was made. |
+ | `Cn1module` | Module | none | ControlNet preprocessor run inside A1111 (none = use the guide as-is, right for QR Monster and ready-made maps). |
+ | `Cn1model` | Model | ctrl_v1p_qr_monster_v2 | ControlNet model, e.g. ctrl_v1p_qr_monster_v2. |
+@@ -278,7 +279,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
+ | `Pagepresetpipeline` | Page Preset (Pipeline) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
+ | `Pipelinestatus` | Status | (read-only) | Read-only: what the pipeline is doing right now (preprocessing, sweep, render %, idle). |
+ | `Autoload` | Auto-load finished render | On | Loads the finished render into moviefilein1 and the loop player automatically. |
+-| `Forcepreprocess` | Force ComfyUI re-preprocess | Off | Ignores cached ComfyUI results and makes them again. |
++| `Forcepreprocess` | Force ComfyUI re-preprocess | Off | Ignores cached ComfyUI results (Unit 1 preprocessing and the Sweep depth video) and the sweep mask cache, and makes them all again. |
+ | `Loopoutframes` | Loaded loop length (frames) | (read-only) | Read-only: loop length of the loaded render (frames). |
+ | `Loopoutoverlap` | Loaded loop overlap (frames) | (read-only) | Read-only: seam overlap of the loaded render (frames). |
+ | `Loopoutrate` | Loaded file frames per output frame | (read-only) | Read-only: file frames per output frame (0.5 when an un-interpolated render plays at half speed). |
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 9e83f28..a1db063 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -27,7 +27,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.10.1"
++__version__ = "0.10.2"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/feed.py b/scripts/tdeforum/feed.py
+index baade5c..69637f4 100644
+--- a/scripts/tdeforum/feed.py
++++ b/scripts/tdeforum/feed.py
+@@ -42,6 +42,8 @@ def _truthy(value):
+     return bool(value)
+ 
+ 
++DEFAULT_TOP = "/project1/final_out"   # Source TOP of every unit until you set another
++
+ class Request(object):
+     """One ControlNet unit whose guide comes from a TOP."""
+     __slots__ = ("unit", "mode", "top")
+diff --git a/scripts/tdeforum/migrate.py b/scripts/tdeforum/migrate.py
+index b612065..8d2843b 100644
+--- a/scripts/tdeforum/migrate.py
++++ b/scripts/tdeforum/migrate.py
+@@ -36,7 +36,7 @@ def _const(value):
+ # equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
+ # you set to something else is kept. Each bump applies once: build_master_ui stores the version
+ # it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
+-BASELINE_VERSION = 2
++BASELINE_VERSION = 3
+ BASELINE_BUMPS = {
+     "seed": (1, "-1", "424242"),
+     "loop_seeds": (1, True, False),
+@@ -46,6 +46,10 @@ BASELINE_BUMPS = {
+     "noise_schedule": (2, 0.065, 0.02),
+     "noise_multiplier_schedule": (2, 1.05, 1.0),
+     "sweep_model": (2, "DepthAnythingV2Preprocessor", "depth_anything_v2_vits"),
++    # 3: every ControlNet unit's Source TOP defaults to final_out (empty ones pick it up).
++    "feed_1_top": (3, "", "/project1/final_out"),
++    "feed_2_top": (3, "", "/project1/final_out"),
++    "feed_3_top": (3, "", "/project1/final_out"),
+ }
+ 
+ 
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 7bb0125..ab73953 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -225,7 +225,7 @@ def _cn_unit_fields(n):
+         F(p + "enabled", False, page, TOGGLE),
+         F(f + "mode", feed.FILE, page, MENU, menu=feed.MODES, labels=feed.MODE_LABELS,
+           label="Guide Source", target=None),
+-        F(f + "top", "", page, STR, label="Source TOP (path, e.g. /project1/final_out)", target=None),
++        F(f + "top", feed.DEFAULT_TOP, page, STR, label="Source TOP (path, e.g. /project1/final_out)", target=None),
+         F(f + "info", "", page, STATUS, label="Last Feed", target=None),
+         F(p + "module", "none", page, STR),
+         F(p + "model", "ctrl_v1p_qr_monster_v2", page, STR),
+@@ -406,6 +406,8 @@ FIELDS = [
+       label="Pre-made Depth Video (container path; empty = make it from Video Init Path)", target=None),
+     F("sweep_prepare_only", False, SW, TOGGLE,
+       label="Queue only prepares the sweep (depth + mask video, no render)", target=None),
++    F("sweep_force", False, SW, TOGGLE,
++      label="Force Re-render Sweep (ignore the sweep cache; depth video kept)", target=None),
+     F("sweep_depth_path", "", SW, STATUS, label="Depth Video", target=None),
+     F("sweep_info", "", SW, STATUS, label="Sweep Plan", target=None),
+     F("sweep_show_latest", 0, SW, PULSE, label="Show Latest Sweep (sweep_preview / COMP output 2)", target=None),
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 8913618..d29e69f 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -774,10 +774,17 @@ def _start_sweep_render(root, cfg, st):
+                 "out_share": job["out_share"], "sidecar": job["sidecar"], "init": values.get("video_init_path")}
+         if done and done.get("ok") and done.get("out_container"):
+             meta.update(out=done["out_container"], out_share=done.get("out_share") or job["out_share"])
+-        if done and done.get("ok") and os.path.isfile(meta["out_share"]):
++        forced = sweep_forced(values)
++        if done and done.get("ok") and os.path.isfile(meta["out_share"]) and not forced:
+             log("sweep cache hit: %s (%s frames)" % (meta["out"], done.get("frames")))
+             _after_sweep(root, cfg, st, meta, done)
+             return
++        if forced:
++            meta.update(out=job["out_container"], out_share=job["out_share"])
++            log("sweep: cache ignored (%s), rendering it again" % (
++                "Force Re-render Sweep" if payload._as_bool(values.get("sweep_force", False))
++                else "Force Preprocess"))
++            _release_sweep_preview(_op(root, "ui"), job["out_share"])
+         if job["fetch_url"]:
+             log("sweep: downloading the depth video from ComfyUI -> %s" % job["depth_local"])
+         try:
+@@ -907,6 +914,28 @@ def _remake_depth(root, cfg, st, done):
+         _fail(root, st, "Sweep Depth: %s" % exc)
+ 
+ 
++def sweep_forced(values):
++    """Sweep Depth > Force Re-render Sweep, or Pipeline > Force Preprocess (which also remakes
++    the depth video): render the band mask again even when the same one is cached."""
++    return payload._as_bool(values.get("sweep_force", False)) or \
++        payload._as_bool(values.get("force_preprocess", False))
++
++
++def _release_sweep_preview(ui, share_path):
++    """Let go of the file sweep_preview shows before it is overwritten (Windows keeps open
++    files locked, and the render replaces the file in place)."""
++    preview = _inner(ui, "sweep_preview")
++    par = getattr(getattr(preview, "par", None), "file", None)
++    if par is None:
++        return
++    try:
++        shown = str(par.eval() or "")
++    except Exception:
++        return
++    if os.path.normcase(os.path.normpath(shown or ".")) == os.path.normcase(os.path.normpath(share_path)):
++        _set_constant(par, "")
++
++
+ def _show_sweep(ui, share_path):
+     preview = _inner(ui, "sweep_preview")
+     if preview is None:
+@@ -1196,11 +1225,11 @@ def _begin_loop_capture(root, cfg, values, result, loops):
+     units = []
+     for want in loops:
+         sel, out = _feed_ops(ui, want.unit)
+-        _resolve_top(root, want.top, want.unit)
++        top_path = getattr(_resolve_top(root, want.top, want.unit), "path", None) or want.top
+         share, container = _feed_target(cfg, want)
+         if os.path.isfile(share):
+             os.remove(share)                  # so "file exists" below means "this recording"
+-        _set_constant(_par(sel, "top"), want.top)
++        _set_constant(_par(sel, "top"), top_path)   # absolute: the Select TOP sits inside the COMP
+         _set_constant(_par(out, "file"), share)
+         for name, value in (("type", "movie"), ("pause", 0), ("record", 0)):
+             par = getattr(out.par, name, None)
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index 8933986..d2599f5 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -364,7 +364,8 @@ class BuilderTest(unittest.TestCase):
+ 
+     def test_lcm_baseline_bump_applies_once(self):
+         comp = self.build()
+-        self.assertEqual(comp.storage["tdeforum_baseline"], 2)
++        self.assertEqual(comp.storage["tdeforum_baseline"], 3)
++        self.assertEqual(comp.par.Feed2top.val, "/project1/final_out")
+         self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
+         comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...
+         comp.par.Cfgscaleschedule.val = 7.0            # ...still at the old CFG
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index c9c045c..673cdf9 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -166,6 +166,9 @@ class BaselineTest(unittest.TestCase):
+         self.assertEqual(len([a for a in actions if a[0] == "note"]), 2)
+         kept = migrate.plan({"Seed": const("99"), "Loopseeds": const(0)}, False)
+         self.assertEqual(sorted(a[1] for a in kept if a[0] == "set"), ["Loopseeds", "Seed"])
++        tops = migrate.plan({"Feed1top": const(""), "Feed2top": const("/project1/my_top")}, False)
++        self.assertEqual([a[1] for a in tops if a[0] == "set"], ["Feed2top"])     # empty -> final_out
++        self.assertEqual(schema.BY_API["feed_3_top"].default, "/project1/final_out")
+         driven = migrate.plan({"Seed": {"mode": "EXPRESSION", "expr": "absTime.frame", "bind": "", "val": "-1"}},
+                               False)
+         self.assertEqual([a[1] for a in driven if a[0] == "set"], ["Seed"])
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index 01c6c22..0de5fc1 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -296,7 +296,7 @@ class SchemaFeedTest(unittest.TestCase):
+         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
+         fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP and not f.api.startswith("pagepreset")]
+         self.assertEqual(sorted(f.api for f in fields), sorted(
+-            ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
++            ["sweep_depth_video", "sweep_prepare_only", "sweep_force", "sweep_enabled", "sweep_model", "sweep_mode",
+              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
+              "sweep_grow", "sweep_blur", "sweep_show_latest",
+              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
+@@ -493,6 +493,20 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.assertEqual(len(self.spawned), 1, "no second render")
+         self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+ 
++    def test_force_re_render_ignores_the_sweep_cache_only(self):
++        ui = self.run_to_render()
++        ctl.cancel(self.root)
++        ui.par.Sweepforce = type(ui.par.Sweepwidth)("Sweepforce", True)
++        preview = ui.op("sweep_preview")
++        preview.par.file.val = self.spawned[0][0]["out_share"]      # TD shows the old sweep
++        ctl.queue(self.root)
++        posts = [r for r in self.root.op("webclient_comfyui").requests if r[0] == "POST"]
++        self.assertEqual(len(posts), 1, "the depth video stays cached")
++        self.assertEqual(len(self.spawned), 2, "the sweep renders again")
++        self.assertEqual(self.spawned[1][0]["out_share"], self.spawned[0][0]["out_share"])
++        self.assertEqual(preview.par.file.val, "", "the preview let go of the file it shows")
++        self.assertEqual(self.state(), ctl.SWEEP_RENDERING)
++
+     def test_changing_the_look_renders_again(self):
+         ui = self.run_to_render()
+         first = self.sent()["cn_1_vid_path"]
+-- 
+2.43.0
+

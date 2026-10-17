@@ -1,0 +1,805 @@
+From b9f4b84c82abbb36e4ec49d2d58dd5281d63ebe1 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 01:53:10 +0000
+Subject: [PATCH] Twelve unorthodox presets incl. Interpolation; Hybrid Video
+ page; ten prompt presets; sweep preview as COMP output 2; invert/overlay mask
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                          | 40 +++++++++++--
+ ROADMAP.md                         |  3 +-
+ scripts/build_master_ui.py         | 15 ++++-
+ scripts/tdeforum/__init__.py       |  5 +-
+ scripts/tdeforum/payload.py        | 29 +++++++--
+ scripts/tdeforum/presets.py        | 96 +++++++++++++++++++++++++++++-
+ scripts/tdeforum/prompt_presets.py | 62 +++++++++++++++++++
+ scripts/tdeforum/schema.py         | 25 +++++++-
+ scripts/tdeforum/td_controller.py  | 55 +++++++++++++++++
+ scripts/ui_exec.py                 |  6 ++
+ tests/test_builder.py              | 23 ++++++-
+ tests/test_presets.py              | 63 ++++++++++++++++++--
+ tests/test_sweep.py                |  2 +-
+ 13 files changed, 396 insertions(+), 28 deletions(-)
+ create mode 100644 scripts/tdeforum/prompt_presets.py
+
+diff --git a/README.md b/README.md
+index 24feffe..c811965 100644
+--- a/README.md
++++ b/README.md
+@@ -110,7 +110,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
+ 
+ ### Example presets
+ 
+-*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++*Tempo › Example Preset* (first page of the COMP) lays one of 27 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+ 
+ * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+ * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+@@ -135,6 +135,37 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
+ | `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep: a soft glowing band starts on the nearest depth (white) and travels to the farthest, so it seems to move away from you. Needs Globals > Video Init Path; takes over ControlNet unit 1. |
+ | `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same, the other way: the band starts on the farthest depth and ends on the nearest, so it seems to rush toward you. |
+ | `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps of a wide band that keeps the depth shading and leaves long trails; ControlNet leads, so the picture pulses through the depth layers. |
++| `2d_ouroboros` | 2D - Ouroboros (unorthodox) | Zoom OUT with wrapped edges: the frame shrinks into tiled copies of itself and every pass fuses the seams into one ever-growing mandala that never runs out of picture. |
++| `2d_folding_plane` | 2D - Folding plane (unorthodox) | Perspective flip on three beat-locked axes: the picture plane folds and unfolds like paper and diffusion paints whatever the fold reveals beyond the edges. |
++| `2d_flow_puppet` | 2D - Flow puppet (unorthodox) | Hybrid Video optical flow: the hallucination moves exactly like your init video (every sway, every step) without a single pixel of the video showing. Needs Globals > Video Init Path. |
++| `3d_endless_vertigo` | 3D - Endless vertigo (unorthodox) | A dolly zoom that never ends: the camera pushes forward while the FOV breathes 45-95 degrees over the loop, so space stretches and collapses around a subject that keeps being re-made. |
++| `3d_escher_descent` | 3D - Escher descent (unorthodox) | Sink and tilt at once with mirrored padding: every frame is a step down an impossible staircase that the depth model keeps folding back into itself. |
++| `3d_breathing_space` | 3D - Breathing space (unorthodox) | The geometry itself breathes on the bar: aspect ratio and FOV swing in opposite phase, an anamorphic inhale the depth warp re-paints instead of stretching. |
++| `video_depth_peel` | Video Input - Depth peel (unorthodox) | The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it). |
++| `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
++| `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
++| `interp_seed_walk` | Interpolation - Seed walk (unorthodox) | A walk through latent space: the noise blends from seed 424242 to its neighbour and back over the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. Perfectly seamless. |
++| `interp_beat_jolt` | Interpolation - Beat jolt (unorthodox) | On every beat the noise jumps towards another seed and relaxes back: the image flinches into a sibling version on the kick and settles, with no motion at all. |
++| `interp_guidance_bloom` | Interpolation - Guidance bloom (unorthodox) | CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into over-defined detail and back, while a slow seed drift keeps it alive. |
++
++The **unorthodox** dozen (three per mode, including **Interpolation**) lean on what only a generative feedback loop can do: zooming *out* into wrapped copies of the frame, folding the picture plane with perspective flip, moving a hallucination with a video's optical flow (*Hybrid Video* page), breathing aspect ratio / FOV that the depth warp re-paints, using the sweep as an inpainting **mask** instead of a guide (*Invert Mask* / *Overlay Mask* are on the Globals page), the whole depth map as a QR Monster relief, and in Interpolation mode (every frame drawn from noise) animating the **seed itself** with subseed strength, which closes the loop perfectly.
++
++### Prompt presets
++
++*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and switches *Prompt Source* to the sequence. The rows it replaced come back when you pick **None**. The Negative Prompt (Globals) still applies.
++
++| id | name | prompt |
++|---|---|---|
++| `fractal_temple` | Fractal temple | vast fractal temple of iridescent glass and liquid gold, infinite recursive arches, sacred geometry, volumetric god rays through bioluminescent mist, hyperdetailed, cinematic lighting |
++| `mycelial_cosmos` | Mycelial cosmos | glowing mycelium network spanning a cosmic nebula, bioluminescent fungi, drifting spores like tiny galaxies, deep teal and magenta light, macro photography, ethereal, hyperdetailed |
++| `cosmic_eye` | Eye of the cosmos | colossal cosmic eye made of swirling galaxies, iris of nebula clouds, concentric rings of light, sacred geometry halo, otherworldly, volumetric light, ultra detailed |
++| `haeckel_abyss` | Haeckel abyss | radiolarians and jellyfish in the style of Ernst Haeckel, translucent bioluminescent sea creatures, intricate radial symmetry, deep ocean glow, scientific illustration meets hyperrealism |
++| `chromatic_liquid` | Chromatic liquid | molten chrome and rainbow oil flowing into kaleidoscopic patterns, liquid metal ripples, thin-film interference colours, macro photography, studio lighting, hyperreal |
++| `astral_forest` | Astral forest | ancient forest of crystal trees under a violet aurora, glowing runes in the bark, floating motes of light, mystical fog, fantasy realism, highly detailed |
++| `hyperspace` | Hyperspace lattice | geometric hyperspace tunnel of shifting jewel-toned mosaics, self-transforming beings of light, impossible architecture, intricate interlocking patterns, vivid saturated colours, transcendental |
++| `living_mandala` | Living mandala | living mandala of flowers, feathers and gemstones unfolding endlessly, perfect radial symmetry, gold filigree on deep indigo, ornate, hyperdetailed |
++| `blake_vision` | Blake vision | visionary engraving in the style of William Blake and Gustave Dore, angels spiralling through radiant clouds, cosmic light, dramatic chiaroscuro, epic, intricate |
++| `neural_bloom` | Neural bloom | bioluminescent neural network blooming like coral, synapses firing light, electric blue and violet, microscopic universe, shallow depth of field, hyperdetailed |
+ 
+ ### Sweep Depth (Animation Mode = Video Input)
+ 
+@@ -142,7 +173,7 @@ A moving band through the depth of your init video, rendered as a ControlNet gui
+ 
+ 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
+ 2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
+-3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`. Same depth video + same look + same frames = cache hit, no re-render.
++3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render.
+ 4. Then the render is submitted as usual.
+ 
+ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse.
+@@ -220,7 +251,7 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
+ | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
+ | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
+ | Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
+-| Example Preset, *Re-apply Preset*, *Edit prompt_seq* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
++| Example Preset, *Re-apply Preset*, *Edit prompt_seq*, Prompt Preset, *Show Latest Sweep* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
+ | `deforum/mod_live` cooks (input `beat_clock`) | `deforum/mod_live_callbacks` | `mod_live_chop.py` | `td_controller.mod_live_cook` |
+ | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
+ 
+@@ -253,7 +284,8 @@ scripts/
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
+-    presets.py         # 15 example configurations (Example Preset drop-down)
++    presets.py         # 27 example configurations (Example Preset drop-down)
++    prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+     payload.py         # batch request + frame plan
+     comfy.py           # ComfyUI request / history parsing
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 302a92f..af43e37 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -46,11 +46,12 @@ This document outlines the macro-architecture for our generative visual performa
+ - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
+ - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
+ - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
+-- [x] Example Preset drop-down: 15 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
++- [x] Example Preset drop-down: 27 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
+ - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+ 
+ - [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
+ - [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
++- [x] Twelve unorthodox presets (2D, 3D, Video Input, Interpolation), Hybrid Video page, ten visionary prompt presets, sweep preview as COMP output 2.
+ - [x] LCM baseline (4 exact steps, CFG 1.8) with payload checks; presets apply when picked, Re-apply button; Video Input presets on a fixed seed; Sweep Depth grow/blur and the fast vits depth model.
+ 
+ ### 🚧 In Progress
+diff --git a/scripts/build_master_ui.py b/scripts/build_master_ui.py
+index e2ba1c0..1f21a4a 100644
+--- a/scripts/build_master_ui.py
++++ b/scripts/build_master_ui.py
+@@ -17,7 +17,7 @@
+ #   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
+ #   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
+ #                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
+-#   sweep_preview     Movie File In TOP  the last Sweep Depth mask video (set by the controller)
++#   sweep_preview -> out_sweep   the last Sweep Depth mask video (COMP output 2)
+ #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
+ #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
+ #                                    channels named after parameters (drive live visuals with it)
+@@ -243,14 +243,17 @@ def build_inner(comp, values):
+         if stale is not None:
+             stale.destroy()
+             say('removed %s/%s (Sweep Depth renders its video directly now)' % (comp.name, name))
+-    _get(comp, moviefileinTOP, td_controller.SWEEP_PREVIEW, -300, -700)
++    preview = _get(comp, moviefileinTOP, td_controller.SWEEP_PREVIEW, -300, -700)
++    preview.viewer = True
++    out_sweep = _get(comp, outTOP, 'out_sweep', 400, -700)     # COMP output 2 (below out_loop)
++    out_sweep.inputConnectors[0].connect(preview)
+ 
+     build_clock(comp)
+ 
+     # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
+     ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
+     for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
+-                        ('pars', 'Preset Presetapply Promptedit'), ('custom', 1), ('builtin', 0),
++                        ('pars', 'Preset Presetapply Promptedit Promptpreset Sweepshowlatest'), ('custom', 1), ('builtin', 0),
+                         ('valuechange', 1), ('onpulse', 1), ('active', 1)):
+         par = getattr(ui_exec.par, name, None)
+         if par is None:
+@@ -401,6 +404,12 @@ def run():
+     build_inner(comp, values)
+     write_map_table(root, comp)
+     ensure_prompt_dat(root, comp)
++    preview = comp.op(td_controller.SWEEP_PREVIEW)
++    if preview is not None and not str(preview.par.file.eval() or '').strip():
++        try:
++            td_controller.show_latest_sweep(root)
++        except Exception as exc:
++            say('sweep_preview not set: %s' % exc)
+ 
+     total = len(schema.all_td_names())
+     say('%s %s: %d parameters on %d pages, %d values %s.' % (
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 74b52db..e0d8cf8 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -11,6 +11,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
+ * ``feed``          ControlNet guide feeds recorded from TOPs (capture plan, paths)
+ * ``sweep``         Sweep Depth: band maths and the background render of the mask video
+ * ``presets``       example configurations for the deforum COMP (Example Preset drop-down)
++* ``prompt_presets`` starting prompts for the Prompt Preset drop-down
+ * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
+ * ``migrate``       old Deforum_UI values -> the COMP's parameters
+ * ``payload``       builds the Deforum batch request + frame plan
+@@ -24,10 +25,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.7.1"
++__version__ = "0.8.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index df608b7..05d481b 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -84,8 +84,15 @@ def border_modes(choice):
+     return "replicate", "border"
+ 
+ 
++def hybrid_active(values):
++    """Hybrid Video drives a 2D / 3D render from the init video's motion or pixels."""
++    return _text(values.get("animation_mode", "")) in ("2D", "3D") and (
++        _text(values.get("hybrid_motion", "None")) not in ("", "None")
++        or _text(values.get("hybrid_composite", "None")) not in ("", "None"))
++
++
+ def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
+-                init_frames=None, mask_frames=None):
++                init_frames=None, mask_frames=None, hybrid=False):
+     """Work out max_frames and the frame-extraction window.
+ 
+     Returns a dict with max_frames, extract_* settings (or None when Deforum's
+@@ -123,10 +130,12 @@ def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
+ 
+     if mode in ("2D", "3D"):
+         cap, limited = ui_max_frames, "ui"
++        if hybrid and init_frames and init_frames < cap:
++            cap, limited = init_frames, "init video"
+         if use_mask_video and mask_frames and mask_frames < cap:
+             cap, limited = mask_frames, "mask video"
+         plan.update(max_frames=cap, source_frames=cap, limited_by=limited)
+-        if use_mask_video:
++        if use_mask_video or hybrid:
+             plan.update(extract_from_frame=0, extract_to_frame=cap - 1, extract_nth_frame=1)
+     return plan
+ 
+@@ -264,11 +273,12 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     ui_max = tp["max_frames"] if tp else values.get("max_frames", 240)
+     init_frames = mask_frames = None
+     if frame_counter is not None:
+-        if mode == "Video Input":
++        if mode == "Video Input" or hybrid_active(values):
+             init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
+         if use_mask_video:
+             mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
+-    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
++    hybrid = hybrid_active(values)
++    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames, hybrid)
+     total = plan["max_frames"]
+     if tp and total < tp["max_frames"]:
+         warnings.append("the %s is shorter than the loop (%d < %d frames); the loop will not close"
+@@ -345,6 +355,11 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
+ 
+     _check_sampling(values, settings, options, ranges, mode, warnings)
++    if hybrid:
++        # Deforum reads the video's frames from <outdir>/hybridframes; extract them every run.
++        settings["hybrid_generate_inputframes"] = True
++        if not _text(values.get("video_init_path", "")):
++            warnings.append("Hybrid Video is on but Globals > Video Init Path is empty")
+ 
+     # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
+     # Deforum parses every unit's schedules even when the unit is off, so a unit the
+@@ -377,7 +392,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+     settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
+ 
+     # --- output: fps / interpolation, and what the TD side relies on -----------------------
+-    settings.update(skip_video_creation=False, use_mask=use_mask_video, overlay_mask=False,
++    settings.update(skip_video_creation=False, use_mask=use_mask_video,
++                    overlay_mask=use_mask_video and _as_bool(values.get("overlay_mask", False)),
+                     store_frames_in_ram=True)
+     if tp:
+         settings["fps"] = tp["render_fps"]
+@@ -413,7 +429,8 @@ def _check_sampling(values, settings, options, ranges, mode, warnings):
+                         "(use 1.5-2)" % cfg[1])
+     keep = ranges.get("strength_schedule")
+     steps = settings.get("steps")
+-    if keep and isinstance(steps, int) and not _as_bool(options.get("img2img_fix_steps", False)):
++    if keep and isinstance(steps, int) and mode != "Interpolation" \
++            and not _as_bool(options.get("img2img_fix_steps", False)):
+         actual = int(steps * (1.0 - min(0.999, keep[1])))
+         if actual < 3:
+             warnings.append("A1111 runs int(steps x (1 - Strength)) steps on img2img frames: %d step(s) at "
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+index 5172cc5..f2dd4c8 100644
+--- a/scripts/tdeforum/presets.py
++++ b/scripts/tdeforum/presets.py
+@@ -27,7 +27,7 @@ frame (1.003 = +20 % per second), Strength is how much of the previous frame is
+ 
+ NONE = "none"
+ 
+-GOOD, EXTREME = "good", "extreme"
++GOOD, EXTREME, UNORTHODOX = "good", "extreme", "unorthodox"
+ 
+ 
+ class Preset(object):
+@@ -171,6 +171,100 @@ PRESETS = [
+                                    "sweep_grow": 10, "sweep_blur": 6.0, "sweep_trail": 16, "sweep_smooth": 0.3,
+                                    "cn_1_weight": 1.1, "cn_1_guidance_end": 1.0,
+                                    "cn_1_control_mode": "ControlNet is more important"})),
++
++    # ================================================================== unorthodox
++    # Things that only a generative feedback loop can do: the picture is re-imagined every frame,
++    # so geometry, depth, noise and even the seed become animation channels.
++    # ------------------------------------------------------------------ 2D
++    Preset("2d_ouroboros", "2D - Ouroboros (unorthodox)", "2D", UNORTHODOX,
++           "Zoom OUT with wrapped edges: the frame shrinks into tiled copies of itself and every pass "
++           "fuses the seams into one ever-growing mandala that never runs out of picture.",
++           _merge(_SMOOTH, _2D, {"zoom": 0.985, "angle": 0.15, "border": "wrap", "strength_schedule": 0.72,
++                                 "noise_schedule": 0.02, "diffusion_cadence": 2})),
++    Preset("2d_folding_plane", "2D - Folding plane (unorthodox)", "2D", UNORTHODOX,
++           "Perspective flip on three beat-locked axes: the picture plane folds and unfolds like paper and "
++           "diffusion paints whatever the fold reveals beyond the edges.",
++           _merge(_SMOOTH, _2D, {"enable_perspective_flip": True, "perspective_flip_fv": 53.0, "zoom": 1.002,
++                                 "strength_schedule": 0.72},
++                  _slot(1, "perspective_flip_theta", "sine", 8.0, 20.0),
++                  _slot(2, "perspective_flip_phi", "sine", 4.0, 12.0, phase=0.25),
++                  _slot(3, "perspective_flip_gamma", "triangle", 8.0, 6.0))),
++    Preset("2d_flow_puppet", "2D - Flow puppet (unorthodox)", "2D", UNORTHODOX,
++           "Hybrid Video optical flow: the hallucination moves exactly like your init video (every sway, "
++           "every step) without a single pixel of the video showing. Needs Globals > Video Init Path.",
++           _merge(_SMOOTH, _2D, {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT",
++                                 "hybrid_motion_use_prev_img": False, "hybrid_composite": "None",
++                                 "hybrid_flow_factor_schedule": 1.0, "seamless_loop": False,
++                                 "strength_schedule": 0.68, "diffusion_cadence": 1,
++                                 "optical_flow_cadence": "None"})),
++    # ------------------------------------------------------------------ 3D
++    Preset("3d_endless_vertigo", "3D - Endless vertigo (unorthodox)", "3D", UNORTHODOX,
++           "A dolly zoom that never ends: the camera pushes forward while the FOV breathes 45-95 degrees "
++           "over the loop, so space stretches and collapses around a subject that keeps being re-made.",
++           _merge(_SMOOTH, _3D, {"translation_z": 1.0, "midas_weight": 0.4, "strength_schedule": 0.72},
++                  _slot(1, "fov_schedule", "sine", 8.0, 25.0))),
++    Preset("3d_escher_descent", "3D - Escher descent (unorthodox)", "3D", UNORTHODOX,
++           "Sink and tilt at once with mirrored padding: every frame is a step down an impossible staircase "
++           "that the depth model keeps folding back into itself.",
++           _merge(_SMOOTH, _3D, {"translation_y": -0.8, "rotation_3d_x": 0.35, "translation_z": 0.4,
++                                 "padding_mode": "reflection", "strength_schedule": 0.74})),
++    Preset("3d_breathing_space", "3D - Breathing space (unorthodox)", "3D", UNORTHODOX,
++           "The geometry itself breathes on the bar: aspect ratio and FOV swing in opposite phase, an "
++           "anamorphic inhale the depth warp re-paints instead of stretching.",
++           _merge(_SMOOTH, _3D, {"translation_z": 0.3, "strength_schedule": 0.74},
++                  _slot(1, "aspect_ratio_schedule", "sine", 4.0, 0.25),
++                  _slot(2, "fov_schedule", "sine", 4.0, 12.0, phase=0.5))),
++    # ------------------------------------------------------------------ Video Input
++    Preset("video_depth_peel", "Video Input - Depth peel (unorthodox)", "Video Input", UNORTHODOX,
++           "The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays "
++           "the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it).",
++           _merge(_VIDEO, _SWEEP, {"cn_1_enabled": False, "sweep_as_mask": True, "sweep_mode": "max",
++                                   "sweep_width": 40, "sweep_softness": 16, "sweep_grow": 10,
++                                   "sweep_blur": 8.0, "sweep_trail": 20, "strength_schedule": 0.35,
++                                   "color_coherence": "Video Input", "overlay_mask": True,
++                                   "invert_mask": False})),
++    Preset("video_depth_puppet", "Video Input - Depth puppet (unorthodox)", "Video Input", UNORTHODOX,
++           "The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is "
++           "barely kept: the prompt becomes a new world that moves with the performer's depth.",
++           _merge(_VIDEO, _SWEEP, {"sweep_width": 255, "sweep_fill": "depth", "sweep_softness": 0,
++                                   "sweep_grow": 0, "sweep_blur": 2.0, "sweep_trail": 0, "sweep_smooth": 0.5,
++                                   "strength_schedule": 0.25, "cn_1_weight": 0.95, "cn_1_guidance_end": 0.7})),
++    Preset("video_depth_strobe", "Video Input - Depth strobe (unorthodox)", "Video Input", UNORTHODOX,
++           "A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene "
++           "is sliced into strobing depth layers locked to the tempo.",
++           _merge(_VIDEO, _SWEEP, {"sweep_cycles": 8.0, "sweep_width": 12, "sweep_softness": 2,
++                                   "sweep_grow": 2, "sweep_blur": 1.0, "sweep_trail": 0, "sweep_smooth": 0.3,
++                                   "strength_schedule": 0.5, "cn_1_weight": 1.0, "cn_1_guidance_end": 0.9,
++                                   "cn_1_control_mode": "ControlNet is more important"})),
++    # ------------------------------------------------------------------ Interpolation
++    # Every frame is drawn from noise (no previous frame), so with a fixed seed a frame is a pure
++    # function of its settings: modulate the seed itself and the loop closes perfectly.
++    Preset("interp_seed_walk", "Interpolation - Seed walk (unorthodox)", "Interpolation", UNORTHODOX,
++           "A walk through latent space: the noise blends from seed 424242 to its neighbour and back over "
++           "the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. "
++           "Perfectly seamless.",
++           {"animation_mode": "Interpolation", "seed_behavior": "fixed", "enable_subseed_scheduling": True,
++            "subseed_schedule": "0:(424243)", "subseed_strength_schedule": 0.5, "seamless_loop": True,
++            "loop_overlap_beats": 0.0, "diffusion_cadence": 1,
++            "mod1_active": True, "mod1_target": "subseed_strength_schedule", "mod1_shape": "triangle",
++            "mod1_beats": 8.0, "mod1_depth": 0.5, "mod1_sharpness": 4.0, "mod1_phase": 0.0}),
++    Preset("interp_beat_jolt", "Interpolation - Beat jolt (unorthodox)", "Interpolation", UNORTHODOX,
++           "On every beat the noise jumps towards another seed and relaxes back: the image flinches into a "
++           "sibling version on the kick and settles, with no motion at all.",
++           _merge({"animation_mode": "Interpolation", "seed_behavior": "fixed",
++                   "enable_subseed_scheduling": True, "subseed_schedule": "0:(424299)",
++                   "subseed_strength_schedule": 0.0, "seamless_loop": True, "loop_overlap_beats": 0.0,
++                   "diffusion_cadence": 1},
++                  _slot(1, "subseed_strength_schedule", "decay", 1.0, 0.55, 6.0))),
++    Preset("interp_guidance_bloom", "Interpolation - Guidance bloom (unorthodox)", "Interpolation", UNORTHODOX,
++           "CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into "
++           "over-defined detail and back, while a slow seed drift keeps it alive.",
++           _merge({"animation_mode": "Interpolation", "seed_behavior": "fixed",
++                   "enable_subseed_scheduling": True, "subseed_schedule": "0:(424243)",
++                   "subseed_strength_schedule": 0.15, "seamless_loop": True, "loop_overlap_beats": 0.0,
++                   "diffusion_cadence": 1},
++                  _slot(1, "cfg_scale_schedule", "sine", 8.0, 0.9),
++                  _slot(2, "subseed_strength_schedule", "triangle", 8.0, 0.15))),
+ ]
+ 
+ BY_ID = dict((p.id, p) for p in PRESETS)
+diff --git a/scripts/tdeforum/prompt_presets.py b/scripts/tdeforum/prompt_presets.py
+new file mode 100644
+index 0000000..2fd7848
+--- /dev/null
++++ b/scripts/tdeforum/prompt_presets.py
+@@ -0,0 +1,62 @@
++"""Visionary / psychedelic starting prompts for the Prompts page "Prompt Preset" menu.
++
++Picking one writes it into the COMP's prompt_seq table (beat | prompt | xfade) and switches
++Prompt Source to the sequence; the rows it replaced are kept and come back when you pick None.
++The global Negative Prompt (Globals page) still applies. Written for a photoreal LCM checkpoint:
++concrete materials and light, a few strong nouns, no long artist lists.
++"""
++
++NONE = "none"
++
++
++class PromptPreset(object):
++    __slots__ = ("id", "label", "rows")
++
++    def __init__(self, id, label, rows):
++        self.id, self.label, self.rows = id, label, rows
++
++
++def _one(prompt):
++    return [("0", prompt, "")]
++
++
++PRESETS = [
++    PromptPreset("fractal_temple", "Fractal temple", _one(
++        "vast fractal temple of iridescent glass and liquid gold, infinite recursive arches, sacred geometry, "
++        "volumetric god rays through bioluminescent mist, hyperdetailed, cinematic lighting")),
++    PromptPreset("mycelial_cosmos", "Mycelial cosmos", _one(
++        "glowing mycelium network spanning a cosmic nebula, bioluminescent fungi, drifting spores like tiny "
++        "galaxies, deep teal and magenta light, macro photography, ethereal, hyperdetailed")),
++    PromptPreset("cosmic_eye", "Eye of the cosmos", _one(
++        "colossal cosmic eye made of swirling galaxies, iris of nebula clouds, concentric rings of light, "
++        "sacred geometry halo, otherworldly, volumetric light, ultra detailed")),
++    PromptPreset("haeckel_abyss", "Haeckel abyss", _one(
++        "radiolarians and jellyfish in the style of Ernst Haeckel, translucent bioluminescent sea creatures, "
++        "intricate radial symmetry, deep ocean glow, scientific illustration meets hyperrealism")),
++    PromptPreset("chromatic_liquid", "Chromatic liquid", _one(
++        "molten chrome and rainbow oil flowing into kaleidoscopic patterns, liquid metal ripples, thin-film "
++        "interference colours, macro photography, studio lighting, hyperreal")),
++    PromptPreset("astral_forest", "Astral forest", _one(
++        "ancient forest of crystal trees under a violet aurora, glowing runes in the bark, floating motes of "
++        "light, mystical fog, fantasy realism, highly detailed")),
++    PromptPreset("hyperspace", "Hyperspace lattice", _one(
++        "geometric hyperspace tunnel of shifting jewel-toned mosaics, self-transforming beings of light, "
++        "impossible architecture, intricate interlocking patterns, vivid saturated colours, transcendental")),
++    PromptPreset("living_mandala", "Living mandala", _one(
++        "living mandala of flowers, feathers and gemstones unfolding endlessly, perfect radial symmetry, "
++        "gold filigree on deep indigo, ornate, hyperdetailed")),
++    PromptPreset("blake_vision", "Blake vision", _one(
++        "visionary engraving in the style of William Blake and Gustave Dore, angels spiralling through radiant "
++        "clouds, cosmic light, dramatic chiaroscuro, epic, intricate")),
++    PromptPreset("neural_bloom", "Neural bloom", _one(
++        "bioluminescent neural network blooming like coral, synapses firing light, electric blue and violet, "
++        "microscopic universe, shallow depth of field, hyperdetailed")),
++]
++
++BY_ID = dict((p.id, p) for p in PRESETS)
++NAMES = [NONE] + [p.id for p in PRESETS]
++LABELS = ["None (keep prompt_seq)"] + [p.label for p in PRESETS]
++
++
++def get(name):
++    return BY_ID.get(str(name or "").strip())
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 6da6325..e7e9cd7 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
+ 
+ import re
+ 
+-from . import feed, modulation, presets, sweep, tempo
++from . import feed, modulation, presets, prompt_presets, sweep, tempo
+ 
+ PAGE_TEMPO = "Tempo"
+ PAGE_GLOBALS = "Globals"
+@@ -39,6 +39,7 @@ PAGE_CAMERA = "Camera & Depth"
+ PAGE_DIFFUSION = "Diffusion"
+ PAGE_NOISE = "Noise & Color"
+ PAGE_FLOW = "Flow & Anti-blur"
++PAGE_HYBRID = "Hybrid Video"
+ PAGE_MODS = "Mod Matrix"
+ PAGE_SWEEP = "Sweep Depth"
+ CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
+@@ -47,7 +48,7 @@ PAGE_CN1 = PAGE_CNS[0]
+ PAGE_PIPELINE = "Pipeline"
+ 
+ PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
+-              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
++              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_HYBRID, PAGE_MODS,
+               PAGE_SWEEP] + PAGE_CNS + [PAGE_PIPELINE]
+ 
+ # Kinds understood by build_master_ui.py and payload.py
+@@ -124,6 +125,9 @@ TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
+     PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
+     PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
+ SW = PAGE_SWEEP
++HY = PAGE_HYBRID
++HYBRID_MOTIONS = ["None", "Optical Flow", "Perspective", "Affine"]
++HYBRID_COMPOSITES = ["None", "Normal", "Before Motion", "After Generation"]
+ 
+ COMFY_PREPROCESSORS = [
+     "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
+@@ -281,6 +285,8 @@ FIELDS = [
+       G, STR, label="Negative Prompt", key="animation_prompts_negative"),
+     F("strength", 0.8, G, FLOAT, norm=(0, 1), label="Init Strength (first frame)"),
+     F("use_mask_video", False, G, TOGGLE),
++    F("invert_mask", False, G, TOGGLE, label="Invert Mask (diffuse the black areas instead)"),
++    F("overlay_mask", False, G, TOGGLE, label="Overlay Mask (keep the original outside the mask)"),
+     F("video_init_path", "/opt/a1111/td_inputs/comfy_videos/archive/taichi_portrait.mp4", G, STR),
+     F("video_mask_path", "/opt/a1111/td_masks/mask_01.mov", G, STR),
+     F("video_frame_mode", "trim", G, MENU, menu=["trim", "stride"],
+@@ -289,6 +295,8 @@ FIELDS = [
+     # --- Prompts ---------------------------------------------------------------
+     F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
+       labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
++    F("prompt_preset", prompt_presets.NONE, PR, MENU, menu=prompt_presets.NAMES, labels=prompt_presets.LABELS,
++      label="Prompt Preset (writes prompt_seq)", target=None),
+     F("prompt_edit", 0, PR, PULSE, label="Edit prompt_seq (opens deforum/prompt_seq)", target=None),
+     F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
+ 
+@@ -338,6 +346,18 @@ FIELDS = [
+     F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),
+     F("optical_flow_redo_generation", "None", FL, MENU, menu=FLOW_METHODS),
+     F("kernel_schedule", 5, FL, INT, norm=(1, 15), label="Anti-blur Kernel (odd)", as_schedule=True),
++
++    # --- Hybrid Video (2D / 3D driven by the Video Init Path) -------------------------
++    F("hybrid_motion", "None", HY, MENU, menu=HYBRID_MOTIONS,
++      labels=["None", "Optical Flow (move like the video)", "Perspective (camera of the video)",
++              "Affine (camera of the video)"], label="Hybrid Motion"),
++    F("hybrid_flow_method", "RAFT", HY, MENU, menu=["RAFT", "DIS Medium", "DIS Fine", "Farneback"]),
++    F("hybrid_motion_use_prev_img", False, HY, TOGGLE, label="Flow from the previous generated image"),
++    F("hybrid_flow_consistency", False, HY, TOGGLE),
++    F("hybrid_consistency_blur", 2, HY, INT, norm=(0, 16)),
++    F("hybrid_flow_factor_schedule", 1.0, HY, FLOAT, norm=(0, 2), as_schedule=True, label="Hybrid Flow Factor"),
++    F("hybrid_composite", "None", HY, MENU, menu=HYBRID_COMPOSITES, label="Hybrid Composite (mix the video in)"),
++    F("hybrid_comp_alpha_schedule", 0.5, HY, FLOAT, norm=(0, 1), as_schedule=True, label="Composite Alpha"),
+ ] + [f for f in _MODS if f.page == FL] + [
+ 
+     # --- Mod Matrix ----------------------------------------------------------------
+@@ -374,6 +394,7 @@ FIELDS = [
+       label="Queue only prepares the sweep (depth + mask video, no render)", target=None),
+     F("sweep_depth_path", "", SW, STATUS, label="Depth Video", target=None),
+     F("sweep_info", "", SW, STATUS, label="Sweep Plan", target=None),
++    F("sweep_show_latest", 0, SW, PULSE, label="Show Latest Sweep (sweep_preview / COMP output 2)", target=None),
+ ] \
+   + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
+     # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 34b235e..24ddacd 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -31,6 +31,7 @@ from . import config
+ from . import feed
+ from . import payload
+ from . import presets
++from . import prompt_presets
+ from . import schema
+ from . import sweep
+ from . import tempo
+@@ -56,6 +57,7 @@ COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give
+ COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
+ FEED_FINALIZE_TIMEOUT_S = 60.0
+ PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
++PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
+ FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
+ CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+ 
+@@ -248,6 +250,59 @@ def apply_preset(root, force=False):
+     return True
+ 
+ 
++def apply_prompt_preset(root):
++    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back)."""
++    ui = _op(root, "ui")
++    menu = getattr(ui.par, "Promptpreset", None) if ui is not None else None
++    table = _inner(ui, "prompt_seq")
++    if menu is None or table is None:
++        return False
++    selected = str(menu.eval() or prompt_presets.NONE).strip() or prompt_presets.NONE
++    stored = dict(root.fetch(PROMPT_PRESET_KEY, None, search=False) or {})
++    applied = stored.get("applied", prompt_presets.NONE)
++    if selected == applied:
++        return False
++    if applied == prompt_presets.NONE:          # your own rows: keep them to come back to
++        backup = [[str(table[r, c].val) for c in range(table.numCols)] for r in range(table.numRows)]
++    else:
++        backup = stored.get("backup") or []
++    preset = prompt_presets.get(selected)
++    if preset is not None:
++        rows = [["beat", "prompt", "xfade"]] + [list(r) for r in preset.rows]
++    else:
++        rows = backup
++    if rows:
++        table.clear()
++        for row in rows:
++            table.appendRow(row)
++    root.store(PROMPT_PRESET_KEY, {"applied": selected if preset else prompt_presets.NONE,
++                                   "backup": backup if preset else []})
++    if preset is None:
++        log("prompt preset None: your prompt_seq rows are back")
++        return True
++    source = getattr(ui.par, "Promptsource", None)
++    if source is not None and str(source.eval()) != "sequence":
++        _set_constant(source, "sequence")
++        log("Prompt Source switched to the prompt_seq sequence")
++    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
++    return True
++
++
++def show_latest_sweep(root, cfg=None):
++    """Point deforum/sweep_preview at the newest cn_sweep_*.mp4 (COMP output 2 shows it)."""
++    cfg = cfg or config.load()
++    folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
++    found = sorted(glob.glob((folder or "") + "cn_sweep_*.mp4"), key=os.path.getmtime) if folder else []
++    found = [f for f in found if ".tmp." not in f]
++    ui = _op(root, "ui")
++    if not found:
++        log("no sweep video in %s yet" % folder)
++        return None
++    _show_sweep(ui, found[-1])
++    log("sweep_preview: %s" % found[-1])
++    return found[-1]
++
++
+ def open_prompt_seq(root):
+     """Prompts page > Edit prompt_seq: the table lives inside the COMP; open it in a window."""
+     ui = _op(root, "ui")
+diff --git a/scripts/ui_exec.py b/scripts/ui_exec.py
+index e287d9d..0a50279 100644
+--- a/scripts/ui_exec.py
++++ b/scripts/ui_exec.py
+@@ -3,6 +3,8 @@
+ #   Preset         picking an Example Preset applies it at once (it is also checked at bake / Queue)
+ #   Presetapply    "Re-apply Preset": lays the selected preset over the COMP again
+ #   Promptedit     opens deforum/prompt_seq in a floating editor
++#   Promptpreset   writes the picked visionary prompt into prompt_seq
++#   Sweepshowlatest  points sweep_preview (COMP output 2) at the newest Sweep Depth video
+ # Logic: tdeforum/td_controller.py.
+ 
+ 
+@@ -20,6 +22,8 @@ def _ctl():
+ def onValueChange(par, prev):
+     if par.name == 'Preset':
+         _ctl().apply_preset(par.owner.parent())
++    elif par.name == 'Promptpreset':
++        _ctl().apply_prompt_preset(par.owner.parent())
+     return
+ 
+ 
+@@ -28,4 +32,6 @@ def onPulse(par):
+         _ctl().apply_preset(par.owner.parent(), force=True)
+     elif par.name == 'Promptedit':
+         _ctl().open_prompt_seq(par.owner.parent())
++    elif par.name == 'Sweepshowlatest':
++        _ctl().show_latest_sweep(par.owner.parent())
+     return
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index 9c57a77..821ab36 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -275,8 +275,8 @@ class BuilderTest(unittest.TestCase):
+         from tdeforum import presets
+         comp = self.build()
+         self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
+-        self.assertEqual(len(presets.NAMES), 16)
+-        self.assertTrue(any("presets: 15 examples" in line for line in self.log), self.log[-6:])
++        self.assertEqual(len(presets.NAMES), 28)
++        self.assertTrue(any("presets: 27 examples" in line for line in self.log), self.log[-6:])
+ 
+     def test_sweep_preview_and_old_live_sweep_ops_removed(self):
+         comp = self.build()
+@@ -291,6 +291,23 @@ class BuilderTest(unittest.TestCase):
+             self.assertTrue(hasattr(comp.par, name), name)
+         self.assertIn("Sweep Depth", [p.name for p in comp.customPages])
+ 
++    def test_sweep_preview_is_comp_output_two_and_shows_the_newest_sweep(self):
++        folder = os.path.join(self.share, "td_masks", "feeds")
++        os.makedirs(folder, exist_ok=True)
++        for i, name in enumerate(("cn_sweep_old.mp4", "cn_sweep_new.mp4", "cn_sweep_x.tmp.mp4")):
++            path = os.path.join(folder, name)
++            open(path, "wb").close()
++            os.utime(path, (1000 + i, 1000 + i))
++        os.utime(os.path.join(folder, "cn_sweep_x.tmp.mp4"), (5000, 5000))
++        comp = self.build()
++        preview = comp.op("sweep_preview")
++        self.assertIs(comp.op("out_sweep").inputConnectors[0].source, preview)
++        self.assertTrue(preview.viewer)
++        cfg = config.load()
++        cfg.update(share_root=self.share + "/")
++        ctl.show_latest_sweep(self.root, cfg)
++        self.assertTrue(preview.par.file.val.endswith("cn_sweep_new.mp4"), preview.par.file.val)
++
+     def test_beat_clock_and_mod_live(self):
+         comp = self.build()
+         clock, live = comp.op("beat_clock"), comp.op("mod_live")
+@@ -362,7 +379,7 @@ class BuilderTest(unittest.TestCase):
+         comp = self.build()
+         ui_exec = comp.op("ui_exec")
+         self.assertTrue(ui_exec.par.file.val.endswith("ui_exec.py"))
+-        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit")
++        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit Promptpreset Sweepshowlatest")
+         self.assertEqual(ui_exec.par.op.val, comp.path)
+         self.assertEqual((ui_exec.par.valuechange.val, ui_exec.par.onpulse.val), (1, 1))
+         for name in ("Presetapply", "Promptedit"):
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index 17c6c66..84698c2 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -9,10 +9,34 @@ from tdeforum import td_controller as ctl
+ 
+ 
+ class PresetDataTest(unittest.TestCase):
+-    def test_fifteen_examples_good_and_extreme_per_mode(self):
+-        self.assertEqual(len(presets.PRESETS), 15)
++    def test_three_unorthodox_per_mode(self):
++        for mode in ("2D", "3D", "Video Input", "Interpolation"):
++            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX]
++            self.assertEqual(len(odd), 3, mode)
++            for p in odd:
++                self.assertIn("(unorthodox)", p.label)
++
++    def test_interpolation_presets_hold_the_seed_and_loop_cleanly(self):
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        for preset in [p for p in presets.PRESETS if p.mode == "Interpolation"]:
++            values = _comp_values(**presets.resolve(preset, defaults))
++            result = payload.build_request(values, {"0": "x"}, MODELS)
++            s = result["request"]["deforum_settings"]
++            self.assertEqual((s["animation_mode"], s["seed_behavior"]), ("Interpolation", "fixed"), preset.id)
++            self.assertIs(s["enable_subseed_scheduling"], True, preset.id)
++            self.assertFalse([w for w in result["warnings"] if "loop" in w or "LCM" in w], (preset.id, result["warnings"]))
++
++    def test_flow_puppet_turns_hybrid_video_on(self):
++        defaults = dict((f.api, f.default) for f in schema.FIELDS)
++        values = _comp_values(**presets.resolve(presets.BY_ID["2d_flow_puppet"], defaults))
++        s = payload.build_request(values, {"0": "x"}, MODELS)["request"]["deforum_settings"]
++        self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
++        self.assertEqual(s["extract_nth_frame"], 1)
++
++    def test_twentyseven_examples_good_and_extreme_per_mode(self):
++        self.assertEqual(len(presets.PRESETS), 27)
+         for mode in ("3D", "2D", "Video Input"):
+-            levels = [p.level for p in presets.PRESETS if p.mode == mode]
++            levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
+             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
+             self.assertGreaterEqual(levels.count(presets.EXTREME), 1, mode)
+             self.assertGreaterEqual(len(levels), 2, mode)
+@@ -46,9 +70,9 @@ class PresetDataTest(unittest.TestCase):
+                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
+         for preset in presets.PRESETS:
+             self.assertFalse(protected & set(preset.values), preset.id)
+-            if preset.mode != "Video Input":
++            if preset.mode in ("2D", "3D"):
+                 self.assertNotIn("seed_behavior", preset.values, preset.id)
+-            if "sweep" not in preset.id:
++            if not preset.values.get("sweep_enabled"):
+                 self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
+                                  preset.id)
+ 
+@@ -231,6 +255,35 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+         ctl.open_prompt_seq(self.root)
+         self.assertEqual(opened, [True])
+ 
++    def test_prompt_preset_writes_prompt_seq_and_none_restores_it(self):
++        from tdeforum import prompt_presets
++        ui = self.make(prompt_source="json")
++        table = ui.op("prompt_seq")
++        self.assertEqual(len(prompt_presets.PRESETS), 10)
++        ui.par.Promptpreset.val = "cosmic_eye"
++        self.assertTrue(ctl.apply_prompt_preset(self.root))
++        self.assertEqual(table.rows[0], ["beat", "prompt", "xfade"])
++        self.assertIn("cosmic eye", table.rows[1][1])
++        self.assertEqual(ui.par.Promptsource.val, "sequence")
++        ui.par.Promptpreset.val = "neural_bloom"
++        ctl.apply_prompt_preset(self.root)
++        self.assertIn("neural network", table.rows[1][1])
++        ui.par.Promptpreset.val = "none"
++        ctl.apply_prompt_preset(self.root)
++        self.assertEqual(table.rows, [["beat", "prompt", "xfade"], ["0", "gold", ""]])
++        values = ctl.read_ui(ui)
++        prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
++        self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "gold")
++
++    def test_every_prompt_preset_compiles(self):
++        from tdeforum import prompt_presets
++        values = _comp_values()
++        for preset in prompt_presets.PRESETS:
++            rows = [["beat", "prompt", "xfade"]] + [list(r) for r in preset.rows]
++            s = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=rows)["request"]["deforum_settings"]
++            self.assertEqual(s["prompts"]["0"], preset.rows[0][1], preset.id)
++            self.assertLess(len(preset.rows[0][1].split()), 45, preset.id)       # CLIP: 77 tokens
++
+     def test_every_preset_applies_and_then_queues(self):
+         ui = self.make()
+         for preset in presets.PRESETS:
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index c989263..9da7dde 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -297,7 +297,7 @@ class SchemaFeedTest(unittest.TestCase):
+         self.assertEqual(sorted(f.api for f in fields), sorted(
+             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
+              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
+-             "sweep_grow", "sweep_blur",
++             "sweep_grow", "sweep_blur", "sweep_show_latest",
+              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
+         self.assertTrue(all(f.target is None for f in fields))
+         self.assertEqual(fields[0].api, "sweep_enabled")
+-- 
+2.43.0
+
