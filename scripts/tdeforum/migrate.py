@@ -36,7 +36,7 @@ def _const(value):
 # equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
 # you set to something else is kept. Each bump applies once: build_master_ui stores the version
 # it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
-BASELINE_VERSION = 3
+BASELINE_VERSION = 4
 BASELINE_BUMPS = {
     "seed": (1, "-1", "424242"),
     "loop_seeds": (1, True, False),
@@ -50,6 +50,17 @@ BASELINE_BUMPS = {
     "feed_1_top": (3, "", "/project1/final_out"),
     "feed_2_top": (3, "", "/project1/final_out"),
     "feed_3_top": (3, "", "/project1/final_out"),
+    # 4: from the 2026-10-17 pass (docs/passes/): Deforum's current colour match, softer perlin
+    # noise, ControlNet guidance 0.2..0.8 so the guide blends instead of stamping.
+    "legacy_colormatch": (4, True, False),
+    "perlin_w": (4, 8, 4),
+    "perlin_h": (4, 8, 4),
+    "cn_1_guidance_start": (4, 0.0, 0.2),
+    "cn_1_guidance_end": (4, 1.0, 0.8),
+    "cn_2_guidance_start": (4, 0.0, 0.2),
+    "cn_2_guidance_end": (4, 1.0, 0.8),
+    "cn_3_guidance_start": (4, 0.0, 0.2),
+    "cn_3_guidance_end": (4, 1.0, 0.8),
 }
 
 

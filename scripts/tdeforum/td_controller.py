@@ -29,6 +29,7 @@ import traceback
 from . import chop_link
 from . import snapshots
 from . import comfy
+from . import inputloop
 from . import config
 from . import feed
 from . import payload
@@ -62,6 +63,7 @@ FEED_FINALIZE_TIMEOUT_S = 60.0
 PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
 PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
 PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
+INPUT_PENDING_KEY = "tdeforum_input_pending"  # root storage: input-loop info waiting for its conform
 LAST_LOAD_KEY = "tdeforum_last_load"  # root storage: {path, expect} of the render last loaded
 FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
@@ -217,7 +219,7 @@ def apply_preset(root, force=False):
         return False
     if preset is not None:
         defaults = dict((f.api, f.default) for f in schema.FIELDS)
-        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id)
+        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id, preset.raws)
     root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
     if preset is None:
         text = "None (restored %d parameters)" % restored
@@ -243,17 +245,26 @@ def _restore_backup(ui, backup):
     return restored
 
 
-def _lay_values(ui, values, what):
-    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept)."""
+def _lay_values(ui, values, what, raws=None):
+    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept).
+
+    ``raws`` {MOD api: schedule} goes to <Name>raw (otherwise a preset clears raw, which would
+    beat its base); a raw is left alone when the base is driven (a CHOP link stays in charge)."""
     backup, changed, kept = {}, 0, []
-    for api, value in values.items():
+    raws = dict(raws or {})
+    items = list(values.items()) + [(api, None) for api in raws if api not in values]
+    for api, value in items:
         field = schema.BY_API.get(api)
         if field is None:
             log("preset %s: unknown parameter %r skipped" % (what, api))
             continue
-        targets = [(field.td_name, _coerce_par(field, value))]
+        targets = [] if value is None else [(field.td_name, _coerce_par(field, value))]
         if field.kind == schema.MOD:
-            targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
+            base = getattr(ui.par, field.td_name, None)
+            if base is not None and not _is_constant(base) and api in raws:
+                kept.append(field.raw_td_name)
+            else:
+                targets.append((field.raw_td_name, raws.get(api, "")))   # "" : raw would beat the base
         for name, new in targets:
             par = getattr(ui.par, name, None)
             if par is None:
@@ -630,6 +641,7 @@ def build(root, cfg):
     links = read_links(ui, values)
     show_links(ui, links)
     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
+    _fit_loop(ui, cfg, values, known)
     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
                                                                 payload.DEFAULT_CHECKPOINT),
@@ -642,6 +654,26 @@ def build(root, cfg):
     return values, result
 
 
+def _fit_loop(ui, cfg, values, known):
+    """Tempo > Fit Loop to Init Video: set Loop Length to the most whole bars the video holds."""
+    if not payload._as_bool(values.get("fit_loop_to_video", False)) or payload.tempo_plan(values) is None:
+        return
+    if not (str(values.get("animation_mode")) == "Video Input" or payload.hybrid_active(values)):
+        return
+    try:
+        frames = _frame_counter(cfg, known)(values.get("video_init_path"))
+    except Exception:
+        frames = None
+    bars = payload.fit_bars(values, frames)
+    if bars and int(float(values.get("loop_bars", 0) or 0)) != bars:
+        log("Fit Loop to Init Video: %d frames hold %d bars; Loop Length %s -> %d"
+            % (frames, bars, values.get("loop_bars"), bars))
+        values["loop_bars"] = bars
+        par = getattr(ui.par, "Loopbars", None)
+        if par is not None:
+            _set_constant(par, bars)
+
+
 def _expectation(result, cfg=None):
     """What the finished render will look like on disk / how to loop it (kept in state).
 
@@ -650,22 +682,57 @@ def _expectation(result, cfg=None):
     tp = result.get("tempo")
     if not tp:
         return None
+    x = max(1, int(tp["interp_x"] or 1))
     expect = {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
               "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
-    expect["input"] = _input_expect(result, cfg, 1.0 / max(1, int(tp["interp_x"] or 1)))
+    rendered = int((result.get("plan") or {}).get("max_frames") or tp["max_frames"])
+    if rendered < tp["max_frames"]:
+        # Capped by a shorter init / mask video: the loop is what was rendered, with no seam tail.
+        expect.update(out_loop=rendered * x, overlap_out=0, capped=rendered)
+    expect["input"] = _input_expect(result, cfg, 1.0 / x, tp["render_fps"])
     return expect
 
 
-def _input_expect(result, cfg, rate):
+def _input_expect(result, cfg, rate, fps=30.0):
     settings = result.get("request", {}).get("deforum_settings", {})
     init = str(settings.get("video_init_path", "") or "").strip()
     if not init or cfg is None:
         return None
     plan = result.get("plan") or {}
-    return {"container": init, "share": config.to_share(cfg, init) or init,
+    info = {"container": init, "share": config.to_share(cfg, init) or init,
             "start": int(plan.get("extract_from_frame") or 0),
             "stride": int(plan.get("extract_nth_frame") or 1), "rate": float(rate),
             "size": [settings.get("W"), settings.get("H")]}
+    folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
+    if folder and info["size"][0] and info["size"][1]:
+        info["job"] = inputloop.make_job(info["share"], folder, cfg["cn_feed_dir"], info["size"], info["start"],
+                                         info["stride"], int(plan.get("max_frames") or 0) or 1, fps)
+    return info
+
+
+_INPUT_RUNNING = set()
+
+
+def _start_input_job(info):
+    """Conform the init video for output 3 in the background (no-op when cached / running)."""
+    job = (info or {}).get("job")
+    if not job or job["key"] in _INPUT_RUNNING or inputloop.ready(job):
+        return
+    if not os.path.isfile(job["src"]):
+        log("input loop: %s is not readable from TouchDesigner; output 3 stays empty" % job["src"])
+        return
+    try:
+        os.remove(job["sidecar"])
+    except OSError:
+        pass
+    _INPUT_RUNNING.add(job["key"])
+
+    def work(j):
+        try:
+            inputloop.run_job(j)
+        finally:
+            _INPUT_RUNNING.discard(j["key"])
+    _spawn(work, job)
 
 
 def _write_runtime_json(cfg, name, data):
@@ -1088,8 +1155,9 @@ def _submit_deforum(root, cfg, result, st):
     _op(root, "deforum").request(config.deforum_url(cfg, "/deforum_api/batches"), "POST",
                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
     now = time.time()
-    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
-                 "expect": _expectation(result, cfg)})
+    expect = _expectation(result, cfg)
+    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now, "expect": expect})
+    _start_input_job((expect or {}).get("input"))   # conform output 3 while Deforum renders
     _set_status(root, "render: submitted")
     log("render submitted: " + payload.summary(result))
 
@@ -1493,8 +1561,30 @@ def _after_feed(root, cfg, st):
 
 # --------------------------------------------------------------------------- polling
 
+def _poll_input(root):
+    """Output 3 waits for its conformed video: load it once the background job has written it."""
+    info = root.fetch(INPUT_PENDING_KEY, None, search=False)
+    job = (info or {}).get("job")
+    if not job:
+        return
+    done = inputloop.read_result(job["sidecar"])
+    if done is None:
+        if job["key"] not in _INPUT_RUNNING:
+            _start_input_job(info)        # e.g. TD was restarted while it ran
+        return
+    root.store(INPUT_PENDING_KEY, None)
+    if done.get("ok"):
+        _load_input(root, _op(root, "ui"), info)
+    else:
+        log("input loop: could not conform %s: %s" % (job["src"], done.get("error")))
+
+
 def tick(root):
     """Timer pulse: poll whatever the pipeline is waiting on."""
+    try:
+        _poll_input(root)
+    except Exception as exc:
+        log("input loop: %s" % exc)
     st = _state(root)
     current = st.get("state", IDLE)
     if current == IDLE:
@@ -1839,12 +1929,14 @@ def _load_movie(root, path, expect=None):
             reload_ = getattr(player.par, "reloadpulse", None)
             if reload_ is not None:
                 reload_.pulse()
-    _load_input(ui, (expect or {}).get("input"))
+    _load_input(root, ui, (expect or {}).get("input"))
     root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
     if expect and expect.get("out_loop"):
         loop = int(expect["out_loop"])                 # output frames per loop
         rate = float(expect.get("rate", 1.0))          # file frames per output frame
         frames = _video_frames(path)
+        if frames and loop * rate > frames:
+            loop = max(1, int(frames / rate))          # never wrap past the end of the file
         if frames:
             overlap = int((frames - loop * rate) / rate)
         else:
@@ -1858,14 +1950,28 @@ def _load_movie(root, path, expect=None):
                "" if frames else " (file length unknown, used the plan)"))
 
 
-def _load_input(ui, info):
-    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross)."""
+def _load_input(root, ui, info):
+    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross).
+
+    Plays the conformed copy (inputloop.py: exactly the frames Deforum used, at render size, in a
+    codec TD opens); while that is still being written it waits (tick() fills it in)."""
     if ui is None:
         return
+    job = (info or {}).get("job")
     share = (info or {}).get("share") or ""
+    start, stride = int((info or {}).get("start", 0)), int((info or {}).get("stride", 1))
+    if job:
+        if inputloop.ready(job):
+            share, start, stride = job["out_share"], 0, 1         # frames already picked and sized
+            root.store(INPUT_PENDING_KEY, None)
+        else:
+            _start_input_job(info)
+            root.store(INPUT_PENDING_KEY, info)
+            log("input loop: conforming %s for output 3 (fills in when ready)" % os.path.basename(job["src"]))
+            share = ""
     if info:
-        _set_par(ui, "Loopinstart", str(int(info.get("start", 0))))
-        _set_par(ui, "Loopinstride", str(int(info.get("stride", 1))))
+        _set_par(ui, "Loopinstart", str(start))
+        _set_par(ui, "Loopinstride", str(stride))
         _set_par(ui, "Loopinrate", "%g" % float(info.get("rate", 1.0)))
     for key in ("in_head", "in_tail"):
         player = _inner(ui, key)
@@ -1878,9 +1984,9 @@ def _load_input(ui, info):
                 reload_.pulse()
             except Exception:
                 pass
-    if info:
+    if info and share:
         log("input loop (output 3): %s from frame %d, every %d%s" % (
-            os.path.basename(share), int(info.get("start", 0)), int(info.get("stride", 1)),
+            os.path.basename(share), start, stride,
             "" if float(info.get("rate", 1)) == 1 else ", %g render frames per output frame" % info["rate"]))
 
 

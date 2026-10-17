@@ -115,11 +115,11 @@ Notes:
 
 ### LCM baseline
 
-The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept.
+The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept. Baseline 4 (from the 2026-10-17 pass) also moves *Legacy Colormatch* to off, Perlin W/H to 4 × 4 and every ControlNet unit's guidance to 0.2…0.8, the same way.
 
 ### Example presets
 
-*Tempo › Example Preset* (first page of the COMP) lays one of 31 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+*Tempo › Example Preset* (first page of the COMP) lays one of 32 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
 
 * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
 * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
@@ -154,6 +154,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
 | `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
 | `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
 | `hybrid_flow_glow` | Hybrid - Flow glow (good) | The dream moves with the video's optical flow while a soft depth band travels away through the performer as a QR Monster glow. Needs Globals > Video Init Path. |
+| `hybrid_ballet_pulse` | Hybrid - Pulse composite (good) | From a pass that worked (`docs/passes/2026-10-17_ballet_pulse.md`): one 10-frame saw drives push, FOV and Strength together (written to the three `…raw` schedules), the video composited in at 80 % before motion, a soft depth band as the mask, your TD visual as the QR guide, cadence 8 + RAFT, RIFE x3, loop fitted to the video. |
 | `hybrid_ghost_peel` | Hybrid - Ghost peel (good) | Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the band re-diffuses, so the scene is re-dreamed layer by layer toward you. |
 | `hybrid_camera_tide` | Hybrid - Camera tide (extreme) | Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive QR Monster hard: the space surges like a tide through the video's own depth. |
 | `hybrid_possession` | Hybrid - Possession (unorthodox) | Sticky flow measured from the generated image, a faint after-generation echo of the video and the whole depth map as relief: something else is wearing the performer's shape and movement. |
@@ -238,13 +239,17 @@ echo "$HOME/Codebase/comfyui/output/preprocessed_vids $PWD/td_masks/preprocessed
 sudo mount -a && make down && make up
 ```
 
+### Fit the loop to the video
+
+*Tempo › Fit Loop to Init Video* (Video Input, or 2D/3D with Hybrid Video): at Queue, *Loop Length* is set to the most whole bars the init video holds (minus the seam overlap when *Seamless Loop* is on), so a short video no longer leaves the loop open. When a render is capped by a shorter video anyway, the loop player now loops exactly what was rendered instead of the planned length.
+
 ### Outputs for compositing
 
 | COMP output | what |
 |---|---|
 | 1 `out_loop` | the render, seamless loop player |
 | 2 `out_sweep` | the last Sweep Depth mask video |
-| 3 `out_input` | the **init video looped the same way as the render**: at render size (W × H), the frames Deforum used (start / stride from the frame plan), interpolation-aware, with the same seam crossfade, so outputs 1 and 3 line up frame for frame |
+| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit) |
 
 *Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
 
@@ -334,7 +339,7 @@ scripts/
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
-    presets.py         # 31 example configurations (Example Preset drop-down)
+    presets.py         # 32 example configurations (Example Preset drop-down)
     page_presets.py    # Page Preset drop-downs (one per page except Globals)
     prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
     migrate.py         # Deforum_UI -> deforum COMP value migration

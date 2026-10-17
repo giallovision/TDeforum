@@ -31,11 +31,12 @@ GOOD, EXTREME, UNORTHODOX = "good", "extreme", "unorthodox"
 
 
 class Preset(object):
-    __slots__ = ("id", "label", "mode", "level", "notes", "values")
+    __slots__ = ("id", "label", "mode", "level", "notes", "values", "raws")
 
-    def __init__(self, id, label, mode, level, notes, values):
+    def __init__(self, id, label, mode, level, notes, values, raws=None):
         self.id, self.label, self.mode, self.level, self.notes = id, label, mode, level, notes
         self.values = values
+        self.raws = dict(raws or {})      # {MOD api: Deforum schedule} written to <Name>raw
 
     def __repr__(self):
         return "Preset(%s)" % self.id
@@ -252,6 +253,33 @@ PRESETS = [
            "performer as a QR Monster glow. Needs Globals > Video Init Path.",
            _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP, {"sweep_mode": "max", "strength_schedule": 0.7,
                                                       "noise_schedule": 0.01, "color_coherence": "LAB"})),
+    # From a pass that worked (2026-10-17, ballet + Haeckel prompt; docs/passes/): one 10-frame
+    # saw drives the camera push, the lens and Strength together, so every pulse pushes in,
+    # narrows the FOV and re-imagines more at the same moment; the video is composited in at 80 %
+    # before the warp, so the dancer stays; only a soft depth band (the mask) is re-diffused;
+    # cadence 8 + RAFT, then RIFE x3, keeps it fluid.
+    Preset("hybrid_ballet_pulse", "Hybrid - Pulse composite (good)", "3D", GOOD,
+           "3D push + lens + Strength on one 10-frame saw, the video composited in at 80 % before motion, "
+           "a soft depth band as the mask and your TD visual (final_out) as the QR guide. Cadence 8, RIFE x3. "
+           "Needs Globals > Video Init Path.",
+           _merge(_3D, _HYBRID_FLOW, _SWEEP, {
+               "fov_schedule": 127.0, "midas_weight": 0.2, "padding_mode": "zeros",
+               "translation_z": 1.0, "strength_schedule": 0.7,
+               "hybrid_composite": "Before Motion", "hybrid_comp_alpha_schedule": 0.8,
+               "diffusion_cadence": 8, "optical_flow_cadence": "RAFT", "optical_flow_redo_generation": "None",
+               "noise_schedule": 0.01, "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0,
+               "color_coherence": "LAB", "legacy_colormatch": False, "noise_type": "perlin",
+               "perlin_w": 4, "perlin_h": 4, "perlin_octaves": 3, "perlin_persistence": 0.5,
+               "seamless_loop": False, "loop_overlap_beats": 2.0, "fit_loop_to_video": True,
+               "render_strategy": "interpolate", "render_fps": "20", "interp_engine": "RIFE v4.6",
+               "feed_1_mode": "top_loop", "cn_1_weight": 1.0, "cn_1_guidance_start": 0.2,
+               "cn_1_guidance_end": 0.8, "cn_1_processor_res": 576,
+               "sweep_as_mask": True, "sweep_mode": "max", "sweep_cycles": 1.0, "sweep_shape": "ramp",
+               "sweep_width": 40, "sweep_softness": 16, "sweep_grow": 10, "sweep_blur": 8.0, "sweep_trail": 20,
+               "sweep_smooth": 0.4, "sweep_fill": "white"}),
+           raws={"translation_z": "0:(1.3 - 0.0620689*(t%10))",
+                 "strength_schedule": "0:(0.91 - 0.0434483*(t%10))",
+                 "fov_schedule": "0:(138.6 - 2.6069*(t%10))"}),
     Preset("hybrid_ghost_peel", "Hybrid - Ghost peel (good)", "3D", GOOD,
            "Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the "
            "band re-diffuses, so the scene is re-dreamed layer by layer toward you.",

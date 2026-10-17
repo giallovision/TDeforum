@@ -34,24 +34,35 @@ class PresetDataTest(unittest.TestCase):
         self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
         self.assertEqual(s["extract_nth_frame"], 1)
 
-    def test_thirtyone_examples_good_and_extreme_per_mode(self):
-        self.assertEqual(len(presets.PRESETS), 31)
+    def test_pulse_composite_writes_its_raw_saws_and_none_clears_them(self):
+        pulse = presets.BY_ID["hybrid_ballet_pulse"]
+        self.assertEqual(sorted(pulse.raws), ["fov_schedule", "strength_schedule", "translation_z"])
+        for api, sched in pulse.raws.items():
+            self.assertNotIn(",", sched)                       # Deforum splits schedules on commas
+            body = sched.split(":", 1)[1].strip()[1:-1]
+            values = [eval(body, {"t": t}) for t in range(12)]
+            self.assertAlmostEqual(values[0], values[10])        # a 10-frame saw
+            self.assertGreater(values[0], values[9])
+
+    def test_thirtytwo_examples_good_and_extreme_per_mode(self):
+        self.assertEqual(len(presets.PRESETS), 32)
 
     def test_four_hybrid_presets_use_the_video_and_the_sweep(self):
         hybrids = [p for p in presets.PRESETS if p.id.startswith("hybrid_")]
-        self.assertEqual(len(hybrids), 4)
+        self.assertEqual(len(hybrids), 5)
         defaults = dict((f.api, f.default) for f in schema.FIELDS)
         for p in hybrids:
             self.assertIn(p.mode, ("2D", "3D"))
             self.assertNotEqual(p.values["hybrid_motion"], "None", p.id)
             self.assertTrue(p.values["sweep_enabled"], p.id)
-            self.assertEqual(p.values["feed_1_mode"], "sweep", p.id)
+            # the sweep guides ControlNet unit 1, or is the mask while unit 1 records a TOP
+            self.assertTrue(p.values["feed_1_mode"] == "sweep" or p.values["sweep_as_mask"], p.id)
             values = _comp_values(**presets.resolve(p, defaults))
             self.assertIsNone(sweep.check(values), p.id)
             result = payload.build_request(values, {"0": "x"}, MODELS)
             s = result["request"]["deforum_settings"]
             self.assertIs(s["hybrid_generate_inputframes"], True, p.id)
-            self.assertEqual(s["diffusion_cadence"], 2, p.id)
+            self.assertEqual(s["diffusion_cadence"], 8 if p.id == "hybrid_ballet_pulse" else 2, p.id)
         self.assertTrue(presets.BY_ID["hybrid_ghost_peel"].values["sweep_as_mask"])
         for mode in ("3D", "2D", "Video Input"):
             levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
@@ -186,6 +197,18 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
 
     def pick(self, name):
         self.ui.par.Preset.val = name
+
+    def test_preset_raws_are_set_driven_bases_keep_theirs_and_none_clears_them(self):
+        ui = self.make()
+        ui.par.Strengthschedule.mode, ui.par.Strengthschedule.expr = ParMode.EXPRESSION, "op('wave1')['wave1']"
+        self.pick("hybrid_ballet_pulse")
+        self.assertTrue(ctl.apply_preset(self.root))
+        self.assertEqual(ui.par.Translationzraw.val, "0:(1.3 - 0.0620689*(t%10))")
+        self.assertEqual(ui.par.Strengthscheduleraw.val, "")         # its base is a CHOP link: left alone
+        self.assertEqual(ui.par.Feed1mode.val, "top_loop")
+        self.pick("none")
+        ctl.apply_preset(self.root)
+        self.assertEqual((ui.par.Translationzraw.val, ui.par.Fovscheduleraw.val), ("", ""))
 
     def test_nothing_happens_on_none(self):
         ui = self.make()

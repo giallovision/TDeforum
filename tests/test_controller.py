@@ -223,6 +223,20 @@ class TempoCompTest(ControllerTest.__bases__[0]):
 
     def test_interpolated_file_and_loop_player(self):
         ui = self.make()
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV not installed")
+        src = self.share + "/td_inputs/comfy_videos/archive/a.mp4"      # the init video (90 frames)
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        writer = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (64, 36))
+        for i in range(90):
+            writer.write(np.full((36, 64, 3), i * 2, np.uint8))
+        writer.release()
+        inline = mock.patch.object(ctl, "_spawn", side_effect=lambda target, *args: target(*args))
+        inline.start()
+        self.addCleanup(inline.stop)
         ctl.queue(self.root)
         self.finish()
         st = self.root.storage[ctl.STATE_KEY]
@@ -236,16 +250,21 @@ class TempoCompTest(ControllerTest.__bases__[0]):
         self.assertEqual(ui.par.Loopoutframes.val, "120")      # 4 beats at 60 fps
         self.assertEqual(ui.par.Loopoutoverlap.val, "30")      # 15 render frames x2
         self.assertEqual(ui.par.Loopoutrate.val, "1")
-        # output 3: the init video, looped the same way (30 fps render on a 60 fps loop)
-        self.assertTrue(ui.op("in_head").par.file.val.endswith("comfy_videos/archive/a.mp4"))
-        self.assertEqual(ui.op("in_tail").par.file.val, ui.op("in_head").par.file.val)
+        # output 3: the init video conformed at Queue (75 render frames at 1024x576, TD-readable
+        # codec), looped the same way (30 fps render on a 60 fps loop)
+        conformed = ui.op("in_head").par.file.val
+        self.assertIn("/td_masks/feeds/input_loop_", conformed)
+        self.assertEqual(ui.op("in_tail").par.file.val, conformed)
+        capture = cv2.VideoCapture(conformed)
+        self.assertEqual((int(capture.get(7)), int(capture.get(3)), int(capture.get(4))), (75, 1024, 576))
+        capture.release()
         self.assertEqual((ui.par.Loopinstart.val, ui.par.Loopinstride.val, ui.par.Loopinrate.val),
                          ("0", "1", "0.5"))
         # Reload Render + Input: the same files again, even after they were cleared
         ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
         self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
         self.assertEqual(ui.op("loop_head").par.file.val, path)
-        self.assertTrue(ui.op("in_head").par.file.val.endswith("a.mp4"))
+        self.assertEqual(ui.op("in_head").par.file.val, conformed)
 
     def test_snapshot_round_trip(self):
         ui = self.make()

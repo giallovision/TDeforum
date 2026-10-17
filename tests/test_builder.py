@@ -302,8 +302,8 @@ class BuilderTest(unittest.TestCase):
         from tdeforum import presets
         comp = self.build()
         self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
-        self.assertEqual(len(presets.NAMES), 32)
-        self.assertTrue(any("presets: 31 examples" in line for line in self.log), self.log[-6:])
+        self.assertEqual(len(presets.NAMES), 33)
+        self.assertTrue(any("presets: 32 examples" in line for line in self.log), self.log[-6:])
 
     def test_sweep_preview_and_old_live_sweep_ops_removed(self):
         comp = self.build()
@@ -390,7 +390,7 @@ class BuilderTest(unittest.TestCase):
 
     def test_lcm_baseline_bump_applies_once(self):
         comp = self.build()
-        self.assertEqual(comp.storage["tdeforum_baseline"], 3)
+        self.assertEqual(comp.storage["tdeforum_baseline"], 4)
         self.assertEqual(comp.par.Feed2top.val, "/project1/final_out")
         self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
         comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...

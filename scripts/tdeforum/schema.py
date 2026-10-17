@@ -233,8 +233,10 @@ def _cn_unit_fields(n):
         F(p + "vid_path", "/opt/a1111/td_masks/mask_01.mov", page, STR),
         F(p + "mask_vid_path", "", page, STR),
         F(p + "weight", 1.0, page, FLOAT, norm=(0, 2), as_schedule=True),
-        F(p + "guidance_start", 0.0, page, FLOAT, norm=(0, 1), as_schedule=True),
-        F(p + "guidance_end", 1.0, page, FLOAT, norm=(0, 1), as_schedule=True),
+        # 0.2..0.8: the first steps compose freely and the last ones add detail over the guide,
+        # so QR Monster reads as part of the image instead of a stencil (baseline 4).
+        F(p + "guidance_start", 0.2, page, FLOAT, norm=(0, 1), as_schedule=True),
+        F(p + "guidance_end", 0.8, page, FLOAT, norm=(0, 1), as_schedule=True),
         F(p + "processor_res", 512, page, INT, norm=(64, 2048)),
         F(p + "threshold_a", 0.5, page, FLOAT, norm=(0, 255)),
         F(p + "threshold_b", 0.5, page, FLOAT, norm=(0, 255)),
@@ -258,6 +260,8 @@ FIELDS = [
     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
     F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
+    F("fit_loop_to_video", False, TE, TOGGLE,
+      label="Fit Loop to Init Video (sets Loop Length to the most whole bars it holds)", target=None),
     F("out_fps", 60, TE, INT, norm=(24, 60), label="Output FPS", target=None),
     F("render_strategy", "cadence", TE, MENU, menu=tempo.STRATEGIES, labels=tempo.STRATEGY_LABELS,
       label="Render Strategy", target=None),
@@ -343,8 +347,8 @@ FIELDS = [
 
     # --- Noise & Color -----------------------------------------------------------
     F("noise_type", "perlin", NO, MENU, menu=["perlin", "uniform"]),
-    F("perlin_w", 8, NO, INT, norm=(1, 16), label="Perlin W"),
-    F("perlin_h", 8, NO, INT, norm=(1, 16), label="Perlin H"),
+    F("perlin_w", 4, NO, INT, norm=(1, 16), label="Perlin W"),     # 4 x 4: soft, large noise (baseline 4)
+    F("perlin_h", 4, NO, INT, norm=(1, 16), label="Perlin H"),
     F("perlin_octaves", 4, NO, INT, norm=(1, 7)),
     F("perlin_persistence", 0.5, NO, FLOAT, norm=(0, 1)),
     F("color_coherence", "LAB", NO, MENU, menu=["None", "HSV", "LAB", "RGB", "Video Input", "Image"]),
@@ -352,7 +356,7 @@ FIELDS = [
     # Deforum's API turns this ON whenever the key is missing (deprecation_utils), which it
     # was in every earlier payload; kept on so existing looks don't shift. Deforum's UI
     # default (and recommendation for coherence) is off.
-    F("legacy_colormatch", True, NO, TOGGLE, label="Legacy Colormatch (earlier renders used it)"),
+    F("legacy_colormatch", False, NO, TOGGLE, label="Legacy Colormatch (off: Deforum's current match)"),
 
     # --- Flow & Anti-blur ----------------------------------------------------------
     F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),

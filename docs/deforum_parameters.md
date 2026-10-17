@@ -1,6 +1,6 @@
 # deforum COMP: parameter reference
 
-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.11.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
 Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
@@ -43,6 +43,7 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Bpm` | BPM | 120.0 | Tempo of the loop. Together with Beats per Bar and Loop Length it decides how many frames are rendered and the period of every Mod Matrix slot. |
 | `Beatsperbar` | Beats per Bar | 4 | Beats in one bar (4 for 4/4). Used for the loop length and bar-based modulation. |
 | `Loopbars` | Loop Length (bars) | 2 | Length of the loop in bars; at 120 bpm, 4/4 and 60 fps, 2 bars = 240 frames. |
+| `Fitlooptovideo` | Fit Loop to Init Video (sets Loop Length to the most whole bars it holds) | Off | At Queue, sets Loop Length to the most whole bars the init video holds (Video Input or Hybrid Video, Trim mode), so a short video doesn't leave the loop open. |
 | `Outfps` | Output FPS | 60 | Frame rate of the finished video and of TouchDesigner's timeline maths. |
 | `Renderstrategy` | Render Strategy | cadence | Cadence: Deforum renders every output frame (with diffusion cadence). Interpolate: Deforum renders at Render FPS and RIFE/FILM fills the frames in between. |
 | `Renderfps` | Render FPS (interpolate) | 30 | With Render Strategy = Interpolate, the rate Deforum actually renders at (15/20/30); the interpolator multiplies it up to Output FPS. |
@@ -160,13 +161,13 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 |---|---|---|---|
 | `Pagepresetnoise` | Page Preset (Noise & Color) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Noisetype` | Noise Type | perlin | Shape of the added noise: Perlin (smooth, cloudy) or Uniform (fine grain). |
-| `Perlinw` | Perlin W | 8 | Perlin noise cells across the width; lower = bigger blobs. |
-| `Perlinh` | Perlin H | 8 | Perlin noise cells down the height. |
+| `Perlinw` | Perlin W | 4 | Perlin noise cells across the width; lower = bigger blobs. |
+| `Perlinh` | Perlin H | 4 | Perlin noise cells down the height. |
 | `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. |
 | `Perlinpersistence` | Perlin Persistence | 0.5 | How strong each finer Perlin octave is relative to the previous one. |
 | `Colorcoherence` | Color Coherence | LAB | Keeps colours from drifting by matching each frame to a reference: LAB/HSV/RGB (first frame), Video Input (the video frame), Image, or None. |
 | `Colorforcegrayscale` | Color Force Grayscale | Off | Converts every frame to greyscale before diffusing. |
-| `Legacycolormatch` | Legacy Colormatch (earlier renders used it) | On | Uses Deforum's older colour-matching method (what earlier renders used). |
+| `Legacycolormatch` | Legacy Colormatch (off: Deforum's current match) | Off | Uses Deforum's older colour-matching method (what earlier renders used). |
 
 ## Flow & Anti-blur
 
@@ -258,8 +259,8 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
 | `Cn1vidpath` | Vid Path | /opt/a1111/td_masks/mask_01.mov | Guide video/image (container path); set automatically by TOP feeds, ComfyUI preprocessing and Sweep Depth. |
 | `Cn1maskvidpath` | Mask Vid Path | (empty) | Optional mask limiting where this unit acts. |
 | `Cn1weight` | Weight | 1.0 | Strength of this unit's guidance. |
-| `Cn1guidancestart` | Guidance Start | 0.0 | Fraction of the sampling steps after which the unit starts guiding. |
-| `Cn1guidanceend` | Guidance End | 1.0 | Fraction of the steps after which it stops (below 1 lets the last steps add free detail). |
+| `Cn1guidancestart` | Guidance Start | 0.2 | Fraction of the sampling steps after which the unit starts guiding. |
+| `Cn1guidanceend` | Guidance End | 0.8 | Fraction of the steps after which it stops (below 1 lets the last steps add free detail). |
 | `Cn1processorres` | Processor Res | 512 | Resolution the preprocessor works at. |
 | `Cn1thresholda` | Threshold A | 0.5 | First preprocessor-specific threshold (e.g. Canny low). |
 | `Cn1thresholdb` | Threshold B | 0.5 | Second preprocessor-specific threshold (e.g. Canny high). |

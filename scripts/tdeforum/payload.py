@@ -157,6 +157,25 @@ def tempo_plan(values):
     )
 
 
+def fit_bars(values, init_frames):
+    """Most whole bars (plus the seam overlap) that fit in ``init_frames`` render frames, or None.
+
+    For Tempo > Fit Loop to Init Video with Video Frame Mode = Trim (Stride already stretches
+    the whole video over the loop)."""
+    if not init_frames or _text(values.get("video_frame_mode", "trim")) == "stride":
+        return None
+    try:
+        one = tempo_plan(dict(values, loop_bars=1))
+    except (TypeError, ValueError):
+        return None
+    if not one:
+        return None
+    per_bar = one["fpb"] * one["beats_per_bar"]
+    overlap = int(round(max(0.0, _as_number(values.get("loop_overlap_beats", 1.0), float)) * one["fpb"])) \
+        if one["seamless"] else 0
+    return max(1, int((int(init_frames) - overlap) // per_bar))
+
+
 def read_slots(values, warnings):
     """Active Mod Matrix rows -> [modulation.Slot]."""
     slots = []

@@ -79,7 +79,7 @@ class PayloadTest(unittest.TestCase):
         self.assertEqual(s["zoom"], "0:(1.05)")
         self.assertEqual(s["translation_z"], "0:(0), 299:(6)")
         self.assertEqual(s["cn_1_weight"], "0:(0.8)")
-        self.assertEqual(s["cn_1_guidance_end"], "0:(1.0)")
+        self.assertEqual(s["cn_1_guidance_end"], "0:(0.8)")       # baseline 4
         self.assertEqual(s["seed"], -1)
         self.assertIs(s["cn_1_enabled"], True)
         self.assertEqual(s["cn_1_resize_mode"], "Just Resize")
@@ -100,7 +100,7 @@ class PayloadTest(unittest.TestCase):
                 self.assertIn(key, s)
                 self.assertIsNotNone(s[key], key)
             self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
-            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(1.0)")
+            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(0.8)")
 
     def test_td_only_fields_not_sent(self):
         s = self.build()["request"]["deforum_settings"]

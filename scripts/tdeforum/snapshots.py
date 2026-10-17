@@ -22,7 +22,8 @@ from . import schema
 VERSION = 1
 FOLDER = "snapshots"
 SKIP_KINDS = (schema.STATUS, schema.PULSE)
-SKIP_APIS = ("snapshot_name", "snapshot_path")
+# One-shot switches: a snapshot that turned them back on would redo ComfyUI / the sweep every Queue.
+SKIP_APIS = ("snapshot_name", "snapshot_path", "force_preprocess", "sweep_force")
 
 
 def folder(cfg):
