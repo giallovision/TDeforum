@@ -75,6 +75,10 @@ def enabled(values):
     return _truthy(values.get("sweep_enabled", False))
 
 
+def prepare_only(values):
+    return _truthy(values.get("sweep_prepare_only", False))
+
+
 def check(values):
     """None when Sweep Depth can run, else why not (shown to the user)."""
     if not enabled(values):

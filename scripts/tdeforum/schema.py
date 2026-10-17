@@ -342,6 +342,9 @@ FIELDS = [
 
     # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------
     F("sweep_enabled", False, SW, TOGGLE, label="Sweep Depth On", target=None),
+    F("sweep_depth_video", "", SW, STR, label="Pre-made Depth Video (container path; empty = make it from Video Init Path)",
+      target=None),
+    F("sweep_prepare_only", False, SW, TOGGLE, label="Queue only makes the depth video (no render)", target=None),
     F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
       target=None),
     F("sweep_mode", sweep.MAX, SW, MENU, menu=sweep.MODES, labels=sweep.MODE_LABELS, label="Mode", target=None),

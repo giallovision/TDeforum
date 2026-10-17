@@ -157,7 +157,7 @@ class SchemaFeedTest(unittest.TestCase):
         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
         fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP]
         self.assertEqual(sorted(f.api for f in fields), sorted(
-            ["sweep_enabled", "sweep_model", "sweep_mode", "sweep_cycles", "sweep_shape", "sweep_direction",
+            ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode", "sweep_cycles", "sweep_shape", "sweep_direction",
              "sweep_width", "sweep_softness", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
         self.assertTrue(all(f.target is None for f in fields))
         self.assertEqual(schema.BY_API["sweep_depth_path"].td_name, "Sweepdepthpath")
@@ -277,6 +277,41 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         self.assertIs(s["use_mask_video"], True)
         self.assertEqual(s["video_mask_path"], "/opt/a1111/td_masks/feeds/cn1_feed.mp4")
         self.assertEqual(ui.par.Usemaskvideo.val, 1)
+
+    def test_premade_depth_video_skips_comfy(self):
+        premade = "/opt/a1111/td_masks/preprocessed_vids/mine_depth.mp4"
+        path = config.to_share(self.cfg, premade)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * 50)
+        ui = self.make(sweep_depth_video=premade)
+        ctl.queue(self.root)
+        self.assertEqual(self.root.op("webclient_comfyui").requests, [])
+        self.assertEqual(self.state(), ctl.CAPTURING)
+        self.assertEqual(ui.par.Sweepdepthpath.val, premade)
+        self.assertEqual(self.depth.par.file.val, path)
+
+    def test_prepare_only_makes_the_depth_video_and_stops(self):
+        ui = self.make(sweep_prepare_only=True)
+        ctl.queue(self.root)
+        self.depth_done()
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("depth video ready", ui.par.Pipelinestatus.val)
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(self.out.recorded, [])
+        self.assertTrue(ui.par.Sweepdepthpath.val.endswith(self.DEPTH))
+        # the second press hits the cache and also stops
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertEqual(self.posts(), [])
+
+    def test_prepared_depth_video_is_used_by_the_next_queue(self):
+        self.make(sweep_prepare_only=True)
+        ctl.queue(self.root)
+        self.depth_done()
+        self.ui.par.Sweepprepareonly.val = 0
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.CAPTURING)
 
     def test_preview_and_doctor_report_the_sweep(self):
         self.make()

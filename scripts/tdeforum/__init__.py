@@ -23,7 +23,7 @@ import this package and forward their callbacks to ``td_controller``.
 import importlib
 import sys
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Leaves first, so dependants pick up reloaded modules.
 _SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",

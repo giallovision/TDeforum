@@ -259,6 +259,13 @@ class BuilderTest(unittest.TestCase):
         self.assertFalse(any("NOTE feed" in line for line in self.log))
         self.assertEqual(comp.par.Feedloopstart.val, 0)
 
+    def test_preset_menu_and_report(self):
+        from tdeforum import presets
+        comp = self.build()
+        self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
+        self.assertEqual(len(presets.NAMES), 16)
+        self.assertTrue(any("presets: 15 examples" in line for line in self.log), self.log[-6:])
+
     def test_sweep_depth_ops(self):
         comp = self.build()
         depth, script = comp.op("sweep_depth"), comp.op("sweep_mask")

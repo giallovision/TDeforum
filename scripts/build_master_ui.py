@@ -31,7 +31,9 @@ _scripts = os.path.dirname(_path) if _path else 'T:/scripts'
 if _scripts not in sys.path:
     sys.path.insert(0, _scripts)
 
+import importlib
 import tdeforum
+tdeforum = importlib.reload(tdeforum)      # a cached older __init__ would reload an old module list
 tdeforum.reload_all()
 from tdeforum import migrate, payload, prompt_seq, schema, td_controller
 
@@ -346,6 +348,10 @@ def run():
         say('  dropped %s (%s)' % (name, schema.RETIRED_TD_NAMES.get(name, 'not in schema')))
     for note in notes:
         say('NOTE ' + note)
+    menu = getattr(comp.par, 'Preset', None)
+    say('presets: %d examples in the Example Preset menu (Tempo page), pages: %s' % (
+        len(getattr(menu, 'menuNames', []) or []) - 1 if menu is not None else 0,
+        ', '.join(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2:-len(schema.PAGE_CNS)])))
     try:
         tp = payload.tempo_plan(values)
         say('tempo: ' + (tdeforum.tempo.describe(tp) if tp else 'manual length'))

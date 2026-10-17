@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 import traceback
 
@@ -395,15 +396,30 @@ def _feed_and_render(root, cfg, st, values, result):
 
 
 def _start_sweep_depth(root, cfg, values, result, st):
-    """Sweep Depth needs a depth video of the init video: ask ComfyUI for it (cached).
+    """Sweep Depth needs a depth video of the init video.
 
-    True when a ComfyUI job was submitted (the pipeline resumes when it finishes)."""
-    if not [w for w in feed.requests(values) if w.mode == feed.SWEEP]:
+    Normally ComfyUI makes it from Video Init Path (cached). A Pre-made Depth Video path skips
+    ComfyUI. "Queue only makes the depth video" stops after this stage.
+
+    True when the pipeline should stop here (a ComfyUI job was submitted and resumes in
+    _on_comfy(), or the depth video was all that was asked for)."""
+    wants = [w for w in feed.requests(values) if w.mode == feed.SWEEP]
+    prepare = sweep.enabled(values) and sweep.prepare_only(values)
+    if not wants and not prepare:
         return False
     problem = sweep.check(values)
     if problem:
         raise RuntimeError(problem)
-    return _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep")
+    premade = str(values.get("sweep_depth_video", "") or "").strip()
+    if premade:
+        _store_preprocessed(root, premade, "sweep")
+        log("Sweep Depth uses the pre-made depth video %s" % premade)
+    elif _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep"):
+        return True
+    if prepare:
+        _finish(root, st, "depth video ready: %s" % (premade or _op(root, "ui").par.Sweepdepthpath.eval()))
+        return True
+    return False
 
 
 def _render_stage(root, cfg, st, values, result):
@@ -1151,6 +1167,9 @@ def _on_comfy(root, cfg, st, code, body, text):
     if st.get("purpose") == "sweep":
         try:
             values, result = build(root, cfg)
+            if sweep.prepare_only(values):
+                _finish(root, st, "depth video ready: %s" % container_path)
+                return
             _feed_and_render(root, cfg, st, values, result)
         except Exception as exc:
             traceback.print_exc()
@@ -1394,6 +1413,9 @@ def doctor(root):
     cfg = config.load()
     resync(root, cfg)
     log("share root %s | scripts %s | runtime %s" % (cfg["share_root"], cfg["scripts_dir"], cfg["runtime_dir"]))
+    log("tdeforum %s | %d example presets | sweep depth page %s" % (
+        getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
+        "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
     ui = _op(root, "ui")
     values = read_ui(ui) if ui is not None else {}
