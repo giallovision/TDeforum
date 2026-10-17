@@ -377,7 +377,14 @@ def run_job(job):
         if not os.path.isfile(depth):
             if not job.get("fetch_url"):
                 raise RuntimeError("the depth video is not readable from TouchDesigner: %s" % depth)
-            size = download(job["fetch_url"], depth)
+            try:
+                size = download(job["fetch_url"], depth)
+            except Exception as exc:
+                if getattr(exc, "code", None) == 404:      # ComfyUI has no such output file
+                    result["missing_depth"] = True
+                    raise RuntimeError("ComfyUI has no depth video %s (HTTP 404 from %s)"
+                                       % (os.path.basename(depth), job["fetch_url"]))
+                raise
             result["fetched"] = size
         depth_frames = video_frames(depth)
         plan_info = dict(job["plan"])

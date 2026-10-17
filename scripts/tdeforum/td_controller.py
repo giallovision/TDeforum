@@ -664,7 +664,8 @@ def _start_sweep_render(root, cfg, st):
         values, result = build(root, cfg)
         job = _sweep_job(root, cfg, values, result)
         done = sweep.read_result(job["sidecar"])
-        meta = {"units": [w.unit for w in feed.requests(values) if w.mode == feed.SWEEP],
+        meta = {"depth_retry": bool(st.get("depth_retry")),
+                "units": [w.unit for w in feed.requests(values) if w.mode == feed.SWEEP],
                 "as_mask": payload._as_bool(values.get("sweep_as_mask", False)),
                 "prepare": sweep.prepare_only(values), "out": job["out_container"],
                 "out_share": job["out_share"], "sidecar": job["sidecar"], "init": values.get("video_init_path")}
@@ -703,6 +704,9 @@ def _poll_sweep(root, cfg, st):
 def _after_sweep(root, cfg, st, meta, done):
     """The mask video exists: hand it to the sweep units (and the mask), then carry on."""
     if not done.get("ok"):
+        if done.get("missing_depth") and not meta.get("depth_retry"):
+            _remake_depth(root, cfg, st, done)
+            return
         _fail(root, st, "Sweep Depth render failed: %s" % done.get("error"))
         return
     ui = _op(root, "ui")
@@ -749,6 +753,36 @@ def _alias_depth_cache(root, ui, frames):
     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
     cache.setdefault(key, depth)
     root.store(CACHE_KEY, cache)
+
+
+def _remake_depth(root, cfg, st, done):
+    """The remembered depth video is gone from ComfyUI (deleted, or ComfyUI's output folder
+    changed): forget it everywhere and ask ComfyUI for it again, once."""
+    ui = _op(root, "ui")
+    depth = str(ui.par.Sweepdepthpath.eval() or "") if getattr(ui.par, "Sweepdepthpath", None) else ""
+    log("sweep: %s; forgetting it and making the depth video again" % done.get("error"))
+    cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
+    stale = [k for k, v in cache.items() if v == depth]
+    for key in stale:
+        cache.pop(key)
+    root.store(CACHE_KEY, cache)
+    _set_par(ui, "Sweepdepthpath", "")
+    try:
+        values, result = build(root, cfg)
+        if str(values.get("sweep_depth_video", "") or "").strip():
+            _fail(root, st, "Sweep Depth: the Pre-made Depth Video %s is not in ComfyUI's output folder"
+                  % values["sweep_depth_video"])
+            return
+        retry = dict(st, depth_retry=True)
+        if _start_preprocess(root, cfg, values, result, retry, then_render=False, purpose="sweep"):
+            state = _state(root)
+            state["depth_retry"] = True
+            _save(root, state)
+            return
+        _fail(root, st, "Sweep Depth: could not ask ComfyUI for the depth video again")
+    except Exception as exc:
+        traceback.print_exc()
+        _fail(root, st, "Sweep Depth: %s" % exc)
 
 
 def _show_sweep(ui, share_path):

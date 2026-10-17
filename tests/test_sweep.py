@@ -418,6 +418,50 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
         self.assertIn("cn_sweep_", self.sent()["cn_1_vid_path"])
 
+    def test_a_depth_video_comfyui_no_longer_has_is_made_again_once(self):
+        import urllib.error
+        fixture = write_depth_video(os.path.join(self.share, "fixture", "d.mp4"), frames=75)
+        calls = []
+
+        def flaky(url, path, timeout=60.0):
+            calls.append(url)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            shutil.copyfile(fixture, path)
+            return os.path.getsize(path)
+        ui = self.make()
+        ctl.queue(self.root)
+        with mock.patch.object(sweep, "download", side_effect=flaky):
+            self.depth_done(on_share=False)
+            self.assertEqual(self.state(), ctl.SWEEP_RENDERING)
+            self.tick()                                   # 404 -> forget it, new ComfyUI job
+            self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
+            self.assertEqual(ui.par.Sweepdepthpath.val, "")
+            posts = [r for r in self.root.op("webclient_comfyui").requests if r[0] == "POST"]
+            self.assertEqual(len(posts), 2)
+            self.depth_done(on_share=False)
+            self.tick()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+
+    def test_a_second_404_fails_with_the_url(self):
+        import urllib.error
+
+        def gone(url, path, timeout=60.0):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        ui = self.make()
+        ctl.queue(self.root)
+        with mock.patch.object(sweep, "download", side_effect=gone):
+            self.depth_done(on_share=False)
+            self.tick()
+            self.depth_done(on_share=False)
+            self.tick()
+        self.assertEqual(self.state(), ctl.IDLE)
+        status = ui.par.Pipelinestatus.val
+        self.assertIn("ComfyUI has no depth video", status)
+        self.assertIn("/view?", status)
+
     def test_second_queue_hits_both_caches(self):
         self.run_to_render()
         ctl.cancel(self.root)
