@@ -190,7 +190,8 @@ def run_builder(root, scripts_dir, out):
     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
                  "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP", "parameterexecuteDAT"):
         env[kind] = kind
-    with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
+    with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT), \
+            mock.patch.dict(os.environ, {"TDEFORUM_TEST_SHARE": os.path.dirname(scripts_dir)}):
         with open(BUILDER, encoding="utf-8") as fh:
             code = fh.read()
         exec(compile(code, BUILDER, "exec"), env)

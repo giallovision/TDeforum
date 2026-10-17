@@ -80,6 +80,9 @@ def parse_history(history, prompt_id, output_node="21"):
         for key in ("gifs", "videos", "images"):
             for item in node_out.get(key) or []:
                 name = str(item.get("filename", ""))
+                full = str(item.get("fullpath", "") or "").replace("\\", "/")
+                if full.lower().endswith(VIDEO_EXTS):
+                    name = full.rsplit("/", 1)[-1]     # the file VHS actually wrote
                 if name.lower().endswith(VIDEO_EXTS):
                     return "done", str(item.get("subfolder", "")), name, None
 

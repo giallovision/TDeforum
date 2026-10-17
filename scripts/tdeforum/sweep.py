@@ -309,6 +309,43 @@ def download(url, path, timeout=60.0):
     return written
 
 
+def _name_variants(url):
+    """The same ComfyUI output under the names VHS may really have used: without the _00001
+    counter, or with another counter (e.g. when an older run already took _00001)."""
+    from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+    import re
+    parts = urlsplit(url)
+    query = dict((k, v[0]) for k, v in parse_qs(parts.query).items())
+    name = query.get("filename", "")
+    stem, ext = os.path.splitext(name)
+    base = re.sub(r"_\d{5}$", "", stem)
+    names = [base + ext] + ["%s_%05d%s" % (base, n, ext) for n in range(1, 10)]
+    out = []
+    for candidate in names:
+        if candidate != name:
+            q = dict(query, filename=candidate)
+            out.append(urlunsplit(parts._replace(query=urlencode(q))))
+    return out
+
+
+def _download_any(url, path, result):
+    """download(), and on a 404 the name variants. Returns (bytes, url used)."""
+    try:
+        return download(url, path), url
+    except Exception as exc:
+        if getattr(exc, "code", None) != 404:
+            raise
+    for alternative in _name_variants(url):
+        try:
+            return download(alternative, path), alternative
+        except Exception as exc:
+            if getattr(exc, "code", None) != 404:
+                raise
+    result["missing_depth"] = True                      # ComfyUI has no such output file
+    raise RuntimeError("ComfyUI has no depth video %s, with or without a _0000N counter (HTTP 404 from %s)"
+                       % (os.path.basename(path), url))
+
+
 def _open_writer(cv2, path, fps, size):
     for code in FOURCCS:
         writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*code), float(fps), size, True)
@@ -377,15 +414,10 @@ def run_job(job):
         if not os.path.isfile(depth):
             if not job.get("fetch_url"):
                 raise RuntimeError("the depth video is not readable from TouchDesigner: %s" % depth)
-            try:
-                size = download(job["fetch_url"], depth)
-            except Exception as exc:
-                if getattr(exc, "code", None) == 404:      # ComfyUI has no such output file
-                    result["missing_depth"] = True
-                    raise RuntimeError("ComfyUI has no depth video %s (HTTP 404 from %s)"
-                                       % (os.path.basename(depth), job["fetch_url"]))
-                raise
+            size, used = _download_any(job["fetch_url"], depth, result)
             result["fetched"] = size
+            if used != job["fetch_url"]:
+                result["fetched_as"] = used
         depth_frames = video_frames(depth)
         plan_info = dict(job["plan"])
         values = job["values"]

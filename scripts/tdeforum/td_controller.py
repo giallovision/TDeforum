@@ -392,7 +392,7 @@ def apply_prompt_preset(root):
     return True
 
 
-def show_latest_sweep(root, cfg=None):
+def show_latest_sweep(root, cfg=None, quiet=False):
     """Point deforum/sweep_preview at the newest cn_sweep_*.mp4 (COMP output 2 shows it)."""
     cfg = cfg or config.load()
     folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
@@ -400,10 +400,12 @@ def show_latest_sweep(root, cfg=None):
     found = [f for f in found if ".tmp." not in f]
     ui = _op(root, "ui")
     if not found:
-        log("no sweep video in %s yet" % folder)
+        if not quiet:
+            log("no sweep video in %s yet" % folder)
         return None
     _show_sweep(ui, found[-1])
-    log("sweep_preview: %s" % found[-1])
+    if not quiet:
+        log("sweep_preview: %s" % found[-1])
     return found[-1]
 
 
@@ -722,6 +724,9 @@ def _after_sweep(root, cfg, st, meta, done):
     info = "%s | %d frames in %.1fs" % (done.get("describe", ""), done.get("frames", 0), done.get("seconds", 0))
     _set_par(ui, "Sweepinfo", info)
     log("sweep: " + info + (" (downloaded the depth video first)" if done.get("fetched") else ""))
+    if done.get("fetched_as"):
+        log("sweep: ComfyUI had the depth video under another name: %s" % done["fetched_as"])
+        _rename_depth(root, ui, done["fetched_as"])
     _show_sweep(ui, meta["out_share"])
     for unit in meta.get("units") or []:
         _set_cn_video(root, meta["out"], unit)
@@ -752,6 +757,22 @@ def _alias_depth_cache(root, ui, frames):
                            int(float(values.get("H", 576))), sweep.from_values(values).model, frames)
     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
     cache.setdefault(key, depth)
+    root.store(CACHE_KEY, cache)
+
+
+def _rename_depth(root, ui, url):
+    """Use ComfyUI's real file name for the depth video everywhere (field and preprocess cache)."""
+    from urllib.parse import parse_qs, urlsplit
+    name = (parse_qs(urlsplit(url).query).get("filename") or [""])[0]
+    old = str(ui.par.Sweepdepthpath.eval() or "") if getattr(ui.par, "Sweepdepthpath", None) else ""
+    if not name or not old or old.endswith("/" + name):
+        return
+    new = old.rsplit("/", 1)[0] + "/" + name
+    _set_par(ui, "Sweepdepthpath", new)
+    cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
+    for key, value in list(cache.items()):
+        if value == old:
+            cache[key] = new
     root.store(CACHE_KEY, cache)
 
 

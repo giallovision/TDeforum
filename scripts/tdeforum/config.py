@@ -81,6 +81,11 @@ def load(local_file=None):
         "local_file": local_file or scripts_dir + "/tdeforum.local.json",
     })
 
+    # Tests point the whole share somewhere else (no machine overrides, no real share).
+    test_share = os.environ.get("TDEFORUM_TEST_SHARE")
+    if test_share:
+        root = _norm(test_share).rstrip("/") + "/"
+        cfg.update(share_root=root, runtime_dir=root + "runtime", local_file=root + "no-local.json")
     if os.path.isfile(cfg["local_file"]):
         with open(cfg["local_file"], "r", encoding="utf-8") as fh:
             overrides = json.load(fh)

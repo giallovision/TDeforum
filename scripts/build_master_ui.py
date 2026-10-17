@@ -407,7 +407,9 @@ def run():
     preview = comp.op(td_controller.SWEEP_PREVIEW)
     if preview is not None and not str(preview.par.file.eval() or '').strip():
         try:
-            td_controller.show_latest_sweep(root)
+            found = td_controller.show_latest_sweep(root, quiet=True)
+            if found:
+                say('sweep_preview: %s' % found)
         except Exception as exc:
             say('sweep_preview not set: %s' % exc)
 

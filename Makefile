@@ -100,8 +100,8 @@ unload: ## Free VRAM (unload the checkpoint), container stays up
 reload: ## Load the checkpoint back into VRAM
 	@curl -fsS -X POST $(API)/sdapi/v1/reload-checkpoint >/dev/null && echo "checkpoint reloaded"
 
-test: ## Unit tests for scripts/tdeforum (no TouchDesigner needed)
-	python3 -m unittest discover -s tests
+test: ## Unit tests for scripts/tdeforum (no TouchDesigner needed; log output only for failures)
+	python3 -m unittest discover -s tests -b
 
 doctor: ## GPU, API and persistent-volume checks
 	@docker exec $(CONTAINER) nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader \

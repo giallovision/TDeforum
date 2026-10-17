@@ -414,3 +414,13 @@ class DepthNodeTest(unittest.TestCase):
         aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
         self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
         self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)
+
+
+class HistoryNameTest(unittest.TestCase):
+    def test_the_file_vhs_wrote_wins_over_the_reported_name(self):
+        history = {"p": {"status": {"status_str": "success", "completed": True}, "outputs": {"21": {"gifs": [
+            {"filename": "a_00001.mp4", "subfolder": "preprocessed_vids",
+             "fullpath": "/opt/ComfyUI/output/preprocessed_vids/a.mp4"}]}}}}
+        self.assertEqual(comfy.parse_history(history, "p"), ("done", "preprocessed_vids", "a.mp4", None))
+        del history["p"]["outputs"]["21"]["gifs"][0]["fullpath"]
+        self.assertEqual(comfy.parse_history(history, "p")[2], "a_00001.mp4")
