@@ -102,6 +102,21 @@ class PayloadTest(unittest.TestCase):
             self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
             self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(0.8)")
 
+    def test_perlin_that_does_not_divide_the_frame_is_fixed(self):
+        # the gvispc1 crash: 1024x576, perlin 8 x 8, 6 octaves -> 8 * 32 = 256 does not divide 576
+        self.assertFalse(payload.perlin_fits(576, 1024, 8, 8, 6))
+        result = payload.build_request(_comp_values(perlin_w=8, perlin_h=8, perlin_octaves=6), {"0": "x"}, MODELS)
+        s = result["request"]["deforum_settings"]
+        self.assertEqual((s["perlin_w"], s["perlin_h"], s["perlin_octaves"]), (8, 8, 4))
+        self.assertTrue(any("Perlin 8 x 8 with 6 octaves" in w for w in result["warnings"]))
+        self.assertTrue(payload.perlin_fits(576, 1024, 4, 4, 3))           # the reference pass
+        ok = payload.build_request(_comp_values(perlin_w=4, perlin_h=4, perlin_octaves=3), {"0": "x"}, MODELS)
+        self.assertFalse(any("Perlin" in w for w in ok["warnings"]))
+        odd = payload._fit_perlin(600, 1000, 7, 3, 2)                      # 7 does not divide 600
+        self.assertTrue(payload.perlin_fits(600, 1000, *odd))
+        for w, h in ((1024, 576), (768, 768), (512, 896)):                  # schema defaults always fit
+            self.assertTrue(payload.perlin_fits(h, w, 4, 4, schema.BY_API["perlin_octaves"].default))
+
     def test_zoe_depth_is_sent_as_midas_with_a_warning(self):
         for algo in ("Zoe", "Zoe+AdaBins (old)"):
             result = payload.build_request(_comp_values(depth_algorithm=algo, animation_mode="3D"), {"0": "x"}, MODELS)

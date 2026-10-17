@@ -163,7 +163,7 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Noisetype` | Noise Type | perlin | Shape of the added noise: Perlin (smooth, cloudy) or Uniform (fine grain). |
 | `Perlinw` | Perlin W | 4 | Perlin noise cells across the width; lower = bigger blobs. |
 | `Perlinh` | Perlin H | 4 | Perlin noise cells down the height. |
-| `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. |
+| `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. Height / (Perlin W x 2^(octaves-1)) and Width / (Perlin H x 2^(octaves-1)) must be whole numbers, or Deforum crashes; the payload lowers octaves (then cell counts) to fit and warns. |
 | `Perlinpersistence` | Perlin Persistence | 0.5 | How strong each finer Perlin octave is relative to the previous one. |
 | `Colorcoherence` | Color Coherence | LAB | Keeps colours from drifting by matching each frame to a reference: LAB/HSV/RGB (first frame), Video Input (the video frame), Image, or None. |
 | `Colorforcegrayscale` | Color Force Grayscale | Off | Converts every frame to greyscale before diffusing. |

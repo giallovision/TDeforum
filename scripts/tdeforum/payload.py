@@ -418,6 +418,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
 
     _check_sampling(values, settings, options, ranges, mode, warnings)
     _check_depth(settings, warnings)
+    _check_perlin(settings, warnings)
     if hybrid:
         # Deforum reads the video's frames from <outdir>/hybridframes; extract them every run.
         settings["hybrid_generate_inputframes"] = True
@@ -503,6 +504,46 @@ def _check_depth(settings, warnings):
         settings["depth_algorithm"] = DEPTH_FALLBACK
         warnings.append("Depth Algorithm %s crashes in this A1111 image (ZoeDepth vs timm: 'Block' object has "
                         "no attribute 'target'); sent %s instead" % (algo, DEPTH_FALLBACK))
+
+
+def perlin_fits(h, w, perlin_w, perlin_h, octaves):
+    """Deforum's rand_perlin_2d_octaves builds each octave on a (H, W) grid of
+    (perlin_w * f, perlin_h * f) cells, f = 1, 2, 4 ... 2**(octaves-1); it crashes ("size of tensor a
+    (576) must match ... (512)") unless every grid divides the image exactly. Note the pairing
+    in Deforum's code: Perlin W divides the HEIGHT and Perlin H the WIDTH."""
+    f = 2 ** (max(1, int(octaves)) - 1)
+    return int(h) % (int(perlin_w) * f) == 0 and int(w) % (int(perlin_h) * f) == 0
+
+
+def _fit_perlin(h, w, perlin_w, perlin_h, octaves):
+    """The closest (perlin_w, perlin_h, octaves) that fits: fewer octaves first, then smaller cells."""
+    for octs in range(int(octaves), 0, -1):
+        if perlin_fits(h, w, perlin_w, perlin_h, octs):
+            return perlin_w, perlin_h, octs
+    pw = max(d for d in range(1, int(perlin_w) + 1) if int(h) % d == 0)
+    ph = max(d for d in range(1, int(perlin_h) + 1) if int(w) % d == 0)
+    for octs in range(int(octaves), 0, -1):
+        if perlin_fits(h, w, pw, ph, octs):
+            return pw, ph, octs
+    return pw, ph, 1
+
+
+def _check_perlin(settings, warnings):
+    if settings.get("noise_type", "perlin") != "perlin":
+        return
+    try:
+        h, w = int(settings.get("H", 576)), int(settings.get("W", 1024))
+        pw, ph, octs = (int(settings.get("perlin_w", 8)), int(settings.get("perlin_h", 8)),
+                        int(settings.get("perlin_octaves", 4)))
+    except (TypeError, ValueError):
+        return
+    if pw < 1 or ph < 1 or perlin_fits(h, w, pw, ph, octs):
+        return
+    fixed = _fit_perlin(h, w, pw, ph, octs)
+    settings["perlin_w"], settings["perlin_h"], settings["perlin_octaves"] = fixed
+    warnings.append("Perlin %d x %d with %d octaves does not divide %dx%d (Deforum would crash: 'size of tensor "
+                    "a must match'); sent %d x %d with %d octaves. Rule: Height / (Perlin W x 2^(octaves-1)) and "
+                    "Width / (Perlin H x 2^(octaves-1)) must be whole" % ((pw, ph, octs, w, h) + fixed))
 
 
 def _check_sampling(values, settings, options, ranges, mode, warnings):
