@@ -29,5 +29,6 @@ def onResponse(webClientDAT, statusCode, headerDict, data, *args):
 
 
 def onError(webClientDAT, *args):
-    _ctl().on_error(webClientDAT.parent(), webClientDAT, args[-1] if args else 'unknown error')
+    _ctl().on_error(webClientDAT.parent(), webClientDAT,
+                    ', '.join(str(a) for a in args) or 'TouchDesigner gave no details')
     return

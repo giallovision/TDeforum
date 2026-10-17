@@ -41,6 +41,9 @@ class ControllerTest(unittest.TestCase):
         patcher = mock.patch.object(config, "load", return_value=cfg)
         patcher.start()
         self.addCleanup(patcher.stop)
+        ports = mock.patch.object(ctl, "_reachable", return_value="open")
+        ports.start()
+        self.addCleanup(ports.stop)
         self.addCleanup(shutil.rmtree, self.share)
         self.root = make_network(dict(UI))
 

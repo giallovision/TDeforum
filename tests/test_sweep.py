@@ -313,6 +313,25 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         ctl.queue(self.root)
         self.assertEqual(self.state(), ctl.CAPTURING)
 
+    def test_unreachable_comfyui_fails_at_once_with_the_address(self):
+        ui = self.make()
+        ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
+        ctl.on_error(self.root, self.root.op("webclient_comfyui"), "connection refused")
+        self.assertEqual(self.state(), ctl.IDLE)
+        status = ui.par.Pipelinestatus.val
+        self.assertIn("could not reach ComfyUI", status)
+        self.assertIn(":8188", status)
+
+    def test_doctor_checks_the_ports(self):
+        self.make()
+        with mock.patch.object(ctl, "_reachable", side_effect=lambda h, p, t=2.0: "open" if p == 7865 else "NOT reachable (x)"):
+            with mock.patch("builtins.print") as out:
+                ctl.doctor(self.root)
+        text = "\n".join(str(c.args[0]) for c in out.call_args_list if c.args)
+        self.assertIn("7865 open", text)
+        self.assertIn("8188 NOT reachable (x)", text)
+
     def test_preview_and_doctor_report_the_sweep(self):
         self.make()
         with mock.patch("builtins.print") as out:

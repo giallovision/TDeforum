@@ -1064,7 +1064,27 @@ def on_response(root, dat, status_code, data):
 
 
 def on_error(root, dat, error):
+    """A Web Client DAT could not complete a request (no answer at all, unlike an HTTP error)."""
     log("%s request error: %s" % (dat.name, error))
+    st = _state(root)
+    cfg = config.load()
+    if dat.name == NAMES["comfy"] and st.get("state") == COMFY_SUBMITTED:
+        _fail(root, st, "could not reach ComfyUI at %s (%s). Open that address in a browser on this "
+                        "computer; if it does not load, the container port is not published or a firewall "
+                        "blocks it. Set server_host / comfy_port in %s if it lives elsewhere."
+              % (config.comfy_url(cfg), error, cfg["local_file"]))
+    elif dat.name == NAMES["deforum"] and st.get("state") == DEFORUM_SUBMITTED:
+        _fail(root, st, "could not reach Deforum at %s (%s)" % (config.deforum_url(cfg), error))
+
+
+def _reachable(host, port, timeout=2.0):
+    """'open' / the reason a TCP connection to host:port failed (checked from this computer)."""
+    import socket
+    try:
+        socket.create_connection((host, int(port)), timeout).close()
+        return "open"
+    except Exception as exc:
+        return "NOT reachable (%s)" % (exc,)
 
 
 def _on_deforum_submit(root, st, code, body, text):
@@ -1417,6 +1437,9 @@ def doctor(root):
         getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
         "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
+    log("port check from this computer: Deforum %s:%s %s | ComfyUI %s:%s %s" % (
+        cfg["server_host"], cfg["deforum_port"], _reachable(cfg["server_host"], cfg["deforum_port"]),
+        cfg["server_host"], cfg["comfy_port"], _reachable(cfg["server_host"], cfg["comfy_port"])))
     ui = _op(root, "ui")
     values = read_ui(ui) if ui is not None else {}
     if ui is None:
