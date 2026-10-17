@@ -26,7 +26,7 @@ import sys
 __version__ = "0.4.0"
 
 # Leaves first, so dependants pick up reloaded modules.
-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "presets", "schema",
+_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "schema",
                "migrate", "payload", "comfy", "td_controller")
 
 

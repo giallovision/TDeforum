@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 
 import re
 
-from . import feed, modulation, presets, tempo
+from . import feed, modulation, presets, sweep, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -40,6 +40,7 @@ PAGE_DIFFUSION = "Diffusion"
 PAGE_NOISE = "Noise & Color"
 PAGE_FLOW = "Flow & Anti-blur"
 PAGE_MODS = "Mod Matrix"
+PAGE_SWEEP = "Sweep Depth"
 CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
 PAGE_CNS = ["ControlNet Unit %d" % n for n in range(1, CN_UI_UNITS + 1)]
 PAGE_CN1 = PAGE_CNS[0]
@@ -47,7 +48,7 @@ PAGE_PIPELINE = "Pipeline"
 
 PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
               PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
-              ] + PAGE_CNS + [PAGE_PIPELINE]
+              PAGE_SWEEP] + PAGE_CNS + [PAGE_PIPELINE]
 
 # Kinds understood by build_master_ui.py and payload.py
 STR, INT, FLOAT, TOGGLE, MENU = "str", "int", "float", "toggle", "menu"
@@ -121,6 +122,7 @@ F = Field
 TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
     PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
     PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
+SW = PAGE_SWEEP
 
 COMFY_PREPROCESSORS = [
     "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
@@ -336,7 +338,26 @@ FIELDS = [
       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
-] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] \
+] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
+
+    # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------
+    F("sweep_enabled", False, SW, TOGGLE, label="Sweep Depth On", target=None),
+    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
+      target=None),
+    F("sweep_mode", sweep.MAX, SW, MENU, menu=sweep.MODES, labels=sweep.MODE_LABELS, label="Mode", target=None),
+    F("sweep_cycles", 1.0, SW, FLOAT, norm=(0.25, 16), label="Cycles (sweeps over the render)", target=None),
+    F("sweep_shape", sweep.RAMP, SW, MENU, menu=sweep.SHAPES, labels=sweep.SHAPE_LABELS, label="Shape",
+      target=None),
+    F("sweep_direction", sweep.FORWARD, SW, MENU, menu=sweep.DIRECTIONS, labels=sweep.DIRECTION_LABELS,
+      label="Direction", target=None),
+    F("sweep_width", 10, SW, INT, norm=(1, 128), label="Band Width (grey levels of 255)", target=None),
+    F("sweep_softness", 0, SW, INT, norm=(0, 64), label="Edge Softness (grey levels)", target=None),
+    F("sweep_fill", sweep.WHITE, SW, MENU, menu=sweep.FILLS, labels=sweep.FILL_LABELS, label="Band Fill",
+      target=None),
+    F("sweep_as_mask", False, SW, TOGGLE, label="Also use as Video Mask", target=None),
+    F("sweep_depth_path", "", SW, STATUS, label="Depth Video", target=None),
+    F("sweep_info", "", SW, STATUS, label="Sweep Plan", target=None),
+] \
   + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
     # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------
     F("comfy_preproc_enable", False, CN, TOGGLE, label="Preprocess via ComfyUI", target=None),

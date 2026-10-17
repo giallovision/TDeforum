@@ -164,6 +164,7 @@ BUILTINS = {
                        ("reloadpulse", "Pulse", 0, ())],
     "crossTOP": [("cross", "Float", 0, ())],
     "selectTOP": [("top", "Str", "", ())],
+    "scriptTOP": [("callbacks", "Str", "", ())],
     "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
                         ("record", "Toggle", False, ()), ("pause", "Toggle", False, ()),
                         ("addframe", "Pulse", 0, ())],
@@ -176,7 +177,7 @@ def run_builder(root, scripts_dir, out):
     me.par.file.val = scripts_dir + "/build_master_ui.py"
     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
-                 "selectTOP", "moviefileoutTOP"):
+                 "selectTOP", "moviefileoutTOP", "scriptTOP"):
         env[kind] = kind
     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
         with open(BUILDER, encoding="utf-8") as fh:
@@ -257,6 +258,22 @@ class BuilderTest(unittest.TestCase):
             self.assertTrue(hasattr(comp.par, "Cn%dvidpath" % unit))
         self.assertFalse(any("NOTE feed" in line for line in self.log))
         self.assertEqual(comp.par.Feedloopstart.val, 0)
+
+    def test_sweep_depth_ops(self):
+        comp = self.build()
+        depth, script = comp.op("sweep_depth"), comp.op("sweep_mask")
+        self.assertIsNotNone(depth)
+        self.assertIs(script.inputConnectors[0].source, depth)
+        self.assertEqual(depth.par.playmode.val, "specify")
+        self.assertEqual(depth.par.indexunit.val, "indices")
+        cb = comp.op("sweep_callbacks")
+        self.assertTrue(cb.par.file.val.endswith("sweep_script_top.py"))
+        self.assertEqual(cb.par.syncfile.val, 1)
+        self.assertIs(script.par.callbacks.val, cb)
+        self.assertFalse(any("NOTE sweep" in line for line in self.log))
+        for name in ("Sweepenabled", "Sweepmode", "Sweepcycles", "Sweepwidth", "Sweepinfo"):
+            self.assertTrue(hasattr(comp.par, name), name)
+        self.assertIn("Sweep Depth", [p.name for p in comp.customPages])
 
     def test_rebuild_keeps_values_and_tables(self):
         comp = self.build()

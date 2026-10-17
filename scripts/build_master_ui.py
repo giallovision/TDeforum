@@ -225,6 +225,28 @@ def build_inner(comp, values):
         if kind is not None:
             _set_menu(kind, 'movie')
 
+    # Sweep Depth: depth video player -> band mask. The controller sets `index` and the stored
+    # band per recorded frame (Sweep Depth page); nothing here runs until a sweep is queued.
+    depth = _get(comp, moviefileinTOP, td_controller.SWEEP_DEPTH, -300, -700)
+    mode = getattr(depth.par, 'playmode', None)
+    if mode is not None:
+        _set_menu(mode, 'specify', 'specifyindex')
+    unit = getattr(depth.par, 'indexunit', None)
+    if unit is not None:
+        _set_menu(unit, 'indices', 'index', 'frames')
+    pre = getattr(depth.par, 'prereadframes', None)
+    if pre is not None:
+        pre.val = 0
+    sweep_mask = _get(comp, scriptTOP, td_controller.SWEEP_MASK, -50, -700)
+    sweep_mask.inputConnectors[0].connect(depth)
+    callbacks = _get(comp, textDAT, 'sweep_callbacks', -50, -850)
+    callbacks.par.file.val = _scripts + '/sweep_script_top.py'
+    callbacks.par.syncfile.val = 1
+    if getattr(sweep_mask.par, 'callbacks', None) is not None:
+        sweep_mask.par.callbacks.val = callbacks
+    else:
+        say('NOTE %s has no callbacks parameter; point it at sweep_callbacks by hand' % sweep_mask.name)
+
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)
     cross.inputConnectors[1].connect(tail)

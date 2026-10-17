@@ -31,6 +31,7 @@ from . import feed
 from . import payload
 from . import presets
 from . import schema
+from . import sweep
 from . import tempo
 
 STATE_KEY = "tdeforum_pipeline"
@@ -72,9 +73,12 @@ INNER = {
     "preview": "schedule_preview",    # table written by preview()
     "head": "loop_head",              # loop player: Movie File In at the playhead
     "tail": "loop_tail",              # loop player: Movie File In one loop later
+    "sweep_depth": "sweep_depth",     # Sweep Depth: Movie File In playing the depth video
+    "sweep_mask": "sweep_mask",       # Sweep Depth: Script TOP that band-masks it
 }
 FEED_SELECT = "feed%d_sel"            # Select TOP per ControlNet unit (set to the source TOP)
 FEED_OUT = "feed%d_out"               # Movie File Out TOP per unit (records the guide movie)
+SWEEP_DEPTH, SWEEP_MASK = "sweep_depth", "sweep_mask"   # Movie File In + Script TOP inside the COMP
 
 RENDER_NAME = re.compile(r"^(\d{14})\.mp4$")
 INTERP_FALLBACK_S = 30.0
@@ -361,7 +365,6 @@ def queue(root):
     cfg = config.load()
     resync(root, cfg)
     _apply_preset_safely(root)
-    apply_preset(root)
     st = _state(root)
     if st.get("state") in BUSY and time.time() - st.get("updated", 0) < LOST_CONTACT_S:
         log("busy (%s). Wait, or op('deforum_payload_exec').module.cancel()" % st["state"])
@@ -372,14 +375,35 @@ def queue(root):
         values, result = build(root, cfg)
         for warning in result["warnings"]:
             log("warning: " + warning)
-        if feed.requests(values):
-            if _start_feed(root, cfg, values, result, st):
-                return                    # resumes in _after_feed() once the movies are ready
-            values, result = build(root, cfg)   # stills changed the Vid Path pars
-        _render_stage(root, cfg, st, values, result)
+        if _start_sweep_depth(root, cfg, values, result, st):
+            return                        # resumes in _on_comfy() once the depth video exists
+        if sweep.enabled(values):
+            values, result = build(root, cfg)   # a cache hit just stored the depth video path
+        _feed_and_render(root, cfg, st, values, result)
     except Exception as exc:
         traceback.print_exc()
         _fail(root, st, "queue failed: %s" % exc)
+
+
+def _feed_and_render(root, cfg, st, values, result):
+    """TOP guide feeds (recorded first), then the ComfyUI preprocess of unit 1, then Deforum."""
+    if feed.requests(values):
+        if _start_feed(root, cfg, values, result, st):
+            return                        # resumes in _after_feed() once the movies are ready
+        values, result = build(root, cfg)   # stills changed the Vid Path pars
+    _render_stage(root, cfg, st, values, result)
+
+
+def _start_sweep_depth(root, cfg, values, result, st):
+    """Sweep Depth needs a depth video of the init video: ask ComfyUI for it (cached).
+
+    True when a ComfyUI job was submitted (the pipeline resumes when it finishes)."""
+    if not [w for w in feed.requests(values) if w.mode == feed.SWEEP]:
+        return False
+    problem = sweep.check(values)
+    if problem:
+        raise RuntimeError(problem)
+    return _start_preprocess(root, cfg, values, result, st, then_render=False, purpose="sweep")
 
 
 def _render_stage(root, cfg, st, values, result):
@@ -443,7 +467,7 @@ def _wants_preprocess(values):
     return True
 
 
-def _start_preprocess(root, cfg, values, result, st, then_render):
+def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1"):
     """Submit the ComfyUI job. Returns False if nothing was submitted."""
     try:
         with open(cfg["comfy_template"], "r", encoding="utf-8") as fh:
@@ -453,11 +477,14 @@ def _start_preprocess(root, cfg, values, result, st, then_render):
         return False
 
     force = payload._as_bool(values.get("force_preprocess", False))
-    job = comfy.build_prompt(template, cfg, values, result["plan"], force=force,
+    job_values = values
+    if purpose == "sweep":        # same workflow, a depth preprocessor instead of unit 1's
+        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model)
+    job = comfy.build_prompt(template, cfg, job_values, result["plan"], force=force,
                              stamp=time.strftime("%Y%m%d%H%M%S"))
     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
     if not force and job["cache_key"] in cache:
-        _set_cn_video(root, cache[job["cache_key"]])
+        _store_preprocessed(root, cache[job["cache_key"]], purpose)
         log("preprocess cache hit: %s" % cache[job["cache_key"]])
         return False
 
@@ -465,11 +492,19 @@ def _start_preprocess(root, cfg, values, result, st, then_render):
                                header=JSON_HEADERS, data=json.dumps(job["body"]))
     now = time.time()
     st = {"state": COMFY_SUBMITTED, "submitted": now, "updated": now,
-          "cache_key": job["cache_key"], "then_render": then_render}
+          "cache_key": job["cache_key"], "then_render": then_render, "purpose": purpose}
     _save(root, st)
     _set_status(root, "preprocessing: submitted")
-    log("ComfyUI preprocess submitted: %s (%s frames)" % (job["cache_key"], result["plan"]["source_frames"]))
+    log("ComfyUI %s submitted: %s (%s frames)" % ("depth preprocess" if purpose == "sweep" else "preprocess",
+                                                  job["cache_key"], result["plan"]["source_frames"]))
     return True
+
+
+def _store_preprocessed(root, container_path, purpose):
+    if purpose == "sweep":
+        _set_par(_op(root, "ui"), "Sweepdepthpath", container_path)
+    else:
+        _set_cn_video(root, container_path)
 
 
 def _submit_deforum(root, cfg, result, st):
@@ -491,15 +526,18 @@ def _set_cn_video(root, container_path, unit=1):
 
 # --------------------------------------------------------------------------- ControlNet feeds
 #
-# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The
-# timeline is paused and stepped one frame at a time, because the loop is locked
-# to the project frames:
+# Guide movies recorded from TOPs (feed.py explains what Deforum needs). The timeline
+# keeps PLAYING (a paused TouchDesigner cooks nothing, so no Frame End would ever fire);
+# every Frame End the recorder looks at the frame shown and only records the planned one:
 #
-#   settle   timeline set to the first frame; wait two frames so a full frame cooks there
-#   armed    Movie File Out TOPs set to record + pause (the file opens)
-#   record   every Frame End: check the timeline is where we put it, pulse Add Frame,
-#            move to the next planned frame; the last pulse stops recording
+#   settle   a few frames so the Select / Movie File Out TOPs cook; then arm record + pause
+#            and jump to the first planned frame
+#   record   every Frame End: if the timeline shows the planned frame pulse Add Frame and
+#            line up the next one (a jump if it is not simply +1); otherwise jump and retry
 #   (WAITING_FEED) the movie files are finalised, counted and handed to the CN units
+#
+# Sweep Depth units are recorded the same way, from the Script TOP sweep_mask; before each
+# frame cooks, _sweep_apply() sets the depth video index and the band for that render frame.
 #
 # Built-in TouchDesigner API used: op('/').time.{frame, play, rate, start},
 # project.realTime, Select TOP .top, Movie File Out TOP .file/.record/.pause/.addframe,
@@ -573,12 +611,12 @@ def _par(op_, name):
     return par
 
 
-def _feed_plan(root, values, result):
+def _feed_plan(root, values, result, wrap=True):
     """(feed.frame_plan(...), timeline rate) for the render in `result`."""
     timeline = _timeline(root)
     rate = float(getattr(timeline, "rate", 60.0) or 60.0)
     start = int(float(values.get("feed_loop_start", 0) or 0)) or int(getattr(timeline, "start", 1) or 1)
-    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start), rate
+    return feed.frame_plan(result.get("tempo"), result["plan"]["max_frames"], rate, start, wrap), rate
 
 
 def _feed_ops(ui, unit):
@@ -599,7 +637,7 @@ def _start_feed(root, cfg, values, result, st):
     for want in wants:
         if want.mode == feed.TOP_STILL:
             _capture_still(root, cfg, want)
-    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
+    loops = [w for w in wants if w.mode in (feed.TOP_LOOP, feed.SWEEP)]
     return bool(loops) and _begin_loop_capture(root, cfg, values, result, loops)
 
 
@@ -623,6 +661,50 @@ def _capture_still(root, cfg, want):
     log("ControlNet %d guide: still from %s -> %s" % (want.unit, want.top, container))
 
 
+def _sweep_setup(root, cfg, values, result, ui):
+    """Point the depth player at the ComfyUI depth video; return the per-frame plan to store."""
+    problem = sweep.check(values)
+    if problem:
+        raise RuntimeError(problem)
+    mfi, script = _inner(ui, SWEEP_DEPTH), _inner(ui, SWEEP_MASK)
+    if mfi is None or script is None:
+        raise RuntimeError("the deforum COMP has no %s / %s; run builder_master_ui" % (SWEEP_DEPTH, SWEEP_MASK))
+    depth = str(values.get("sweep_depth_path", "") or "").strip()
+    share = config.to_share(cfg, depth) if depth else None
+    if not share or not os.path.isfile(share):
+        raise RuntimeError("the depth video %r is not on the share (ComfyUI preprocess did not run?)" % depth)
+    _set_constant(_par(mfi, "file"), share)
+    reload_ = getattr(mfi.par, "reloadpulse", None)
+    if reload_ is not None:
+        reload_.pulse()
+    p = result["plan"]
+    plan = sweep.plan(values, p["max_frames"], p.get("extract_from_frame") or 0,
+                      p.get("extract_nth_frame") or 1, _video_frames(share))
+    for warning in plan["warnings"]:
+        log("warning: " + warning)
+    log("sweep: " + sweep.describe(plan))
+    _set_par(ui, "Sweepinfo", sweep.describe(plan))
+    return {"indices": plan["indices"], "bands": [list(b) for b in plan["bands"]]}
+
+
+def _sweep_apply(root, st, j):
+    """Show render frame j's depth frame and band (called before the frame that cooks it)."""
+    state = st.get("sweep")
+    if not state:
+        return
+    ui = _op(root, "ui")
+    mfi, script = _inner(ui, SWEEP_DEPTH), _inner(ui, SWEEP_MASK)
+    _set_constant(_par(mfi, "index"), int(state["indices"][j]))
+    lo, hi, soft, fill = state["bands"][j]
+    script.store(sweep.SCRIPT_BAND_KEY, (lo, hi, soft, fill))
+    cook = getattr(script, "cook", None)
+    if cook is not None:
+        try:
+            cook(force=True)
+        except Exception:
+            pass
+
+
 def _begin_loop_capture(root, cfg, values, result, loops):
     ui = _op(root, "ui")
     exec_dat = root.op(NAMES["feed_exec"])
@@ -634,15 +716,20 @@ def _begin_loop_capture(root, cfg, values, result, loops):
             raise RuntimeError("%s.%s is off, so the capture would never advance" % (exec_dat.name, name))
 
     timeline = _timeline(root)
-    plan, rate = _feed_plan(root, values, result)
+    sweeping = any(w.mode == feed.SWEEP for w in loops)
+    plan, rate = _feed_plan(root, values, result, wrap=not sweeping)   # a sweep never wraps
     for warning in plan["warnings"]:
         log("warning: " + warning)
+    sweep_state = _sweep_setup(root, cfg, values, result, ui) if sweeping else None
 
     method = feed.method_of(values)
     units = []
     for want in loops:
         sel, out = _feed_ops(ui, want.unit)
-        _resolve_top(root, want.top, want.unit)
+        if want.mode == feed.SWEEP:
+            want = feed.Request(want.unit, want.mode, _inner(ui, "sweep_mask").path)
+        else:
+            _resolve_top(root, want.top, want.unit)
         share, container = _feed_target(cfg, want)
         if os.path.isfile(share):
             os.remove(share)                  # so "file exists" below means "this recording"
@@ -656,10 +743,12 @@ def _begin_loop_capture(root, cfg, values, result, loops):
         if method == feed.ADD_FRAME:
             _par(out, "addframe")
             _par(out, "pause")
-        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container})
+        units.append({"unit": want.unit, "top": want.top, "share": share, "container": container,
+                      "mode": want.mode})
 
     now = time.time()
     st = {"state": CAPTURING, "phase": "settle", "method": method, "units": units, "frames": plan["frames"],
+          "sweep": sweep_state, "as_mask": payload._as_bool(values.get("sweep_as_mask", False)),
           "j": 0, "since_set": 0, "submitted": now, "updated": now,
           "restore": {"frame": int(timeline.frame), "play": bool(timeline.play), "realtime": _realtime(False)}}
     # The timeline wraps at its end (a 120 frame project would jump back to 1 at frame 121),
@@ -752,6 +841,7 @@ def _capture_step(root, st):
                 if add_frame:
                     _set_constant(out.par.pause, 1)
                 _set_constant(out.par.record, 1)
+            _sweep_apply(root, st, 0)
             timeline.frame = frames[0]
             st.update(phase="record", off=0, just_set=True, misses=0)
         _save(root, st)
@@ -785,6 +875,7 @@ def _capture_step(root, st):
     if j <= 3 or j == len(frames):
         log("feed frame %d/%d recorded at timeline frame %d" % (j, len(frames), f))
     if j < len(frames):
+        _sweep_apply(root, st, j)         # takes effect on the frame that cooks next
         if frames[j] != f + 1:
             timeline.frame = frames[j] - st.get("off", 0)
             st["just_set"] = True
@@ -865,6 +956,12 @@ def _poll_feed(root, cfg, st):
             return
         log("ControlNet %d feed ready: %s (%s)" % (u["unit"], u["container"], message))
         _set_cn_video(root, u["container"], u["unit"])
+        if u.get("mode") == feed.SWEEP and st.get("as_mask") and not st.get("mask_set"):
+            ui = _op(root, "ui")
+            _set_par(ui, "Videomaskpath", u["container"])
+            _set_par(ui, "Usemaskvideo", 1)
+            st["mask_set"] = True
+            log("Sweep Depth is also the mask video: video_mask_path = %s, use_mask_video on" % u["container"])
         _set_feed_info(root, u["unit"], "%d frames @ %s" % (expected, time.strftime("%H:%M:%S")))
     _after_feed(root, cfg, st)
 
@@ -1048,10 +1145,17 @@ def _on_comfy(root, cfg, st, code, body, text):
     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
     cache[st.get("cache_key")] = container_path
     root.store(CACHE_KEY, cache)
-    _set_cn_video(root, container_path)
+    _store_preprocessed(root, container_path, st.get("purpose"))
     log("preprocess done: %s" % container_path)
 
-    if st.get("then_render"):
+    if st.get("purpose") == "sweep":
+        try:
+            values, result = build(root, cfg)
+            _feed_and_render(root, cfg, st, values, result)
+        except Exception as exc:
+            traceback.print_exc()
+            _fail(root, st, "after the depth video: %s" % exc)
+    elif st.get("then_render"):
         _values, result = build(root, cfg)
         _submit_deforum(root, cfg, result, st)
     else:
@@ -1215,13 +1319,24 @@ def _log_feed_plan(root, values, result):
     for want in wants:
         if want.mode == feed.TOP_STILL:
             log("feed: ControlNet %d takes one still from %s at Queue" % (want.unit, want.top or "(no TOP set)"))
-    loops = [w for w in wants if w.mode == feed.TOP_LOOP]
+    loops = [w for w in wants if w.mode in (feed.TOP_LOOP, feed.SWEEP)]
     if loops:
         try:
-            plan, rate = _feed_plan(root, values, result)
+            sweeping = any(w.mode == feed.SWEEP for w in loops)
+            plan, rate = _feed_plan(root, values, result, wrap=not sweeping)
             log("feed: ControlNet %s record %s from %s at Queue (timeline %g fps)" % (
                 ",".join(str(w.unit) for w in loops), feed.describe(plan),
-                ", ".join(sorted(set(w.top or "(no TOP set)" for w in loops))), rate))
+                ", ".join(sorted(set("Sweep Depth" if w.mode == feed.SWEEP else (w.top or "(no TOP set)")
+                                     for w in loops))), rate))
+            if sweeping:
+                problem = sweep.check(values)
+                if problem:
+                    log("feed: WARNING " + problem)
+                else:
+                    p = result["plan"]
+                    log("sweep: " + sweep.describe(sweep.plan(
+                        values, p["max_frames"], p.get("extract_from_frame") or 0,
+                        p.get("extract_nth_frame") or 1)))
         except Exception as exc:
             log("feed: cannot plan the recording: %s" % exc)
 
@@ -1243,13 +1358,23 @@ def _doctor_feeds(root, cfg, ui, values):
         want = [w for w in wants if w.unit == unit]
         top = str(values.get("feed_%d_top" % unit, "") or "")
         found = root.op(top) is not None if top else False
+        if mode == feed.SWEEP:
+            top, found = "Sweep Depth", True
         log("ControlNet %d guide: %s from %s [%s]%s" % (
             unit, mode, top or "(no Source TOP)", "TOP found" if found else "TOP NOT FOUND",
             "" if want else " (unit is off, so it will not be recorded)"))
         sel, out = ui.op(FEED_SELECT % unit), ui.op(FEED_OUT % unit)
-        if mode == feed.TOP_LOOP and (sel is None or out is None):
+        if mode == feed.SWEEP:
+            problem = sweep.check(values)
+            log("  Sweep Depth: %s" % (problem or "settings OK (%s)" % sweep.describe(sweep.plan(values, 240)).split(":")[0]))
+            depth, script = ui.op(SWEEP_DEPTH), ui.op(SWEEP_MASK)
+            if depth is None or script is None:
+                log("  %s / %s missing from the COMP: run builder_master_ui" % (SWEEP_DEPTH, SWEEP_MASK))
+            path = str(values.get("sweep_depth_path", "") or "")
+            log("  depth video: %s" % (path or "(none yet; ComfyUI makes it at Queue)"))
+        if mode in (feed.TOP_LOOP, feed.SWEEP) and (sel is None or out is None):
             log("  %s / %s missing from the COMP: run builder_master_ui" % (FEED_SELECT % unit, FEED_OUT % unit))
-    if any(w.mode == feed.TOP_LOOP for w in wants):
+    if any(w.mode in (feed.TOP_LOOP, feed.SWEEP) for w in wants):
         exec_dat = root.op(NAMES["feed_exec"])
         if exec_dat is None:
             log("%s missing: run setup_network (the loop recorder steps on its Frame End)" % NAMES["feed_exec"])

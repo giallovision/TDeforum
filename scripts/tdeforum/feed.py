@@ -23,9 +23,10 @@ import posixpath
 from . import config
 from . import tempo
 
-FILE, TOP_LOOP, TOP_STILL = "file", "top_loop", "top_still"
-MODES = [FILE, TOP_LOOP, TOP_STILL]
-MODE_LABELS = ["Existing file (Vid Path)", "TOP: record the loop", "TOP: one still frame"]
+FILE, TOP_LOOP, TOP_STILL, SWEEP = "file", "top_loop", "top_still", "sweep"
+MODES = [FILE, TOP_LOOP, TOP_STILL, SWEEP]
+MODE_LABELS = ["Existing file (Vid Path)", "TOP: record the loop", "TOP: one still frame",
+               "Sweep Depth (Video Input: sweeping band of the depth video)"]
 ADD_FRAME, CONTINUOUS = "addframe", "continuous"
 METHODS = [ADD_FRAME, CONTINUOUS]
 METHOD_LABELS = ["Add Frame, one pulse per planned frame (exact)",
@@ -58,11 +59,18 @@ def mode_of(values, unit):
 
 
 def requests(values, units=UNITS):
-    """Enabled units whose guide must be captured from a TOP before rendering."""
+    """Units whose guide must be captured from a TOP before rendering.
+
+    Enabled units whose Guide Source is not "file". A Sweep Depth unit is also recorded while
+    it is switched off when *Sweep Depth > Also use as mask video* is on (mask-only use).
+    """
+    mask_only = _truthy(values.get("sweep_as_mask", False)) and _truthy(values.get("sweep_enabled", False))
     out = []
     for unit in range(1, units + 1):
         mode = mode_of(values, unit)
-        if mode != FILE and _truthy(values.get("cn_%d_enabled" % unit, False)):
+        if mode == FILE:
+            continue
+        if _truthy(values.get("cn_%d_enabled" % unit, False)) or (mode == SWEEP and mask_only):
             out.append(Request(unit, mode, str(values.get("feed_%d_top" % unit, "") or "").strip()))
     return out
 
@@ -91,13 +99,15 @@ def project_frames_per_loop(tp, project_rate):
     return tp["loop_beats"] * tempo.frames_per_beat(tp["bpm"], project_rate)
 
 
-def frame_plan(tp, total, project_rate, loop_start):
+def frame_plan(tp, total, project_rate, loop_start, wrap=True):
     """Timeline frame to show for every render frame.
 
     tp            tempo.plan() dict, or None when the length is manual
     total         number of render frames Deforum will render (max_frames)
     project_rate  the timeline's frame rate (usually 60)
     loop_start    timeline frame where the loop starts (usually 1)
+    wrap          False: frames run on past the loop (Sweep Depth needs each render frame
+                  to be its own timeline frame; the recorder lengthens the timeline)
 
     Returns {"frames": [timeline frame per render frame], "step": project frames
     per render frame, "loop": project frames per loop or None, "warnings": [...]}.
@@ -129,10 +139,10 @@ def frame_plan(tp, total, project_rate, loop_start):
     frames = []
     for k in range(total):
         offset = k * step
-        if loop:
+        if loop and wrap:
             offset %= loop
         frames.append(int(loop_start) + offset)
-    return {"frames": frames, "step": step, "loop": loop, "warnings": warnings}
+    return {"frames": frames, "step": step, "loop": loop, "wrap": bool(wrap), "warnings": warnings}
 
 
 def describe(plan):
@@ -140,7 +150,7 @@ def describe(plan):
     text = "%d frames, timeline %d..%d" % (len(frames), min(frames), max(frames))
     if plan["step"] > 1:
         text += " every %d" % plan["step"]
-    if plan["loop"] and len(frames) * plan["step"] > plan["loop"]:
+    if plan["loop"] and plan.get("wrap", True) and len(frames) * plan["step"] > plan["loop"]:
         text += ", wrapping at %d" % plan["loop"]
     return text
 

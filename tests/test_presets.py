@@ -9,8 +9,8 @@ from tdeforum import td_controller as ctl
 
 
 class PresetDataTest(unittest.TestCase):
-    def test_twelve_examples_good_and_extreme_per_mode(self):
-        self.assertEqual(len(presets.PRESETS), 12)
+    def test_fifteen_examples_good_and_extreme_per_mode(self):
+        self.assertEqual(len(presets.PRESETS), 15)
         for mode in ("3D", "2D", "Video Input"):
             levels = [p.level for p in presets.PRESETS if p.mode == mode]
             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
@@ -46,7 +46,21 @@ class PresetDataTest(unittest.TestCase):
                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
         for preset in presets.PRESETS:
             self.assertFalse(protected & set(preset.values), preset.id)
-            self.assertFalse([k for k in preset.values if k.startswith("cn_")], preset.id)
+            if "sweep" not in preset.id:
+                self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
+                                 preset.id)
+
+    def test_sweep_presets_switch_sweep_on_and_use_unit_one_as_the_guide(self):
+        sweeps = [p for p in presets.PRESETS if p.id.startswith("video_depth_sweep")]
+        self.assertEqual(len(sweeps), 3)
+        self.assertEqual(sorted(p.level for p in sweeps), [presets.EXTREME, presets.GOOD, presets.GOOD])
+        modes = sorted(p.values["sweep_mode"] for p in sweeps)
+        self.assertEqual(modes, ["max", "min", "min"])
+        for p in sweeps:
+            self.assertEqual(p.mode, "Video Input")
+            self.assertTrue(p.values["sweep_enabled"] and p.values["cn_1_enabled"])
+            self.assertEqual(p.values["feed_1_mode"], "sweep")
+            self.assertTrue([k for k in p.values if k.startswith("sweep_")])
 
     def test_reset_keys_are_motion_or_slot_toggles(self):
         for key in presets.RESET_KEYS:

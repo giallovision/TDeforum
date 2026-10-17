@@ -14,7 +14,9 @@ the TouchDesigner side:
   beat the preset's base value).
 
 Never touched: seed and seed behaviour (the baseline is Iterate +1, seed 424242), sampler,
-steps, CFG, size, model, prompts, ControlNet. Tune those for your checkpoint once.
+steps, CFG, size, model, prompts. ControlNet is left alone too, except by the "Depth sweep"
+examples, which switch Sweep Depth on and take over ControlNet unit 1 as its guide (they need
+Globals > Video Init Path and are put back like everything else when you choose None).
 
 Units, at the 60 fps default: translation is Deforum units per frame (``translate_xyz`` =
 -translation / 200, positive Z = forward), rotation is degrees per frame, 2D zoom is a factor per
@@ -71,6 +73,12 @@ _3D = {"animation_mode": "3D", "use_depth_warping": True, "fov_schedule": 70.0, 
 _2D = {"animation_mode": "2D", "border": "replicate"}
 _VIDEO = {"animation_mode": "Video Input", "seamless_loop": False, "diffusion_cadence": 1,
           "optical_flow_cadence": "None", "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0}
+# Sweep Depth: the depth video's band is recorded as ControlNet unit 1's guide (QR Monster).
+_SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "DepthAnythingV2Preprocessor",
+          "sweep_softness": 6, "sweep_fill": "white", "sweep_shape": "ramp", "sweep_direction": "forward",
+          "feed_1_mode": "sweep", "cn_1_enabled": True, "cn_1_module": "none",
+          "cn_1_model": "ctrl_v1p_qr_monster_v2", "cn_1_guidance_start": 0.0, "cn_1_guidance_end": 1.0,
+          "cn_1_control_mode": "Balanced"}
 
 PRESETS = [
     # ------------------------------------------------------------------ 3D
@@ -130,6 +138,26 @@ PRESETS = [
            "Loose hold on the video: heavy restyle, extra noise, no colour matching.",
            _merge(_VIDEO, {"strength_schedule": 0.3, "noise_schedule": 0.1, "noise_multiplier_schedule": 1.1,
                            "color_coherence": "None"})),
+    Preset("video_depth_sweep_away", "Video Input - Depth sweep away (good)", "Video Input", GOOD,
+           "One slow sweep: a white band starts on the nearest levels (245-255) of the video's depth and "
+           "ends on the farthest (0-10), so the glow seems to travel away from you. Needs Globals > "
+           "Video Init Path; uses ControlNet unit 1.",
+           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
+                                   "sweep_mode": "max", "sweep_cycles": 1.0, "sweep_width": 14,
+                                   "cn_1_weight": 0.9})),
+    Preset("video_depth_sweep_toward", "Video Input - Depth sweep toward (good)", "Video Input", GOOD,
+           "The same, the other way: the band starts on the farthest levels and ends on the nearest, so it "
+           "seems to rush toward you.",
+           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.6, "noise_schedule": 0.0, "color_coherence": "Video Input",
+                                   "sweep_mode": "min", "sweep_cycles": 1.0, "sweep_width": 14,
+                                   "cn_1_weight": 0.9})),
+    Preset("video_depth_sweep_pulses", "Video Input - Depth sweep pulses (extreme)", "Video Input", EXTREME,
+           "Four out-and-back sweeps with a wide band that keeps the depth shading, strong ControlNet, "
+           "loose hold on the video: the picture pulses through the depth layers.",
+           _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.4, "noise_schedule": 0.08, "color_coherence": "None",
+                                   "sweep_mode": "min", "sweep_cycles": 4.0, "sweep_shape": "pingpong",
+                                   "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 10,
+                                   "cn_1_weight": 1.3, "cn_1_control_mode": "ControlNet is more important"})),
 ]
 
 BY_ID = dict((p.id, p) for p in PRESETS)

@@ -186,7 +186,7 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
     if comp:
         for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
-                     "Feed1info", "Feed2info", "Feed3info"):
+                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath"):
             ui_pars.setdefault(name, "")
     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
     if comp:
@@ -202,6 +202,8 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
         top.time = root.timeline
         root.add(FakeTop("final_out", root))
         root.add(Op("feed_capture_exec", root, active=Par("active", True), frameend=Par("frameend", True)))
+        ui.add(Op("sweep_depth", ui, file=Par("file", ""), index=Par("index", 0), reloadpulse=0))
+        ui.add(Op("sweep_mask", ui))
         for unit in (1, 2, 3):
             ui.add(Op("feed%d_sel" % unit, ui, top=Par("top", "")))
             ui.add(FakeMfo("feed%d_out" % unit, ui, root.timeline))

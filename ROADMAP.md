@@ -46,8 +46,10 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Beat-locked modulation: 8-slot Mod Matrix compiled to Deforum expressions; Mod CHOP input baked per frame.
 - [x] Beat-indexed prompt sequence with crossfades (weighted `AND` prompts).
 - [x] Seamless loops: overlap render, looping seed schedule, loop player crossfading the seam.
-- [x] Example Preset drop-down: 12 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
+- [x] Example Preset drop-down: 15 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
 - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
+
+- [x] Sweep Depth (Video Input): ComfyUI depth video -> sweeping grey band -> ControlNet guide / mask video, plus three examples in the preset list. Unverified in TouchDesigner: Script TOP numpy calls, Movie File In index/preread.
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
