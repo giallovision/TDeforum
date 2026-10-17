@@ -1,0 +1,428 @@
+From f0dbd1730ce1129d18f5763260b0b9d4ed0c6b33 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 06:33:41 +0000
+Subject: [PATCH] Output 3 when TD cannot see the init video: download it from
+ ComfyUI, else Deforum's extracted frames; warn once
+
+The flood: tick() retried the conform every poll and logged 'not readable' each time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  2 +-
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/inputloop.py     | 95 +++++++++++++++++++++++++++++--
+ scripts/tdeforum/td_controller.py | 62 +++++++++++++++-----
+ tests/_fakes.py                   |  3 +
+ tests/test_outputs.py             | 67 ++++++++++++++++++++++
+ tests/test_sweep.py               |  3 +-
+ 7 files changed, 212 insertions(+), 22 deletions(-)
+
+diff --git a/README.md b/README.md
+index 00241ee..bb03356 100644
+--- a/README.md
++++ b/README.md
+@@ -249,7 +249,7 @@ sudo mount -a && make down && make up
+ |---|---|
+ | 1 `out_loop` | the render, seamless loop player |
+ | 2 `out_sweep` | the last Sweep Depth mask video |
+-| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit) |
++| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit). When the init video is not visible on the share (`td_inputs/comfy_videos` is a symlink Samba does not follow), it is downloaded from ComfyUI's `/view` first; failing that, output 3 is made from the frames Deforum extracted (`<render>/inputframes`) once the render is done |
+ 
+ *Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
+ 
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 64f2977..4b9c66f 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -28,7 +28,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.12.2"
++__version__ = "0.12.3"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "inputloop", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/inputloop.py b/scripts/tdeforum/inputloop.py
+index 72bd847..20eb331 100644
+--- a/scripts/tdeforum/inputloop.py
++++ b/scripts/tdeforum/inputloop.py
+@@ -7,6 +7,11 @@ background thread (OpenCV, which reads what Deforum reads) writes exactly those
+ per render frame, at render size, to ``td_masks/feeds/input_loop_<key>.mp4`` with the codec
+ the sweep videos use (TD opens those). The loop player then plays that file with the same
+ playhead maths as the render. Same video + size + frames = cache hit.
++
++When TouchDesigner cannot read the init video at all (e.g. the share's td_inputs is a symlink
++Samba does not follow): first it is downloaded from ComfyUI's /view (td_inputs/comfy_videos is
++ComfyUI's input folder) into td_masks/comfy_fetch; failing that, the frames Deforum itself
++extracted are used after the render: ``<render folder>/inputframes/*.jpg``.
+ """
+ 
+ import hashlib
+@@ -40,6 +45,59 @@ def make_job(share_path, feed_folder_share, feed_folder_container, size, start,
+             "sidecar": folder + name + ".json"}
+ 
+ 
++FRAME_DIRS = ("inputframes", "hybridframes")
++FRAME_EXTS = (".jpg", ".jpeg", ".png")
++
++
++def frames_dir(render_folder):
++    """Deforum's extracted init frames in a render folder, or None."""
++    for name in FRAME_DIRS:
++        folder = os.path.join(render_folder, name)
++        if os.path.isdir(folder) and any(f.lower().endswith(FRAME_EXTS) for f in os.listdir(folder)):
++            return folder.replace("\\", "/")
++    return None
++
++
++def make_frames_job(folder, feed_folder_share, feed_folder_container, size, frames, fps):
++    """A job that conforms Deforum's own extracted frames (``folder``) instead of the video."""
++    blob = json.dumps({"v": 1, "dir": folder, "size": list(size), "frames": int(frames)}, sort_keys=True)
++    key = "f" + hashlib.sha1(blob.encode("utf-8")).hexdigest()[:9]
++    job = make_job(folder, feed_folder_share, feed_folder_container, size, 0, 1, frames, fps)
++    name = "%s%s.mp4" % (PREFIX, key)
++    base = feed_folder_share.rstrip("/") + "/"
++    job.update(key=key, src_dir=folder, out_share=base + name,
++               out_container=feed_folder_container.rstrip("/") + "/" + name, sidecar=base + name + ".json")
++    return job
++
++
++def source_readable(job):
++    if job.get("src_dir"):
++        return os.path.isdir(job["src_dir"])
++    return os.path.isfile(job["src"]) or bool(job.get("fetch_url") and job.get("fetch_local")
++                                              and not os.environ.get("TDEFORUM_OFFLINE"))
++
++
++def download(url, path):
++    """ComfyUI /view -> path. TDEFORUM_OFFLINE (set by the tests) keeps it off the network."""
++    if os.environ.get("TDEFORUM_OFFLINE"):
++        raise OSError("offline (TDEFORUM_OFFLINE): not fetching %s" % url)
++    return sweep.download(url, path, timeout=30.0)
++
++
++def _source(job, result=None):
++    """The local video to read: the share file, else a copy downloaded from ComfyUI's /view."""
++    if os.path.isfile(job["src"]):
++        return job["src"]
++    local = job.get("fetch_local")
++    if job.get("fetch_url") and local:
++        if not os.path.isfile(local):
++            size = download(job["fetch_url"], local)
++            if result is not None:
++                result["fetched"] = size
++        return local
++    return job["src"]
++
++
+ def read_result(sidecar):
+     return sweep.read_result(sidecar)
+ 
+@@ -49,13 +107,16 @@ def ready(job):
+     return bool(done and done.get("ok") and os.path.isfile(job["out_share"]))
+ 
+ 
+-def conform(job):
++def conform(job, result=None):
+     """Write the conformed video. Returns {"frames", "codec", "source_frames"}."""
+     import cv2
+     width, height = job["size"]
+-    capture = cv2.VideoCapture(job["src"])
++    if job.get("src_dir"):
++        return _conform_frames(cv2, job)
++    src = _source(job, result)
++    capture = cv2.VideoCapture(src)
+     if not capture.isOpened():
+-        raise RuntimeError("OpenCV cannot open %s" % job["src"])
++        raise RuntimeError("OpenCV cannot open %s" % src)
+     tmp = job["out_share"][:-4] + ".tmp" + job["out_share"][-4:]
+     os.makedirs(os.path.dirname(tmp) or ".", exist_ok=True)
+     writer, codec = sweep._open_writer(cv2, tmp, job["fps"], (width, height))
+@@ -86,12 +147,38 @@ def conform(job):
+     return {"frames": written, "codec": codec}
+ 
+ 
++def _conform_frames(cv2, job):
++    width, height = job["size"]
++    names = sorted(f for f in os.listdir(job["src_dir"]) if f.lower().endswith(FRAME_EXTS))[:job["frames"]]
++    if not names:
++        raise RuntimeError("no frames in %s" % job["src_dir"])
++    tmp = job["out_share"][:-4] + ".tmp" + job["out_share"][-4:]
++    os.makedirs(os.path.dirname(tmp) or ".", exist_ok=True)
++    writer, codec = sweep._open_writer(cv2, tmp, job["fps"], (width, height))
++    written = 0
++    try:
++        for name in names:
++            frame = cv2.imread(os.path.join(job["src_dir"], name))
++            if frame is None:
++                continue
++            if frame.shape[1] != width or frame.shape[0] != height:
++                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
++            writer.write(frame)
++            written += 1
++    finally:
++        writer.release()
++    if not written:
++        raise RuntimeError("no readable frames in %s" % job["src_dir"])
++    os.replace(tmp, job["out_share"])
++    return {"frames": written, "codec": codec}
++
++
+ def run_job(job):
+     """Background-thread body. Never raises: the outcome goes to job["sidecar"]."""
+     started = time.time()
+     result = {"ok": False, "key": job.get("key")}
+     try:
+-        out = conform(job)
++        out = conform(job, result)
+         result.update(ok=True, frames=out["frames"], codec=out["codec"], out_share=job["out_share"],
+                       out_container=job["out_container"])
+     except Exception as exc:
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index f5e9d19..296240e 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -707,20 +707,34 @@ def _input_expect(result, cfg, rate, fps=30.0):
+     if folder and info["size"][0] and info["size"][1]:
+         info["job"] = inputloop.make_job(info["share"], folder, cfg["cn_feed_dir"], info["size"], info["start"],
+                                          info["stride"], int(plan.get("max_frames") or 0) or 1, fps)
++        view = config.comfy_view(cfg, init) if not os.path.isfile(info["share"]) else None
++        if view:          # not visible over SMB: ComfyUI serves its input folder over HTTP
++            info["job"]["fetch_url"] = config.comfy_view_url(cfg, *view)
++            info["job"]["fetch_local"] = config.fetch_paths(cfg, init)[0]
+     return info
+ 
+ 
+ _INPUT_RUNNING = set()
++_INPUT_WARNED = set()
+ 
+ 
+-def _start_input_job(info):
+-    """Conform the init video for output 3 in the background (no-op when cached / running)."""
++def _start_input_job(info, quiet=False):
++    """Conform the init video for output 3 in the background (no-op when cached / running).
++    False when its source cannot be read from TouchDesigner (said once per source)."""
+     job = (info or {}).get("job")
+     if not job or job["key"] in _INPUT_RUNNING or inputloop.ready(job):
+-        return
+-    if not os.path.isfile(job["src"]):
+-        log("input loop: %s is not readable from TouchDesigner; output 3 stays empty" % job["src"])
+-        return
++        return True
++    if not inputloop.source_readable(job):
++        if not quiet and job["src"] not in _INPUT_WARNED:
++            _INPUT_WARNED.add(job["src"])
++            log("input loop: TouchDesigner cannot read %s (check that the share serves that folder: a "
++                "symlink outside the share is invisible over SMB); output 3 will use the frames Deforum "
++                "extracts, once the render is done" % job["src"])
++        return False
++    if not os.path.isfile(job["src"]) and job.get("fetch_url") and job["src"] not in _INPUT_WARNED:
++        _INPUT_WARNED.add(job["src"])
++        log("input loop: %s is not visible over the share; downloading it from ComfyUI for output 3"
++            % os.path.basename(job["src"]))
+     try:
+         os.remove(job["sidecar"])
+     except OSError:
+@@ -733,6 +747,7 @@ def _start_input_job(info):
+         finally:
+             _INPUT_RUNNING.discard(j["key"])
+     _spawn(work, job)
++    return True
+ 
+ 
+ def _write_runtime_json(cfg, name, data):
+@@ -1158,6 +1173,7 @@ def _submit_deforum(root, cfg, result, st):
+     expect = _expectation(result, cfg)
+     _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now, "expect": expect})
+     _start_input_job((expect or {}).get("input"))   # conform output 3 while Deforum renders
++    root.store(INPUT_PENDING_KEY, None)
+     _set_status(root, "render: submitted")
+     log("render submitted: " + payload.summary(result))
+ 
+@@ -1569,8 +1585,8 @@ def _poll_input(root):
+         return
+     done = inputloop.read_result(job["sidecar"])
+     if done is None:
+-        if job["key"] not in _INPUT_RUNNING:
+-            _start_input_job(info)        # e.g. TD was restarted while it ran
++        if job["key"] not in _INPUT_RUNNING and not _start_input_job(info):   # e.g. TD restarted meanwhile
++            root.store(INPUT_PENDING_KEY, None)                              # unreadable: stop polling
+         return
+     root.store(INPUT_PENDING_KEY, None)
+     if done.get("ok"):
+@@ -1929,7 +1945,7 @@ def _load_movie(root, path, expect=None):
+             reload_ = getattr(player.par, "reloadpulse", None)
+             if reload_ is not None:
+                 reload_.pulse()
+-    _load_input(root, ui, (expect or {}).get("input"))
++    _load_input(root, ui, (expect or {}).get("input"), path)
+     root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
+     if expect and expect.get("out_loop"):
+         loop = int(expect["out_loop"])                 # output frames per loop
+@@ -1950,25 +1966,40 @@ def _load_movie(root, path, expect=None):
+                "" if frames else " (file length unknown, used the plan)"))
+ 
+ 
+-def _load_input(root, ui, info):
++def _load_input(root, ui, info, render_path=None):
+     """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross).
+ 
+     Plays the conformed copy (inputloop.py: exactly the frames Deforum used, at render size, in a
+-    codec TD opens); while that is still being written it waits (tick() fills it in)."""
++    codec TD opens); while that is still being written it waits (tick() fills it in). When TD
++    cannot read the init video, the frames Deforum extracted next to the render are used."""
+     if ui is None:
+         return
+     job = (info or {}).get("job")
++    if job and not job.get("src_dir") and not inputloop.ready(job) and not inputloop.source_readable(job) \
++            and render_path:
++        folder = inputloop.frames_dir(os.path.dirname(render_path))
++        if folder:
++            cfg = config.load()
++            job = inputloop.make_frames_job(folder, os.path.dirname(job["out_share"]), cfg["cn_feed_dir"],
++                                            job["size"], job["frames"], job["fps"])
++            info = dict(info, job=job)
++            log("input loop: using Deforum's extracted frames %s for output 3" % folder)
++        else:
++            log("input loop: no extracted frames next to %s either; output 3 stays empty" % render_path)
++            info, job = dict(info, job=None), None
+     share = (info or {}).get("share") or ""
+     start, stride = int((info or {}).get("start", 0)), int((info or {}).get("stride", 1))
+     if job:
+         if inputloop.ready(job):
+             share, start, stride = job["out_share"], 0, 1         # frames already picked and sized
+             root.store(INPUT_PENDING_KEY, None)
+-        else:
+-            _start_input_job(info)
++        elif _start_input_job(info):
+             root.store(INPUT_PENDING_KEY, info)
+             log("input loop: conforming %s for output 3 (fills in when ready)" % os.path.basename(job["src"]))
+             share = ""
++        else:
++            root.store(INPUT_PENDING_KEY, None)
++            share = ""
+     if info:
+         _set_par(ui, "Loopinstart", str(start))
+         _set_par(ui, "Loopinstride", str(stride))
+@@ -2303,8 +2334,9 @@ def _doctor_share_links(cfg, values):
+     if hidden:
+         log("NOTE %s live in ComfyUI's input/output folders. The container reaches them through its "
+             "volume mounts, but on the GPU host td_inputs/comfy_videos is a symlink out of the share and "
+-            "Samba does not follow it, so TouchDesigner cannot. Sweep Depth downloads what it needs from "
+-            "ComfyUI (%s), and learns the init video's length from its depth video. To make them visible "
++            "Samba does not follow it, so TouchDesigner cannot. Sweep Depth and output 3 (the input loop) "
++            "download what they need from ComfyUI (%s), and the init video's length is learned from its depth "
++            "video. To make them visible "
+             "on T: anyway, bind-mount the folders instead of symlinking (README > Share layout)."
+             % (", ".join(hidden), cfg["comfy_fetch_dir"]))
+ 
+diff --git a/tests/_fakes.py b/tests/_fakes.py
+index 4b61a17..d8c1fb8 100644
+--- a/tests/_fakes.py
++++ b/tests/_fakes.py
+@@ -10,6 +10,9 @@ if SCRIPTS not in sys.path:
+     sys.path.insert(0, SCRIPTS)
+ 
+ 
++os.environ["TDEFORUM_OFFLINE"] = "1"      # output 3's init-video download never leaves the test machine
++
++
+ class ParMode(enum.Enum):
+     CONSTANT = 0
+     EXPRESSION = 1
+diff --git a/tests/test_outputs.py b/tests/test_outputs.py
+index daec1e7..72ad937 100644
+--- a/tests/test_outputs.py
++++ b/tests/test_outputs.py
+@@ -77,5 +77,72 @@ class InputPendingTest(unittest.TestCase):
+         self.assertIsNone(self.root.fetch(ctl.INPUT_PENDING_KEY))
+ 
+ 
++    def test_unreadable_video_uses_deforums_extracted_frames_and_says_so_once(self):
++        try:
++            import cv2
++            import numpy as np
++        except ImportError:
++            self.skipTest("OpenCV not installed")
++        from tdeforum import inputloop
++        render = self.share + "/outputs/Deforum_1/1_RIFE_x3.mp4"
++        frames = self.share + "/outputs/Deforum_1/inputframes"
++        os.makedirs(frames)
++        for i in range(8):                                   # Deforum's corridor000000000.jpg ...
++            cv2.imwrite(frames + "/corridor%09d.jpg" % i, np.full((40, 70, 3), 20 * i, np.uint8))
++        missing = self.share + "/td_inputs/corridor.mp4"     # a symlink the share does not serve
++        job = inputloop.make_job(missing, self.share + "/feeds", "/opt/a1111/td_masks/feeds", (64, 36), 0, 1, 6, 20)
++        info = {"share": missing, "start": 0, "stride": 1, "rate": 1.0, "job": job}
++        logged = []
++        with mock.patch.object(ctl, "log", side_effect=logged.append), \
++                mock.patch.object(ctl, "_spawn", side_effect=lambda target, *args: target(*args)), \
++                mock.patch.object(config, "load", return_value=dict(config.load(), cn_feed_dir="/opt/x/feeds")):
++            ctl._start_input_job(info)                        # at Queue: unreadable, said once
++            for _ in range(5):
++                ctl._start_input_job(info)
++                ctl._poll_input(self.root)
++            self.assertEqual(sum("cannot read" in line for line in logged), 1, logged)
++            ctl._load_input(self.root, self.ui, info, render)  # after the render
++            ctl._poll_input(self.root)
++        played = self.ui.op("in_head").par.file.val
++        self.assertIn("/feeds/input_loop_f", played)
++        capture = cv2.VideoCapture(played)
++        self.assertEqual((int(capture.get(7)), int(capture.get(3))), (6, 64))
++        capture.release()
++        self.assertTrue(any("extracted frames" in line for line in logged))
++
++
++    def test_init_video_not_on_the_share_is_downloaded_from_comfyui(self):
++        try:
++            import cv2
++            import numpy as np
++        except ImportError:
++            self.skipTest("OpenCV not installed")
++        from tdeforum import inputloop
++        real = self.share + "/real.mp4"
++        writer = cv2.VideoWriter(real, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 18))
++        for i in range(10):
++            writer.write(np.full((18, 32, 3), i * 20, np.uint8))
++        writer.release()
++        job = inputloop.make_job(self.share + "/hidden/corridor.mp4", self.share + "/feeds",
++                                 "/opt/a1111/td_masks/feeds", (64, 36), 0, 1, 5, 20)
++        job.update(fetch_url="http://comfy/view?filename=corridor.mp4&type=input",
++                   fetch_local=self.share + "/comfy_fetch/corridor.mp4")
++        fetched = []
++
++        def fake(url, path):
++            fetched.append(url)
++            os.makedirs(os.path.dirname(path), exist_ok=True)
++            shutil.copy(real, path)
++            return os.path.getsize(path)
++        env = dict(os.environ)
++        env.pop("TDEFORUM_OFFLINE", None)
++        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(inputloop, "download", side_effect=fake):
++            self.assertTrue(inputloop.source_readable(job))
++            result = inputloop.run_job(job)
++        self.assertTrue(result["ok"], result)
++        self.assertEqual((result["frames"], len(fetched)), (5, 1))
++        self.assertTrue(inputloop.ready(job))
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/tests/test_sweep.py b/tests/test_sweep.py
+index 0de5fc1..b42c040 100644
+--- a/tests/test_sweep.py
++++ b/tests/test_sweep.py
+@@ -333,7 +333,8 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
+         self.spawned = []
+ 
+         def inline(target, *args):            # the background render runs right here
+-            self.spawned.append(args)
++            if target is sweep.run_job:       # (output 3's input-loop jobs are not counted)
++                self.spawned.append(args)
+             target(*args)
+         patcher = mock.patch.object(ctl, "_spawn", side_effect=inline)
+         patcher.start()
+-- 
+2.43.0
+

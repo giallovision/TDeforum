@@ -1,0 +1,2311 @@
+From b215c86151269a799de1d9a97b0c78bfda8e5416 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 05:44:58 +0000
+Subject: [PATCH] Reference pass 2026-10-17: Pulse composite preset, baseline
+ 4, output 3 conformed by OpenCV, loop fixes
+
+- inputloop.py: while Deforum renders, write the exact init frames Deforum uses at render size in a TD-readable codec (fixes Movie File In 'Failed to open file'); tick() fills output 3 when ready
+- loop player never wraps past the file: a render capped by a short video loops what was rendered
+- Tempo > Fit Loop to Init Video sets Loop Length to the most whole bars the video holds
+- Example Preset 'Hybrid - Pulse composite (good)' with raw saw schedules (presets can now write <Name>raw; CHOP-linked bases keep theirs)
+- baseline 4: legacy colormatch off, perlin 4x4, ControlNet guidance 0.2..0.8
+- snapshots skip Force Preprocess / Force Re-render Sweep
+- docs/passes: analysis of the pass + its snapshot
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                                     |   13 +-
+ docs/deforum_parameters.md                    |   13 +-
+ docs/passes/2026-10-17_ballet_pulse.md        |   80 ++
+ .../2026-10-17_ballet_pulse.snapshot.json     | 1263 +++++++++++++++++
+ scripts/tdeforum/__init__.py                  |    4 +-
+ scripts/tdeforum/inputloop.py                 |  104 ++
+ scripts/tdeforum/migrate.py                   |   13 +-
+ scripts/tdeforum/payload.py                   |   19 +
+ scripts/tdeforum/presets.py                   |   32 +-
+ scripts/tdeforum/schema.py                    |   14 +-
+ scripts/tdeforum/snapshots.py                 |    3 +-
+ scripts/tdeforum/td_controller.py             |  142 +-
+ tests/test_builder.py                         |    6 +-
+ tests/test_controller.py                      |   27 +-
+ tests/test_outputs.py                         |   81 ++
+ tests/test_payload.py                         |    4 +-
+ tests/test_presets.py                         |   33 +-
+ 17 files changed, 1798 insertions(+), 53 deletions(-)
+ create mode 100644 docs/passes/2026-10-17_ballet_pulse.md
+ create mode 100644 docs/passes/2026-10-17_ballet_pulse.snapshot.json
+ create mode 100644 scripts/tdeforum/inputloop.py
+ create mode 100644 tests/test_outputs.py
+
+diff --git a/README.md b/README.md
+index 9ced709..00241ee 100644
+--- a/README.md
++++ b/README.md
+@@ -115,11 +115,11 @@ Notes:
+ 
+ ### LCM baseline
+ 
+-The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept.
++The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept. Baseline 4 (from the 2026-10-17 pass) also moves *Legacy Colormatch* to off, Perlin W/H to 4 × 4 and every ControlNet unit's guidance to 0.2…0.8, the same way.
+ 
+ ### Example presets
+ 
+-*Tempo › Example Preset* (first page of the COMP) lays one of 31 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
++*Tempo › Example Preset* (first page of the COMP) lays one of 32 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+ 
+ * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
+ * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
+@@ -154,6 +154,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
+ | `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
+ | `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
+ | `hybrid_flow_glow` | Hybrid - Flow glow (good) | The dream moves with the video's optical flow while a soft depth band travels away through the performer as a QR Monster glow. Needs Globals > Video Init Path. |
++| `hybrid_ballet_pulse` | Hybrid - Pulse composite (good) | From a pass that worked (`docs/passes/2026-10-17_ballet_pulse.md`): one 10-frame saw drives push, FOV and Strength together (written to the three `…raw` schedules), the video composited in at 80 % before motion, a soft depth band as the mask, your TD visual as the QR guide, cadence 8 + RAFT, RIFE x3, loop fitted to the video. |
+ | `hybrid_ghost_peel` | Hybrid - Ghost peel (good) | Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the band re-diffuses, so the scene is re-dreamed layer by layer toward you. |
+ | `hybrid_camera_tide` | Hybrid - Camera tide (extreme) | Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive QR Monster hard: the space surges like a tide through the video's own depth. |
+ | `hybrid_possession` | Hybrid - Possession (unorthodox) | Sticky flow measured from the generated image, a faint after-generation echo of the video and the whole depth map as relief: something else is wearing the performer's shape and movement. |
+@@ -238,13 +239,17 @@ echo "$HOME/Codebase/comfyui/output/preprocessed_vids $PWD/td_masks/preprocessed
+ sudo mount -a && make down && make up
+ ```
+ 
++### Fit the loop to the video
++
++*Tempo › Fit Loop to Init Video* (Video Input, or 2D/3D with Hybrid Video): at Queue, *Loop Length* is set to the most whole bars the init video holds (minus the seam overlap when *Seamless Loop* is on), so a short video no longer leaves the loop open. When a render is capped by a shorter video anyway, the loop player now loops exactly what was rendered instead of the planned length.
++
+ ### Outputs for compositing
+ 
+ | COMP output | what |
+ |---|---|
+ | 1 `out_loop` | the render, seamless loop player |
+ | 2 `out_sweep` | the last Sweep Depth mask video |
+-| 3 `out_input` | the **init video looped the same way as the render**: at render size (W × H), the frames Deforum used (start / stride from the frame plan), interpolation-aware, with the same seam crossfade, so outputs 1 and 3 line up frame for frame |
++| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit) |
+ 
+ *Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
+ 
+@@ -334,7 +339,7 @@ scripts/
+     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
+     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
+     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
+-    presets.py         # 31 example configurations (Example Preset drop-down)
++    presets.py         # 32 example configurations (Example Preset drop-down)
+     page_presets.py    # Page Preset drop-downs (one per page except Globals)
+     prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
+     migrate.py         # Deforum_UI -> deforum COMP value migration
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index 1e76c06..8624021 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -1,6 +1,6 @@
+ # deforum COMP: parameter reference
+ 
+-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.11.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+ Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+@@ -43,6 +43,7 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Bpm` | BPM | 120.0 | Tempo of the loop. Together with Beats per Bar and Loop Length it decides how many frames are rendered and the period of every Mod Matrix slot. |
+ | `Beatsperbar` | Beats per Bar | 4 | Beats in one bar (4 for 4/4). Used for the loop length and bar-based modulation. |
+ | `Loopbars` | Loop Length (bars) | 2 | Length of the loop in bars; at 120 bpm, 4/4 and 60 fps, 2 bars = 240 frames. |
++| `Fitlooptovideo` | Fit Loop to Init Video (sets Loop Length to the most whole bars it holds) | Off | At Queue, sets Loop Length to the most whole bars the init video holds (Video Input or Hybrid Video, Trim mode), so a short video doesn't leave the loop open. |
+ | `Outfps` | Output FPS | 60 | Frame rate of the finished video and of TouchDesigner's timeline maths. |
+ | `Renderstrategy` | Render Strategy | cadence | Cadence: Deforum renders every output frame (with diffusion cadence). Interpolate: Deforum renders at Render FPS and RIFE/FILM fills the frames in between. |
+ | `Renderfps` | Render FPS (interpolate) | 30 | With Render Strategy = Interpolate, the rate Deforum actually renders at (15/20/30); the interpolator multiplies it up to Output FPS. |
+@@ -160,13 +161,13 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ |---|---|---|---|
+ | `Pagepresetnoise` | Page Preset (Noise & Color) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
+ | `Noisetype` | Noise Type | perlin | Shape of the added noise: Perlin (smooth, cloudy) or Uniform (fine grain). |
+-| `Perlinw` | Perlin W | 8 | Perlin noise cells across the width; lower = bigger blobs. |
+-| `Perlinh` | Perlin H | 8 | Perlin noise cells down the height. |
++| `Perlinw` | Perlin W | 4 | Perlin noise cells across the width; lower = bigger blobs. |
++| `Perlinh` | Perlin H | 4 | Perlin noise cells down the height. |
+ | `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. |
+ | `Perlinpersistence` | Perlin Persistence | 0.5 | How strong each finer Perlin octave is relative to the previous one. |
+ | `Colorcoherence` | Color Coherence | LAB | Keeps colours from drifting by matching each frame to a reference: LAB/HSV/RGB (first frame), Video Input (the video frame), Image, or None. |
+ | `Colorforcegrayscale` | Color Force Grayscale | Off | Converts every frame to greyscale before diffusing. |
+-| `Legacycolormatch` | Legacy Colormatch (earlier renders used it) | On | Uses Deforum's older colour-matching method (what earlier renders used). |
++| `Legacycolormatch` | Legacy Colormatch (off: Deforum's current match) | Off | Uses Deforum's older colour-matching method (what earlier renders used). |
+ 
+ ## Flow & Anti-blur
+ 
+@@ -258,8 +259,8 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
+ | `Cn1vidpath` | Vid Path | /opt/a1111/td_masks/mask_01.mov | Guide video/image (container path); set automatically by TOP feeds, ComfyUI preprocessing and Sweep Depth. |
+ | `Cn1maskvidpath` | Mask Vid Path | (empty) | Optional mask limiting where this unit acts. |
+ | `Cn1weight` | Weight | 1.0 | Strength of this unit's guidance. |
+-| `Cn1guidancestart` | Guidance Start | 0.0 | Fraction of the sampling steps after which the unit starts guiding. |
+-| `Cn1guidanceend` | Guidance End | 1.0 | Fraction of the steps after which it stops (below 1 lets the last steps add free detail). |
++| `Cn1guidancestart` | Guidance Start | 0.2 | Fraction of the sampling steps after which the unit starts guiding. |
++| `Cn1guidanceend` | Guidance End | 0.8 | Fraction of the steps after which it stops (below 1 lets the last steps add free detail). |
+ | `Cn1processorres` | Processor Res | 512 | Resolution the preprocessor works at. |
+ | `Cn1thresholda` | Threshold A | 0.5 | First preprocessor-specific threshold (e.g. Canny low). |
+ | `Cn1thresholdb` | Threshold B | 0.5 | Second preprocessor-specific threshold (e.g. Canny high). |
+diff --git a/docs/passes/2026-10-17_ballet_pulse.md b/docs/passes/2026-10-17_ballet_pulse.md
+new file mode 100644
+index 0000000..0ac6f73
+--- /dev/null
++++ b/docs/passes/2026-10-17_ballet_pulse.md
+@@ -0,0 +1,80 @@
++# Reference pass: ballet pulse composite (2026-10-17)
++
++The render: `Deforum_20261017051421/20261017051421_RIFE_x3.mp4`. It is 1126 frames at 60 fps and 1024×576: 380 render frames at 20 fps, interpolated ×3 by RIFE.
++* **Snapshot:** `docs/passes/2026-10-17_ballet_pulse.snapshot.json`. To load it, put `T:/docs/passes/2026-10-17_ballet_pulse.snapshot.json` in *Pipeline › Snapshot File* and pulse *Load Snapshot*. The two Force toggles were taken out.
++* **Example Preset:** the look is now *Hybrid - Pulse composite (good)* (`hybrid_ballet_pulse`). It reproduces the three CHOP curves as raw schedules.
++
++## What was on
++
++| Area | Setting | Value |
++|---|---|---|
++| Mode | Animation Mode | 3D, Use Depth Warping, MiDaS-3-Hybrid, MiDaS weight 0.2, Padding Zeros |
++| Init | Video Init Path | `ballet1.mp4` (380 frames), Trim |
++| Hybrid | Motion, flow method | Optical Flow, RAFT, flow factor 1 |
++| Hybrid | Composite | **Before Motion, alpha 0.8** |
++| Motion | Translation Z | CHOP `wave1 × 1`: a saw from 1.30 down to 0.74 every **10 render frames** |
++| Camera | FOV | CHOP `wave1 × 42 + 84`: 138.6° down to 115.1°, on the same saw |
++| Diffusion | Strength | CHOP `wave1 × 0.7`: 0.91 down to 0.52, on the same saw |
++| Diffusion | LCM | 4 steps, Exact Steps on, **CFG 1.5**, noise **0.01**, noise multiplier 1.0 |
++| Noise / colour | Perlin, colour coherence | Perlin **4 × 4**, octaves 3, persistence 0.5; LAB, **legacy colormatch off** |
++| Cadence | Cadence + flow | **8** + RAFT |
++| Interpolation | Render rate | 20 fps, RIFE ×3 to 60 |
++| ControlNet 1 | Guide | QR Monster v2, weight 1.0, guidance **0.2 … 0.8**, preprocessor none, processor res 576 |
++| ControlNet 1 | Feed | **TOP loop from `/project1/final_out`** (your live TD visual) |
++| Sweep Depth | Use | Depth Anything V2 S; **as the mask** (Use Mask Video on) |
++| Sweep Depth | Band | max mode, 1 ramp cycle, width 40, softness 16, grow 10, blur 8, trail 20, smooth 0.4, fill white |
++| Prompt | Prompt Preset | *Haeckel abyss*, plus the global negative prompt |
++| Tempo | Loop | 150 bpm, 16 bars, seamless off. The loop wanted 512 frames, so the video capped it at 380 |
++
++## Why it worked
++
++**1. The video holds the structure.**
++* *Hybrid Composite: Before Motion* at alpha 0.8 blends 80 % of the real video frame into the image before the frame is warped and diffused.
++* The dancer, the sky and the set therefore come back as photographic anchors on every diffused frame. The diffusion can't drift into abstraction.
++* Optical-flow hybrid motion moves the existing pixels the way the dancer moves, so whatever the diffusion adds travels with the body.
++
++**2. Only a soft band is re-dreamed.**
++* The Sweep video is the inpainting mask, so Deforum only re-diffuses where the band is. Everything outside the band keeps the composited video and the warp.
++* Width 40, softness 16, grow 10, blur 8 and trail 20 make the band a wide, feathered, lingering zone instead of a hard slice.
++* In the contact sheet, the diffused "feather / fin" structures (the Haeckel radial forms) grow along the arms and torso where the band crosses the dancer. The face, hands and sky stay clean.
++* That contrast between real and dreamed regions is what reads as intentional rather than a filter.
++
++**3. One curve drives push, lens and Strength together.** All three CHOP links come from one channel, so every 10 render frames the camera pushes in, the FOV narrows from 139° to 115°, and Strength falls from 0.91 to 0.52.
++* **Deforum only diffuses every 8th frame** (cadence 8), so Strength only matters on frames 0, 8, 16, 24, 32, …
++* **The pattern:** on a 10-frame saw those frames land at phases 0, 8, 6, 4, 2, 0, …, giving Strength 0.91, 0.56, 0.65, 0.74, 0.82 and repeat.
++* **The rhythm:** that is one deep re-imagining followed by progressively lighter ones, cycling every 40 frames (2 s, exactly 5 beats at 150 bpm). The 10 against 8 polyrhythm is a large part of the "breathing".
++* **Every frame:** the push and the lens act on every frame (they are warps, not diffusions), so the motion pulse is felt every 0.5 s.
++* **In the numbers:** the frame-to-frame change of the render correlates about equally at the cadence period (lag 24 output frames: 0.67) and at the saw period (lag 30: 0.65). Both rhythms are visible.
++
++**4. Cadence 8 + RAFT + RIFE ×3 keeps it fluid and fast.**
++* Only about 48 of the 380 frames are diffused. RAFT carries the frames between them along the motion, and RIFE triples the frame rate afterwards.
++* The mean frame-to-frame change is 2.7 / 255 (95th percentile 6.2), which is very calm for a hybrid render. It took 573 s.
++* High cadence is usually mushy, but here the 80 % composite keeps re-sharpening the base. Use cadence 8 only with a strong composite or another anchor.
++
++**5. LCM with little noise.**
++* 4 exact steps at CFG 1.5 reach full detail on every diffusion even at Strength 0.91.
++* Noise 0.01 with 4 × 4 Perlin adds only large, soft variation. With so few diffusions, fine noise would show as grain the 4 steps can't clean.
++* LAB coherence with the current (non-legacy) colour match holds the blue palette of the video across the whole render.
++
++**6. The QR guide is your own visual, blended rather than stamped.**
++* ControlNet 1 records `final_out` as a loop and uses it with QR Monster at weight 1.
++* Guidance 0.2–0.8 lets the first steps compose freely and the last steps add detail over the pattern, so the TD visual shapes the textures without printing itself onto them.
++
++## What could be better (seen in this pass)
++
++* **Edge streaks:** a 139° FOV with a forward push and Zeros padding stretches the frame edges into vertical banded columns, visible in the later frames. If they bother you, try Padding Reflection or an FOV range of about 95–120°.
++* **The loop didn't close:** 16 bars at 150 bpm is 512 render frames, but the video has 380. The loop player also wrapped at 1536 output frames over an 1126-frame file, so it held its last frame for about 7 s each loop. Fixed: the loop player now loops what was rendered, and *Tempo › Fit Loop to Init Video* sets 11 bars (352 frames) for this video.
++* **Force toggles were left on:** Force Preprocess and Force Re-render Sweep were on, so every Queue redid ComfyUI and the sweep. Snapshots no longer save those two switches.
++* **The saw isn't beat-locked:** 10 frames at 20 fps is 1.25 beats at 150 bpm. Keep it if you like the drift against the music. For a locked version, use a period of 8 frames (1 beat), but then every diffusion lands on the same phase and the breathing goes away, so 16 frames (2 beats) is the more interesting choice.
++
++## What went into the defaults and presets
++
++* **Baseline 4** (a rebuild moves values still at the old defaults; values you set are kept):
++  * *Legacy Colormatch* off;
++  * Perlin W/H 8 → 4;
++  * ControlNet guidance start/end 0/1 → **0.2/0.8** on every unit.
++* **New Example Preset** *Hybrid - Pulse composite (good)* writes this look. The three saws go to the `…raw` schedules; a raw whose base is CHOP-linked is left alone, so your `wave1` keeps driving it.
++* **Kept as they were:**
++  * **CFG default 1.8:** 1.5 worked here, and both are inside the LCM range.
++  * **Noise 0.015–0.02 in the 2D/3D presets:** 0.01 suits high cadence with a composite, not cadence 2–4 without one.
++  * **Cadence 2 in the other hybrid presets:** they have no composite anchor.
+diff --git a/docs/passes/2026-10-17_ballet_pulse.snapshot.json b/docs/passes/2026-10-17_ballet_pulse.snapshot.json
+new file mode 100644
+index 0000000..fbe34cf
+--- /dev/null
++++ b/docs/passes/2026-10-17_ballet_pulse.snapshot.json
+@@ -0,0 +1,1263 @@
++{
++  "name": "2026-10-17 ballet pulse (reference pass)",
++  "pars": {
++    "Amountschedule": {
++      "mode": "CONSTANT",
++      "val": 0.1
++    },
++    "Amountscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Ancestraletaschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Ancestraletascheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Angle": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Angleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Animationmode": {
++      "mode": "CONSTANT",
++      "val": "3D"
++    },
++    "Aspectratioschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Aspectratioscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Autoload": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Bakepoints": {
++      "mode": "CONSTANT",
++      "val": 0
++    },
++    "Beatsperbar": {
++      "mode": "CONSTANT",
++      "val": 4
++    },
++    "Border": {
++      "mode": "CONSTANT",
++      "val": "replicate"
++    },
++    "Bpm": {
++      "mode": "CONSTANT",
++      "val": 150.0
++    },
++    "Cadenceflowfactorschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Cadenceflowfactorscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Cfgscaleschedule": {
++      "mode": "CONSTANT",
++      "val": 1.5
++    },
++    "Cfgscalescheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Chopmode": {
++      "mode": "CONSTANT",
++      "val": "add"
++    },
++    "Choppath": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Choptiming": {
++      "mode": "CONSTANT",
++      "val": "timeline"
++    },
++    "Clipskipschedule": {
++      "mode": "CONSTANT",
++      "val": 2.0
++    },
++    "Clipskipscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Cn1controlmode": {
++      "mode": "CONSTANT",
++      "val": "Balanced"
++    },
++    "Cn1enabled": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn1guidanceend": {
++      "mode": "CONSTANT",
++      "val": 0.8
++    },
++    "Cn1guidancestart": {
++      "mode": "CONSTANT",
++      "val": 0.2
++    },
++    "Cn1loopbackmode": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn1lowvram": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn1maskvidpath": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Cn1model": {
++      "mode": "CONSTANT",
++      "val": "ctrl_v1p_qr_monster_v2"
++    },
++    "Cn1module": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Cn1overwriteframes": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn1pixelperfect": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn1processorres": {
++      "mode": "CONSTANT",
++      "val": 576
++    },
++    "Cn1resizemode": {
++      "mode": "CONSTANT",
++      "val": "Inner Fit (Scale to Fit)"
++    },
++    "Cn1thresholda": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn1thresholdb": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn1vidpath": {
++      "mode": "CONSTANT",
++      "val": "/opt/a1111/td_masks/feeds/cn1_feed.mp4"
++    },
++    "Cn1weight": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Cn2controlmode": {
++      "mode": "CONSTANT",
++      "val": "Balanced"
++    },
++    "Cn2enabled": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn2guidanceend": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Cn2guidancestart": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Cn2loopbackmode": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn2lowvram": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn2maskvidpath": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Cn2model": {
++      "mode": "CONSTANT",
++      "val": "ctrl_v1p_qr_monster_v2"
++    },
++    "Cn2module": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Cn2overwriteframes": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn2pixelperfect": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn2processorres": {
++      "mode": "CONSTANT",
++      "val": 512
++    },
++    "Cn2resizemode": {
++      "mode": "CONSTANT",
++      "val": "Inner Fit (Scale to Fit)"
++    },
++    "Cn2thresholda": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn2thresholdb": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn2vidpath": {
++      "mode": "CONSTANT",
++      "val": "/opt/a1111/td_masks/mask_01.mov"
++    },
++    "Cn2weight": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Cn3controlmode": {
++      "mode": "CONSTANT",
++      "val": "Balanced"
++    },
++    "Cn3enabled": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn3guidanceend": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Cn3guidancestart": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Cn3loopbackmode": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn3lowvram": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Cn3maskvidpath": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Cn3model": {
++      "mode": "CONSTANT",
++      "val": "ctrl_v1p_qr_monster_v2"
++    },
++    "Cn3module": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Cn3overwriteframes": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn3pixelperfect": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Cn3processorres": {
++      "mode": "CONSTANT",
++      "val": 512
++    },
++    "Cn3resizemode": {
++      "mode": "CONSTANT",
++      "val": "Inner Fit (Scale to Fit)"
++    },
++    "Cn3thresholda": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn3thresholdb": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Cn3vidpath": {
++      "mode": "CONSTANT",
++      "val": "/opt/a1111/td_masks/mask_01.mov"
++    },
++    "Cn3weight": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Colorcoherence": {
++      "mode": "CONSTANT",
++      "val": "LAB"
++    },
++    "Colorforcegrayscale": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Comfypreprocenable": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Comfypreprocessor": {
++      "mode": "CONSTANT",
++      "val": "PiDiNetPreprocessor"
++    },
++    "Contrastschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Contrastscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Ddimetaschedule": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Ddimetascheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Depthalgorithm": {
++      "mode": "CONSTANT",
++      "val": "Midas-3-Hybrid"
++    },
++    "Diffusioncadence": {
++      "mode": "CONSTANT",
++      "val": 8
++    },
++    "Enableancestraletascheduling": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Enableclipskipscheduling": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Enableddimetascheduling": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Enablenoisemultiplierscheduling": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Enableperspectiveflip": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Enablestepsscheduling": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Enablesubseedscheduling": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Farschedule": {
++      "mode": "CONSTANT",
++      "val": 10000.0
++    },
++    "Farscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Feed1mode": {
++      "mode": "CONSTANT",
++      "val": "top_loop"
++    },
++    "Feed1top": {
++      "mode": "CONSTANT",
++      "val": "/project1/final_out"
++    },
++    "Feed2mode": {
++      "mode": "CONSTANT",
++      "val": "file"
++    },
++    "Feed2top": {
++      "mode": "CONSTANT",
++      "val": "/project1/final_out"
++    },
++    "Feed3mode": {
++      "mode": "CONSTANT",
++      "val": "file"
++    },
++    "Feed3top": {
++      "mode": "CONSTANT",
++      "val": "/project1/final_out"
++    },
++    "Feedloopstart": {
++      "mode": "CONSTANT",
++      "val": 0
++    },
++    "Feedmethod": {
++      "mode": "CONSTANT",
++      "val": "addframe"
++    },
++    "Fovschedule": {
++      "expr": "op('wave1')['wave1']*42+84",
++      "mode": "EXPRESSION",
++      "val": 70.0
++    },
++    "Fovscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Height": {
++      "mode": "CONSTANT",
++      "val": 576
++    },
++    "Hybridcompalphaschedule": {
++      "mode": "CONSTANT",
++      "val": 0.8
++    },
++    "Hybridcompalphascheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Hybridcomposite": {
++      "mode": "CONSTANT",
++      "val": "Before Motion"
++    },
++    "Hybridconsistencyblur": {
++      "mode": "CONSTANT",
++      "val": 2
++    },
++    "Hybridflowconsistency": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Hybridflowfactorschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Hybridflowfactorscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Hybridflowmethod": {
++      "mode": "CONSTANT",
++      "val": "RAFT"
++    },
++    "Hybridmotion": {
++      "mode": "CONSTANT",
++      "val": "Optical Flow"
++    },
++    "Hybridmotionuseprevimg": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Img2imgfixsteps": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Interpengine": {
++      "mode": "CONSTANT",
++      "val": "RIFE v4.6"
++    },
++    "Invertmask": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Kernelschedule": {
++      "mode": "CONSTANT",
++      "val": 5
++    },
++    "Legacycolormatch": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Lengthsource": {
++      "mode": "CONSTANT",
++      "val": "tempo"
++    },
++    "Loopbars": {
++      "mode": "CONSTANT",
++      "val": 16
++    },
++    "Loopoffset": {
++      "mode": "CONSTANT",
++      "val": 0
++    },
++    "Loopoverlapbeats": {
++      "mode": "CONSTANT",
++      "val": 2.0
++    },
++    "Loopseeds": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Maxframes": {
++      "mode": "CONSTANT",
++      "val": 240
++    },
++    "Midasweight": {
++      "mode": "CONSTANT",
++      "val": 0.2
++    },
++    "Mod1active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod1beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod1depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod1phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod1shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod1sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod1target": {
++      "mode": "CONSTANT",
++      "val": "zoom"
++    },
++    "Mod2active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod2beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod2depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod2phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod2shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod2sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod2target": {
++      "mode": "CONSTANT",
++      "val": "translation_z"
++    },
++    "Mod3active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod3beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod3depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod3phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod3shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod3sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod3target": {
++      "mode": "CONSTANT",
++      "val": "strength_schedule"
++    },
++    "Mod4active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod4beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod4depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod4phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod4shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod4sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod4target": {
++      "mode": "CONSTANT",
++      "val": "noise_schedule"
++    },
++    "Mod5active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod5beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod5depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod5phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod5shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod5sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod5target": {
++      "mode": "CONSTANT",
++      "val": "rotation_3d_y"
++    },
++    "Mod6active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod6beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod6depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod6phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod6shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod6sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod6target": {
++      "mode": "CONSTANT",
++      "val": "angle"
++    },
++    "Mod7active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod7beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod7depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod7phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod7shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod7sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod7target": {
++      "mode": "CONSTANT",
++      "val": "cfg_scale_schedule"
++    },
++    "Mod8active": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Mod8beats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Mod8depth": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod8phase": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Mod8shape": {
++      "mode": "CONSTANT",
++      "val": "sine"
++    },
++    "Mod8sharpness": {
++      "mode": "CONSTANT",
++      "val": 4.0
++    },
++    "Mod8target": {
++      "mode": "CONSTANT",
++      "val": "translation_x"
++    },
++    "Nearschedule": {
++      "mode": "CONSTANT",
++      "val": 200.0
++    },
++    "Nearscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Noisemultiplierschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Noisemultiplierscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Noiseschedule": {
++      "mode": "CONSTANT",
++      "val": 0.01
++    },
++    "Noisescheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Noisetype": {
++      "mode": "CONSTANT",
++      "val": "perlin"
++    },
++    "Nprompt": {
++      "mode": "CONSTANT",
++      "val": "worst quality, low quality, glitch, deformed, mutated, ugly, messy, text, watermark"
++    },
++    "Opticalflowcadence": {
++      "mode": "CONSTANT",
++      "val": "RAFT"
++    },
++    "Opticalflowredogeneration": {
++      "mode": "CONSTANT",
++      "val": "None"
++    },
++    "Outfps": {
++      "mode": "CONSTANT",
++      "val": 60
++    },
++    "Overlaymask": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Paddingmode": {
++      "mode": "CONSTANT",
++      "val": "zeros"
++    },
++    "Pagepresetcamera": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetcn1val": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetcn2val": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetcn3val": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetdiffusion": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetflow": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresethybrid": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetmods": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetmotion2d": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetmotion3d": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetnoise": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetpipeline": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Pagepresetsweep": {
++      "mode": "CONSTANT",
++      "val": "peel_mask"
++    },
++    "Pagepresettempo": {
++      "mode": "CONSTANT",
++      "val": "none"
++    },
++    "Perlinh": {
++      "mode": "CONSTANT",
++      "val": 4
++    },
++    "Perlinoctaves": {
++      "mode": "CONSTANT",
++      "val": 3
++    },
++    "Perlinpersistence": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Perlinw": {
++      "mode": "CONSTANT",
++      "val": 4
++    },
++    "Perspectiveflipfv": {
++      "mode": "CONSTANT",
++      "val": 53.0
++    },
++    "Perspectiveflipfvraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Perspectiveflipgamma": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Perspectiveflipgammaraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Perspectiveflipphi": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Perspectiveflipphiraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Perspectivefliptheta": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Perspectiveflipthetaraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Preset": {
++      "mode": "CONSTANT",
++      "val": "hybrid_flow_glow"
++    },
++    "Promptpreset": {
++      "mode": "CONSTANT",
++      "val": "haeckel_abyss"
++    },
++    "Promptsource": {
++      "mode": "CONSTANT",
++      "val": "sequence"
++    },
++    "Promptxfadebeats": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Redoflowfactorschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Redoflowfactorscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Renderfps": {
++      "mode": "CONSTANT",
++      "val": "20"
++    },
++    "Renderstrategy": {
++      "mode": "CONSTANT",
++      "val": "interpolate"
++    },
++    "Rotation3dx": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Rotation3dxraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Rotation3dy": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Rotation3dyraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Rotation3dz": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Rotation3dzraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Sampler": {
++      "mode": "CONSTANT",
++      "val": "LCM"
++    },
++    "Samplingmode": {
++      "mode": "CONSTANT",
++      "val": "bicubic"
++    },
++    "Scheduler": {
++      "mode": "CONSTANT",
++      "val": "Automatic"
++    },
++    "Sdmodelcheckpoint": {
++      "mode": "CONSTANT",
++      "val": "0"
++    },
++    "Sdvae": {
++      "mode": "CONSTANT",
++      "val": "Automatic"
++    },
++    "Seamlessloop": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Seed": {
++      "mode": "CONSTANT",
++      "val": "424242"
++    },
++    "Seedbehavior": {
++      "mode": "CONSTANT",
++      "val": "iter"
++    },
++    "Sigmaschedule": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Sigmascheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Steps": {
++      "mode": "CONSTANT",
++      "val": 4
++    },
++    "Stepsschedule": {
++      "mode": "CONSTANT",
++      "val": 25.0
++    },
++    "Stepsscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Strength": {
++      "mode": "CONSTANT",
++      "val": 0.8
++    },
++    "Strengthschedule": {
++      "expr": "op('wave1')['wave1']*0.7",
++      "mode": "EXPRESSION",
++      "val": 0.65
++    },
++    "Strengthscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Subseedschedule": {
++      "mode": "CONSTANT",
++      "val": "0:(1)"
++    },
++    "Subseedstrengthschedule": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Subseedstrengthscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Sweepasmask": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Sweepblur": {
++      "mode": "CONSTANT",
++      "val": 8.0
++    },
++    "Sweepcycles": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Sweepdepthvideo": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Sweepdirection": {
++      "mode": "CONSTANT",
++      "val": "forward"
++    },
++    "Sweepenabled": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Sweepfill": {
++      "mode": "CONSTANT",
++      "val": "white"
++    },
++    "Sweepgrow": {
++      "mode": "CONSTANT",
++      "val": 10
++    },
++    "Sweepmode": {
++      "mode": "CONSTANT",
++      "val": "max"
++    },
++    "Sweepmodel": {
++      "mode": "CONSTANT",
++      "val": "depth_anything_v2_vits"
++    },
++    "Sweepprepareonly": {
++      "mode": "CONSTANT",
++      "val": false
++    },
++    "Sweepshape": {
++      "mode": "CONSTANT",
++      "val": "ramp"
++    },
++    "Sweepsmooth": {
++      "mode": "CONSTANT",
++      "val": 0.4
++    },
++    "Sweepsoftness": {
++      "mode": "CONSTANT",
++      "val": 16
++    },
++    "Sweeptrail": {
++      "mode": "CONSTANT",
++      "val": 20
++    },
++    "Sweepwidth": {
++      "mode": "CONSTANT",
++      "val": 40
++    },
++    "Thresholdschedule": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Thresholdscheduleraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Transformcenterx": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Transformcenterxraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Transformcentery": {
++      "mode": "CONSTANT",
++      "val": 0.5
++    },
++    "Transformcenteryraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Translationx": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Translationxraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Translationy": {
++      "mode": "CONSTANT",
++      "val": 0.0
++    },
++    "Translationyraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Translationz": {
++      "expr": "op('wave1')['wave1']",
++      "mode": "EXPRESSION",
++      "val": 0.0
++    },
++    "Translationzraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    },
++    "Usedepthwarping": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Usemaskvideo": {
++      "mode": "CONSTANT",
++      "val": true
++    },
++    "Videoframemode": {
++      "mode": "CONSTANT",
++      "val": "trim"
++    },
++    "Videoinitpath": {
++      "mode": "CONSTANT",
++      "val": "/opt/a1111/td_inputs/comfy_videos/archive/ballet/ballet1.mp4"
++    },
++    "Videomaskpath": {
++      "mode": "CONSTANT",
++      "val": "/opt/a1111/td_masks/feeds/cn_sweep_e16888def3.mp4"
++    },
++    "Width": {
++      "mode": "CONSTANT",
++      "val": 1024
++    },
++    "Zoom": {
++      "mode": "CONSTANT",
++      "val": 1.0
++    },
++    "Zoomraw": {
++      "mode": "CONSTANT",
++      "val": ""
++    }
++  },
++  "presets": {
++    "tdeforum_page_presets": {
++      "pagepreset_camera": {
++        "applied": "none",
++        "backup": {}
++      },
++      "pagepreset_cn1": {
++        "applied": "none",
++        "backup": {}
++      },
++      "pagepreset_diffusion": {
++        "applied": "none",
++        "backup": {}
++      },
++      "pagepreset_hybrid": {
++        "applied": "none",
++        "backup": {}
++      },
++      "pagepreset_noise": {
++        "applied": "none",
++        "backup": {}
++      },
++      "pagepreset_sweep": {
++        "applied": "peel_mask",
++        "backup": {
++          "Sweepblur": 4.0,
++          "Sweepcycles": 16.0,
++          "Sweepgrow": 6,
++          "Sweepsmooth": 0.1,
++          "Sweepsoftness": 8,
++          "Sweeptrail": 10,
++          "Sweepwidth": 42
++        }
++      }
++    },
++    "tdeforum_preset": {
++      "applied": "hybrid_flow_glow",
++      "backup": {
++        "Animationmode": "Video Input",
++        "Cn1guidanceend": 1.0,
++        "Cn1weight": 1.0,
++        "Diffusioncadence": 8,
++        "Feed1mode": "file",
++        "Hybridmotion": "None",
++        "Loopoverlapbeats": 1.0,
++        "Mod1active": true,
++        "Noisemultiplierschedule": 1.05,
++        "Noiseschedule": 0.065,
++        "Seamlessloop": true,
++        "Strengthschedule": 0.8,
++        "Sweepasmask": true,
++        "Sweepblur": 0.0,
++        "Sweepcycles": 2.0,
++        "Sweepenabled": false,
++        "Sweepfill": "depth",
++        "Sweepgrow": 4,
++        "Sweepmode": "min",
++        "Sweepshape": "pingpong",
++        "Sweepsmooth": 3.0,
++        "Sweepsoftness": 4,
++        "Sweeptrail": 9,
++        "Sweepwidth": 21
++      }
++    },
++    "tdeforum_prompt_preset": {
++      "applied": "haeckel_abyss",
++      "backup": [
++        [
++          "beat",
++          "prompt",
++          "xfade"
++        ],
++        [
++          "0",
++          "hyperrealistic, multicolored melting oil and water, liquid paint splatter, in the style of Jackson Pollack, 8K UHD",
++          ""
++        ]
++      ]
++    }
++  },
++  "prompt_seq": [
++    [
++      "beat",
++      "prompt",
++      "xfade"
++    ],
++    [
++      "0",
++      "radiolarians and jellyfish in the style of Ernst Haeckel, translucent bioluminescent sea creatures, intricate radial symmetry, deep ocean glow, scientific illustration meets hyperrealism",
++      ""
++    ]
++  ],
++  "taken": "2026-10-16 23:21:37",
++  "tdeforum": "0.11.0",
++  "tdeforum_snapshot": 1
++}
+\ No newline at end of file
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 4f75817..f9e0d63 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -28,10 +28,10 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.11.0"
++__version__ = "0.12.0"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
++_SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "inputloop", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+                "migrate", "payload", "comfy", "td_controller")
+ 
+ 
+diff --git a/scripts/tdeforum/inputloop.py b/scripts/tdeforum/inputloop.py
+new file mode 100644
+index 0000000..72bd847
+--- /dev/null
++++ b/scripts/tdeforum/inputloop.py
+@@ -0,0 +1,104 @@
++"""COMP output 3: the init video conformed to the render, frame for frame.
++
++TouchDesigner's Movie File In cannot open every file Deforum can (AV1 / VP9 / HEVC / 10-bit
++mp4s fail with "Failed to open file"), and Deforum does not use the video as-is anyway: it
++takes frames ``start, start + stride, ...`` and stretches them to W x H. So at Queue a
++background thread (OpenCV, which reads what Deforum reads) writes exactly those frames, one
++per render frame, at render size, to ``td_masks/feeds/input_loop_<key>.mp4`` with the codec
++the sweep videos use (TD opens those). The loop player then plays that file with the same
++playhead maths as the render. Same video + size + frames = cache hit.
++"""
++
++import hashlib
++import json
++import os
++import time
++
++from . import sweep
++
++PREFIX = "input_loop_"
++
++
++def job_key(share_path, size, start, stride, frames):
++    try:
++        st = os.stat(share_path)
++        stamp = [st.st_size, int(st.st_mtime)]
++    except OSError:
++        stamp = None
++    blob = json.dumps({"v": 1, "src": share_path, "stamp": stamp, "size": list(size), "start": int(start),
++                       "stride": int(stride), "frames": int(frames)}, sort_keys=True)
++    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
++
++
++def make_job(share_path, feed_folder_share, feed_folder_container, size, start, stride, frames, fps):
++    key = job_key(share_path, size, start, stride, frames)
++    name = "%s%s.mp4" % (PREFIX, key)
++    folder = feed_folder_share.rstrip("/") + "/"
++    return {"key": key, "src": share_path, "size": [int(size[0]), int(size[1])], "start": int(start),
++            "stride": max(1, int(stride)), "frames": int(frames), "fps": float(fps or 30.0),
++            "out_share": folder + name, "out_container": feed_folder_container.rstrip("/") + "/" + name,
++            "sidecar": folder + name + ".json"}
++
++
++def read_result(sidecar):
++    return sweep.read_result(sidecar)
++
++
++def ready(job):
++    done = read_result(job["sidecar"])
++    return bool(done and done.get("ok") and os.path.isfile(job["out_share"]))
++
++
++def conform(job):
++    """Write the conformed video. Returns {"frames", "codec", "source_frames"}."""
++    import cv2
++    width, height = job["size"]
++    capture = cv2.VideoCapture(job["src"])
++    if not capture.isOpened():
++        raise RuntimeError("OpenCV cannot open %s" % job["src"])
++    tmp = job["out_share"][:-4] + ".tmp" + job["out_share"][-4:]
++    os.makedirs(os.path.dirname(tmp) or ".", exist_ok=True)
++    writer, codec = sweep._open_writer(cv2, tmp, job["fps"], (width, height))
++    written, index, wanted = 0, -1, job["start"]
++    try:
++        while written < job["frames"]:
++            ok, frame = capture.read()
++            if not ok:
++                break
++            index += 1
++            if index < wanted:
++                continue
++            if frame.shape[1] != width or frame.shape[0] != height:
++                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
++            writer.write(frame)
++            written += 1
++            wanted += job["stride"]
++    finally:
++        writer.release()
++        capture.release()
++    if not written:
++        try:
++            os.remove(tmp)
++        except OSError:
++            pass
++        raise RuntimeError("no frames read from %s (from frame %d)" % (job["src"], job["start"]))
++    os.replace(tmp, job["out_share"])
++    return {"frames": written, "codec": codec}
++
++
++def run_job(job):
++    """Background-thread body. Never raises: the outcome goes to job["sidecar"]."""
++    started = time.time()
++    result = {"ok": False, "key": job.get("key")}
++    try:
++        out = conform(job)
++        result.update(ok=True, frames=out["frames"], codec=out["codec"], out_share=job["out_share"],
++                      out_container=job["out_container"])
++    except Exception as exc:
++        result["error"] = "%s: %s" % (type(exc).__name__, exc)
++    result["seconds"] = round(time.time() - started, 2)
++    try:
++        sweep._write_json(job["sidecar"], result)
++    except Exception:
++        pass
++    return result
+diff --git a/scripts/tdeforum/migrate.py b/scripts/tdeforum/migrate.py
+index 8d2843b..367be9b 100644
+--- a/scripts/tdeforum/migrate.py
++++ b/scripts/tdeforum/migrate.py
+@@ -36,7 +36,7 @@ def _const(value):
+ # equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
+ # you set to something else is kept. Each bump applies once: build_master_ui stores the version
+ # it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
+-BASELINE_VERSION = 3
++BASELINE_VERSION = 4
+ BASELINE_BUMPS = {
+     "seed": (1, "-1", "424242"),
+     "loop_seeds": (1, True, False),
+@@ -50,6 +50,17 @@ BASELINE_BUMPS = {
+     "feed_1_top": (3, "", "/project1/final_out"),
+     "feed_2_top": (3, "", "/project1/final_out"),
+     "feed_3_top": (3, "", "/project1/final_out"),
++    # 4: from the 2026-10-17 pass (docs/passes/): Deforum's current colour match, softer perlin
++    # noise, ControlNet guidance 0.2..0.8 so the guide blends instead of stamping.
++    "legacy_colormatch": (4, True, False),
++    "perlin_w": (4, 8, 4),
++    "perlin_h": (4, 8, 4),
++    "cn_1_guidance_start": (4, 0.0, 0.2),
++    "cn_1_guidance_end": (4, 1.0, 0.8),
++    "cn_2_guidance_start": (4, 0.0, 0.2),
++    "cn_2_guidance_end": (4, 1.0, 0.8),
++    "cn_3_guidance_start": (4, 0.0, 0.2),
++    "cn_3_guidance_end": (4, 1.0, 0.8),
+ }
+ 
+ 
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 676d747..5d35c7a 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -157,6 +157,25 @@ def tempo_plan(values):
+     )
+ 
+ 
++def fit_bars(values, init_frames):
++    """Most whole bars (plus the seam overlap) that fit in ``init_frames`` render frames, or None.
++
++    For Tempo > Fit Loop to Init Video with Video Frame Mode = Trim (Stride already stretches
++    the whole video over the loop)."""
++    if not init_frames or _text(values.get("video_frame_mode", "trim")) == "stride":
++        return None
++    try:
++        one = tempo_plan(dict(values, loop_bars=1))
++    except (TypeError, ValueError):
++        return None
++    if not one:
++        return None
++    per_bar = one["fpb"] * one["beats_per_bar"]
++    overlap = int(round(max(0.0, _as_number(values.get("loop_overlap_beats", 1.0), float)) * one["fpb"])) \
++        if one["seamless"] else 0
++    return max(1, int((int(init_frames) - overlap) // per_bar))
++
++
+ def read_slots(values, warnings):
+     """Active Mod Matrix rows -> [modulation.Slot]."""
+     slots = []
+diff --git a/scripts/tdeforum/presets.py b/scripts/tdeforum/presets.py
+index 6b37792..cf81b6c 100644
+--- a/scripts/tdeforum/presets.py
++++ b/scripts/tdeforum/presets.py
+@@ -31,11 +31,12 @@ GOOD, EXTREME, UNORTHODOX = "good", "extreme", "unorthodox"
+ 
+ 
+ class Preset(object):
+-    __slots__ = ("id", "label", "mode", "level", "notes", "values")
++    __slots__ = ("id", "label", "mode", "level", "notes", "values", "raws")
+ 
+-    def __init__(self, id, label, mode, level, notes, values):
++    def __init__(self, id, label, mode, level, notes, values, raws=None):
+         self.id, self.label, self.mode, self.level, self.notes = id, label, mode, level, notes
+         self.values = values
++        self.raws = dict(raws or {})      # {MOD api: Deforum schedule} written to <Name>raw
+ 
+     def __repr__(self):
+         return "Preset(%s)" % self.id
+@@ -252,6 +253,33 @@ PRESETS = [
+            "performer as a QR Monster glow. Needs Globals > Video Init Path.",
+            _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP, {"sweep_mode": "max", "strength_schedule": 0.7,
+                                                       "noise_schedule": 0.01, "color_coherence": "LAB"})),
++    # From a pass that worked (2026-10-17, ballet + Haeckel prompt; docs/passes/): one 10-frame
++    # saw drives the camera push, the lens and Strength together, so every pulse pushes in,
++    # narrows the FOV and re-imagines more at the same moment; the video is composited in at 80 %
++    # before the warp, so the dancer stays; only a soft depth band (the mask) is re-diffused;
++    # cadence 8 + RAFT, then RIFE x3, keeps it fluid.
++    Preset("hybrid_ballet_pulse", "Hybrid - Pulse composite (good)", "3D", GOOD,
++           "3D push + lens + Strength on one 10-frame saw, the video composited in at 80 % before motion, "
++           "a soft depth band as the mask and your TD visual (final_out) as the QR guide. Cadence 8, RIFE x3. "
++           "Needs Globals > Video Init Path.",
++           _merge(_3D, _HYBRID_FLOW, _SWEEP, {
++               "fov_schedule": 127.0, "midas_weight": 0.2, "padding_mode": "zeros",
++               "translation_z": 1.0, "strength_schedule": 0.7,
++               "hybrid_composite": "Before Motion", "hybrid_comp_alpha_schedule": 0.8,
++               "diffusion_cadence": 8, "optical_flow_cadence": "RAFT", "optical_flow_redo_generation": "None",
++               "noise_schedule": 0.01, "noise_multiplier_schedule": 1.0, "contrast_schedule": 1.0,
++               "color_coherence": "LAB", "legacy_colormatch": False, "noise_type": "perlin",
++               "perlin_w": 4, "perlin_h": 4, "perlin_octaves": 3, "perlin_persistence": 0.5,
++               "seamless_loop": False, "loop_overlap_beats": 2.0, "fit_loop_to_video": True,
++               "render_strategy": "interpolate", "render_fps": "20", "interp_engine": "RIFE v4.6",
++               "feed_1_mode": "top_loop", "cn_1_weight": 1.0, "cn_1_guidance_start": 0.2,
++               "cn_1_guidance_end": 0.8, "cn_1_processor_res": 576,
++               "sweep_as_mask": True, "sweep_mode": "max", "sweep_cycles": 1.0, "sweep_shape": "ramp",
++               "sweep_width": 40, "sweep_softness": 16, "sweep_grow": 10, "sweep_blur": 8.0, "sweep_trail": 20,
++               "sweep_smooth": 0.4, "sweep_fill": "white"}),
++           raws={"translation_z": "0:(1.3 - 0.0620689*(t%10))",
++                 "strength_schedule": "0:(0.91 - 0.0434483*(t%10))",
++                 "fov_schedule": "0:(138.6 - 2.6069*(t%10))"}),
+     Preset("hybrid_ghost_peel", "Hybrid - Ghost peel (good)", "3D", GOOD,
+            "Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the "
+            "band re-diffuses, so the scene is re-dreamed layer by layer toward you.",
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 643dfd5..5211015 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -233,8 +233,10 @@ def _cn_unit_fields(n):
+         F(p + "vid_path", "/opt/a1111/td_masks/mask_01.mov", page, STR),
+         F(p + "mask_vid_path", "", page, STR),
+         F(p + "weight", 1.0, page, FLOAT, norm=(0, 2), as_schedule=True),
+-        F(p + "guidance_start", 0.0, page, FLOAT, norm=(0, 1), as_schedule=True),
+-        F(p + "guidance_end", 1.0, page, FLOAT, norm=(0, 1), as_schedule=True),
++        # 0.2..0.8: the first steps compose freely and the last ones add detail over the guide,
++        # so QR Monster reads as part of the image instead of a stencil (baseline 4).
++        F(p + "guidance_start", 0.2, page, FLOAT, norm=(0, 1), as_schedule=True),
++        F(p + "guidance_end", 0.8, page, FLOAT, norm=(0, 1), as_schedule=True),
+         F(p + "processor_res", 512, page, INT, norm=(64, 2048)),
+         F(p + "threshold_a", 0.5, page, FLOAT, norm=(0, 255)),
+         F(p + "threshold_b", 0.5, page, FLOAT, norm=(0, 255)),
+@@ -258,6 +260,8 @@ FIELDS = [
+     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
+     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
+     F("loop_bars", 2, TE, INT, norm=(1, 16), label="Loop Length (bars)", target=None),
++    F("fit_loop_to_video", False, TE, TOGGLE,
++      label="Fit Loop to Init Video (sets Loop Length to the most whole bars it holds)", target=None),
+     F("out_fps", 60, TE, INT, norm=(24, 60), label="Output FPS", target=None),
+     F("render_strategy", "cadence", TE, MENU, menu=tempo.STRATEGIES, labels=tempo.STRATEGY_LABELS,
+       label="Render Strategy", target=None),
+@@ -343,8 +347,8 @@ FIELDS = [
+ 
+     # --- Noise & Color -----------------------------------------------------------
+     F("noise_type", "perlin", NO, MENU, menu=["perlin", "uniform"]),
+-    F("perlin_w", 8, NO, INT, norm=(1, 16), label="Perlin W"),
+-    F("perlin_h", 8, NO, INT, norm=(1, 16), label="Perlin H"),
++    F("perlin_w", 4, NO, INT, norm=(1, 16), label="Perlin W"),     # 4 x 4: soft, large noise (baseline 4)
++    F("perlin_h", 4, NO, INT, norm=(1, 16), label="Perlin H"),
+     F("perlin_octaves", 4, NO, INT, norm=(1, 7)),
+     F("perlin_persistence", 0.5, NO, FLOAT, norm=(0, 1)),
+     F("color_coherence", "LAB", NO, MENU, menu=["None", "HSV", "LAB", "RGB", "Video Input", "Image"]),
+@@ -352,7 +356,7 @@ FIELDS = [
+     # Deforum's API turns this ON whenever the key is missing (deprecation_utils), which it
+     # was in every earlier payload; kept on so existing looks don't shift. Deforum's UI
+     # default (and recommendation for coherence) is off.
+-    F("legacy_colormatch", True, NO, TOGGLE, label="Legacy Colormatch (earlier renders used it)"),
++    F("legacy_colormatch", False, NO, TOGGLE, label="Legacy Colormatch (off: Deforum's current match)"),
+ 
+     # --- Flow & Anti-blur ----------------------------------------------------------
+     F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),
+diff --git a/scripts/tdeforum/snapshots.py b/scripts/tdeforum/snapshots.py
+index abbd6fb..f8c203c 100644
+--- a/scripts/tdeforum/snapshots.py
++++ b/scripts/tdeforum/snapshots.py
+@@ -22,7 +22,8 @@ from . import schema
+ VERSION = 1
+ FOLDER = "snapshots"
+ SKIP_KINDS = (schema.STATUS, schema.PULSE)
+-SKIP_APIS = ("snapshot_name", "snapshot_path")
++# One-shot switches: a snapshot that turned them back on would redo ComfyUI / the sweep every Queue.
++SKIP_APIS = ("snapshot_name", "snapshot_path", "force_preprocess", "sweep_force")
+ 
+ 
+ def folder(cfg):
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 49aafb4..f5e9d19 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -29,6 +29,7 @@ import traceback
+ from . import chop_link
+ from . import snapshots
+ from . import comfy
++from . import inputloop
+ from . import config
+ from . import feed
+ from . import payload
+@@ -62,6 +63,7 @@ FEED_FINALIZE_TIMEOUT_S = 60.0
+ PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+ PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
+ PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
++INPUT_PENDING_KEY = "tdeforum_input_pending"  # root storage: input-loop info waiting for its conform
+ LAST_LOAD_KEY = "tdeforum_last_load"  # root storage: {path, expect} of the render last loaded
+ FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
+ CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
+@@ -217,7 +219,7 @@ def apply_preset(root, force=False):
+         return False
+     if preset is not None:
+         defaults = dict((f.api, f.default) for f in schema.FIELDS)
+-        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id)
++        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id, preset.raws)
+     root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
+     if preset is None:
+         text = "None (restored %d parameters)" % restored
+@@ -243,17 +245,26 @@ def _restore_backup(ui, backup):
+     return restored
+ 
+ 
+-def _lay_values(ui, values, what):
+-    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept)."""
++def _lay_values(ui, values, what, raws=None):
++    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept).
++
++    ``raws`` {MOD api: schedule} goes to <Name>raw (otherwise a preset clears raw, which would
++    beat its base); a raw is left alone when the base is driven (a CHOP link stays in charge)."""
+     backup, changed, kept = {}, 0, []
+-    for api, value in values.items():
++    raws = dict(raws or {})
++    items = list(values.items()) + [(api, None) for api in raws if api not in values]
++    for api, value in items:
+         field = schema.BY_API.get(api)
+         if field is None:
+             log("preset %s: unknown parameter %r skipped" % (what, api))
+             continue
+-        targets = [(field.td_name, _coerce_par(field, value))]
++        targets = [] if value is None else [(field.td_name, _coerce_par(field, value))]
+         if field.kind == schema.MOD:
+-            targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
++            base = getattr(ui.par, field.td_name, None)
++            if base is not None and not _is_constant(base) and api in raws:
++                kept.append(field.raw_td_name)
++            else:
++                targets.append((field.raw_td_name, raws.get(api, "")))   # "" : raw would beat the base
+         for name, new in targets:
+             par = getattr(ui.par, name, None)
+             if par is None:
+@@ -630,6 +641,7 @@ def build(root, cfg):
+     links = read_links(ui, values)
+     show_links(ui, links)
+     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
++    _fit_loop(ui, cfg, values, known)
+     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
+                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
+                                                                 payload.DEFAULT_CHECKPOINT),
+@@ -642,6 +654,26 @@ def build(root, cfg):
+     return values, result
+ 
+ 
++def _fit_loop(ui, cfg, values, known):
++    """Tempo > Fit Loop to Init Video: set Loop Length to the most whole bars the video holds."""
++    if not payload._as_bool(values.get("fit_loop_to_video", False)) or payload.tempo_plan(values) is None:
++        return
++    if not (str(values.get("animation_mode")) == "Video Input" or payload.hybrid_active(values)):
++        return
++    try:
++        frames = _frame_counter(cfg, known)(values.get("video_init_path"))
++    except Exception:
++        frames = None
++    bars = payload.fit_bars(values, frames)
++    if bars and int(float(values.get("loop_bars", 0) or 0)) != bars:
++        log("Fit Loop to Init Video: %d frames hold %d bars; Loop Length %s -> %d"
++            % (frames, bars, values.get("loop_bars"), bars))
++        values["loop_bars"] = bars
++        par = getattr(ui.par, "Loopbars", None)
++        if par is not None:
++            _set_constant(par, bars)
++
++
+ def _expectation(result, cfg=None):
+     """What the finished render will look like on disk / how to loop it (kept in state).
+ 
+@@ -650,22 +682,57 @@ def _expectation(result, cfg=None):
+     tp = result.get("tempo")
+     if not tp:
+         return None
++    x = max(1, int(tp["interp_x"] or 1))
+     expect = {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
+               "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
+-    expect["input"] = _input_expect(result, cfg, 1.0 / max(1, int(tp["interp_x"] or 1)))
++    rendered = int((result.get("plan") or {}).get("max_frames") or tp["max_frames"])
++    if rendered < tp["max_frames"]:
++        # Capped by a shorter init / mask video: the loop is what was rendered, with no seam tail.
++        expect.update(out_loop=rendered * x, overlap_out=0, capped=rendered)
++    expect["input"] = _input_expect(result, cfg, 1.0 / x, tp["render_fps"])
+     return expect
+ 
+ 
+-def _input_expect(result, cfg, rate):
++def _input_expect(result, cfg, rate, fps=30.0):
+     settings = result.get("request", {}).get("deforum_settings", {})
+     init = str(settings.get("video_init_path", "") or "").strip()
+     if not init or cfg is None:
+         return None
+     plan = result.get("plan") or {}
+-    return {"container": init, "share": config.to_share(cfg, init) or init,
++    info = {"container": init, "share": config.to_share(cfg, init) or init,
+             "start": int(plan.get("extract_from_frame") or 0),
+             "stride": int(plan.get("extract_nth_frame") or 1), "rate": float(rate),
+             "size": [settings.get("W"), settings.get("H")]}
++    folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
++    if folder and info["size"][0] and info["size"][1]:
++        info["job"] = inputloop.make_job(info["share"], folder, cfg["cn_feed_dir"], info["size"], info["start"],
++                                         info["stride"], int(plan.get("max_frames") or 0) or 1, fps)
++    return info
++
++
++_INPUT_RUNNING = set()
++
++
++def _start_input_job(info):
++    """Conform the init video for output 3 in the background (no-op when cached / running)."""
++    job = (info or {}).get("job")
++    if not job or job["key"] in _INPUT_RUNNING or inputloop.ready(job):
++        return
++    if not os.path.isfile(job["src"]):
++        log("input loop: %s is not readable from TouchDesigner; output 3 stays empty" % job["src"])
++        return
++    try:
++        os.remove(job["sidecar"])
++    except OSError:
++        pass
++    _INPUT_RUNNING.add(job["key"])
++
++    def work(j):
++        try:
++            inputloop.run_job(j)
++        finally:
++            _INPUT_RUNNING.discard(j["key"])
++    _spawn(work, job)
+ 
+ 
+ def _write_runtime_json(cfg, name, data):
+@@ -1088,8 +1155,9 @@ def _submit_deforum(root, cfg, result, st):
+     _op(root, "deforum").request(config.deforum_url(cfg, "/deforum_api/batches"), "POST",
+                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
+     now = time.time()
+-    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
+-                 "expect": _expectation(result, cfg)})
++    expect = _expectation(result, cfg)
++    _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now, "expect": expect})
++    _start_input_job((expect or {}).get("input"))   # conform output 3 while Deforum renders
+     _set_status(root, "render: submitted")
+     log("render submitted: " + payload.summary(result))
+ 
+@@ -1493,8 +1561,30 @@ def _after_feed(root, cfg, st):
+ 
+ # --------------------------------------------------------------------------- polling
+ 
++def _poll_input(root):
++    """Output 3 waits for its conformed video: load it once the background job has written it."""
++    info = root.fetch(INPUT_PENDING_KEY, None, search=False)
++    job = (info or {}).get("job")
++    if not job:
++        return
++    done = inputloop.read_result(job["sidecar"])
++    if done is None:
++        if job["key"] not in _INPUT_RUNNING:
++            _start_input_job(info)        # e.g. TD was restarted while it ran
++        return
++    root.store(INPUT_PENDING_KEY, None)
++    if done.get("ok"):
++        _load_input(root, _op(root, "ui"), info)
++    else:
++        log("input loop: could not conform %s: %s" % (job["src"], done.get("error")))
++
++
+ def tick(root):
+     """Timer pulse: poll whatever the pipeline is waiting on."""
++    try:
++        _poll_input(root)
++    except Exception as exc:
++        log("input loop: %s" % exc)
+     st = _state(root)
+     current = st.get("state", IDLE)
+     if current == IDLE:
+@@ -1839,12 +1929,14 @@ def _load_movie(root, path, expect=None):
+             reload_ = getattr(player.par, "reloadpulse", None)
+             if reload_ is not None:
+                 reload_.pulse()
+-    _load_input(ui, (expect or {}).get("input"))
++    _load_input(root, ui, (expect or {}).get("input"))
+     root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
+     if expect and expect.get("out_loop"):
+         loop = int(expect["out_loop"])                 # output frames per loop
+         rate = float(expect.get("rate", 1.0))          # file frames per output frame
+         frames = _video_frames(path)
++        if frames and loop * rate > frames:
++            loop = max(1, int(frames / rate))          # never wrap past the end of the file
+         if frames:
+             overlap = int((frames - loop * rate) / rate)
+         else:
+@@ -1858,14 +1950,28 @@ def _load_movie(root, path, expect=None):
+                "" if frames else " (file length unknown, used the plan)"))
+ 
+ 
+-def _load_input(ui, info):
+-    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross)."""
++def _load_input(root, ui, info):
++    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross).
++
++    Plays the conformed copy (inputloop.py: exactly the frames Deforum used, at render size, in a
++    codec TD opens); while that is still being written it waits (tick() fills it in)."""
+     if ui is None:
+         return
++    job = (info or {}).get("job")
+     share = (info or {}).get("share") or ""
++    start, stride = int((info or {}).get("start", 0)), int((info or {}).get("stride", 1))
++    if job:
++        if inputloop.ready(job):
++            share, start, stride = job["out_share"], 0, 1         # frames already picked and sized
++            root.store(INPUT_PENDING_KEY, None)
++        else:
++            _start_input_job(info)
++            root.store(INPUT_PENDING_KEY, info)
++            log("input loop: conforming %s for output 3 (fills in when ready)" % os.path.basename(job["src"]))
++            share = ""
+     if info:
+-        _set_par(ui, "Loopinstart", str(int(info.get("start", 0))))
+-        _set_par(ui, "Loopinstride", str(int(info.get("stride", 1))))
++        _set_par(ui, "Loopinstart", str(start))
++        _set_par(ui, "Loopinstride", str(stride))
+         _set_par(ui, "Loopinrate", "%g" % float(info.get("rate", 1.0)))
+     for key in ("in_head", "in_tail"):
+         player = _inner(ui, key)
+@@ -1878,9 +1984,9 @@ def _load_input(ui, info):
+                 reload_.pulse()
+             except Exception:
+                 pass
+-    if info:
++    if info and share:
+         log("input loop (output 3): %s from frame %d, every %d%s" % (
+-            os.path.basename(share), int(info.get("start", 0)), int(info.get("stride", 1)),
++            os.path.basename(share), start, stride,
+             "" if float(info.get("rate", 1)) == 1 else ", %g render frames per output frame" % info["rate"]))
+ 
+ 
+diff --git a/tests/test_builder.py b/tests/test_builder.py
+index a80c0c6..5b64092 100644
+--- a/tests/test_builder.py
++++ b/tests/test_builder.py
+@@ -302,8 +302,8 @@ class BuilderTest(unittest.TestCase):
+         from tdeforum import presets
+         comp = self.build()
+         self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
+-        self.assertEqual(len(presets.NAMES), 32)
+-        self.assertTrue(any("presets: 31 examples" in line for line in self.log), self.log[-6:])
++        self.assertEqual(len(presets.NAMES), 33)
++        self.assertTrue(any("presets: 32 examples" in line for line in self.log), self.log[-6:])
+ 
+     def test_sweep_preview_and_old_live_sweep_ops_removed(self):
+         comp = self.build()
+@@ -390,7 +390,7 @@ class BuilderTest(unittest.TestCase):
+ 
+     def test_lcm_baseline_bump_applies_once(self):
+         comp = self.build()
+-        self.assertEqual(comp.storage["tdeforum_baseline"], 3)
++        self.assertEqual(comp.storage["tdeforum_baseline"], 4)
+         self.assertEqual(comp.par.Feed2top.val, "/project1/final_out")
+         self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
+         comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index 3e0ad93..0998138 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -223,6 +223,20 @@ class TempoCompTest(ControllerTest.__bases__[0]):
+ 
+     def test_interpolated_file_and_loop_player(self):
+         ui = self.make()
++        try:
++            import cv2
++            import numpy as np
++        except ImportError:
++            self.skipTest("OpenCV not installed")
++        src = self.share + "/td_inputs/comfy_videos/archive/a.mp4"      # the init video (90 frames)
++        os.makedirs(os.path.dirname(src), exist_ok=True)
++        writer = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (64, 36))
++        for i in range(90):
++            writer.write(np.full((36, 64, 3), i * 2, np.uint8))
++        writer.release()
++        inline = mock.patch.object(ctl, "_spawn", side_effect=lambda target, *args: target(*args))
++        inline.start()
++        self.addCleanup(inline.stop)
+         ctl.queue(self.root)
+         self.finish()
+         st = self.root.storage[ctl.STATE_KEY]
+@@ -236,16 +250,21 @@ class TempoCompTest(ControllerTest.__bases__[0]):
+         self.assertEqual(ui.par.Loopoutframes.val, "120")      # 4 beats at 60 fps
+         self.assertEqual(ui.par.Loopoutoverlap.val, "30")      # 15 render frames x2
+         self.assertEqual(ui.par.Loopoutrate.val, "1")
+-        # output 3: the init video, looped the same way (30 fps render on a 60 fps loop)
+-        self.assertTrue(ui.op("in_head").par.file.val.endswith("comfy_videos/archive/a.mp4"))
+-        self.assertEqual(ui.op("in_tail").par.file.val, ui.op("in_head").par.file.val)
++        # output 3: the init video conformed at Queue (75 render frames at 1024x576, TD-readable
++        # codec), looped the same way (30 fps render on a 60 fps loop)
++        conformed = ui.op("in_head").par.file.val
++        self.assertIn("/td_masks/feeds/input_loop_", conformed)
++        self.assertEqual(ui.op("in_tail").par.file.val, conformed)
++        capture = cv2.VideoCapture(conformed)
++        self.assertEqual((int(capture.get(7)), int(capture.get(3)), int(capture.get(4))), (75, 1024, 576))
++        capture.release()
+         self.assertEqual((ui.par.Loopinstart.val, ui.par.Loopinstride.val, ui.par.Loopinrate.val),
+                          ("0", "1", "0.5"))
+         # Reload Render + Input: the same files again, even after they were cleared
+         ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
+         self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
+         self.assertEqual(ui.op("loop_head").par.file.val, path)
+-        self.assertTrue(ui.op("in_head").par.file.val.endswith("a.mp4"))
++        self.assertEqual(ui.op("in_head").par.file.val, conformed)
+ 
+     def test_snapshot_round_trip(self):
+         ui = self.make()
+diff --git a/tests/test_outputs.py b/tests/test_outputs.py
+new file mode 100644
+index 0000000..daec1e7
+--- /dev/null
++++ b/tests/test_outputs.py
+@@ -0,0 +1,81 @@
++"""Loop length when a render is capped, Fit Loop to Init Video, output 3 filled in by tick()."""
++
++import os
++import shutil
++import tempfile
++import unittest
++from unittest import mock
++
++from _fakes import make_network
++from tdeforum import config, payload, td_controller as ctl
++
++from test_controller import TEMPO_UI
++
++
++class LoopCapTest(unittest.TestCase):
++    def values(self, **kw):
++        v = dict(TEMPO_UI, bpm=150.0, loop_bars=16, render_fps="20", seamless_loop=False,
++                 animation_mode="Video Input", mod1_active=False)
++        v.update(kw)
++        return v
++
++    def test_capped_render_loops_what_was_rendered(self):
++        result = payload.build_request(self.values(), frame_counter=lambda path: 380)
++        self.assertEqual(result["plan"]["max_frames"], 380)
++        expect = ctl._expectation(result)
++        self.assertEqual((expect["out_loop"], expect["overlap_out"]), (380 * 3, 0))   # not 1536
++
++    def test_fit_bars(self):
++        # 150 bpm at 20 fps: 8 frames a beat, 32 a bar; 380 frames hold 11 bars
++        self.assertEqual(payload.fit_bars(self.values(), 380), 11)
++        # seamless with a 2-beat overlap needs 16 more frames: still 11 (352 + 16 <= 380)
++        self.assertEqual(payload.fit_bars(self.values(seamless_loop=True, loop_overlap_beats=2.0), 380), 11)
++        self.assertEqual(payload.fit_bars(self.values(seamless_loop=True, loop_overlap_beats=2.0), 360), 10)
++        self.assertIsNone(payload.fit_bars(self.values(video_frame_mode="stride"), 380))
++        self.assertEqual(payload.fit_bars(self.values(), 10), 1)
++
++
++class InputPendingTest(unittest.TestCase):
++    def setUp(self):
++        self.share = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, self.share)
++        self.root = make_network(dict(TEMPO_UI), comp=True)
++        self.ui = self.root.op("deforum")
++
++    def test_output_three_fills_in_when_the_conform_finishes(self):
++        try:
++            import cv2
++            import numpy as np
++        except ImportError:
++            self.skipTest("OpenCV not installed")
++        src = self.share + "/in.mp4"
++        writer = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 18))
++        for i in range(20):
++            writer.write(np.full((18, 32, 3), i * 12, np.uint8))
++        writer.release()
++        from tdeforum import inputloop
++        job = inputloop.make_job(src, self.share + "/feeds", "/opt/a1111/td_masks/feeds", (64, 36), 4, 2, 6, 20)
++        info = {"share": src, "start": 4, "stride": 2, "rate": 1.0, "job": job}
++        queued = []
++        with mock.patch.object(ctl, "_spawn", side_effect=lambda target, *args: queued.append((target, args))):
++            ctl._load_input(self.root, self.ui, info)
++            self.assertEqual(self.ui.op("in_head").par.file.val, "")          # still conforming
++            target, args = queued[0]
++            target(*args)                                                      # the thread finishes
++            ctl._poll_input(self.root)
++        self.assertEqual(self.ui.op("in_head").par.file.val, job["out_share"])
++        self.assertEqual((self.ui.par.Loopinstart.val, self.ui.par.Loopinstride.val), ("0", "1"))
++        capture = cv2.VideoCapture(job["out_share"])
++        self.assertEqual(int(capture.get(7)), 6)                               # frames 4, 6, ... 14
++        means = []
++        for _ in range(2):
++            ok, frame = capture.read()
++            means.append(float(frame.mean()))
++        self.assertEqual(min((36, 48, 60), key=lambda v: abs(v - means[0])), 48)    # source frame 4
++        self.assertAlmostEqual(means[1] - means[0], 24, delta=8)                     # stride 2
++        capture.release()
++        self.assertIsNone(self.root.fetch(ctl.INPUT_PENDING_KEY))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index 594ead3..e84f6f8 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -79,7 +79,7 @@ class PayloadTest(unittest.TestCase):
+         self.assertEqual(s["zoom"], "0:(1.05)")
+         self.assertEqual(s["translation_z"], "0:(0), 299:(6)")
+         self.assertEqual(s["cn_1_weight"], "0:(0.8)")
+-        self.assertEqual(s["cn_1_guidance_end"], "0:(1.0)")
++        self.assertEqual(s["cn_1_guidance_end"], "0:(0.8)")       # baseline 4
+         self.assertEqual(s["seed"], -1)
+         self.assertIs(s["cn_1_enabled"], True)
+         self.assertEqual(s["cn_1_resize_mode"], "Just Resize")
+@@ -100,7 +100,7 @@ class PayloadTest(unittest.TestCase):
+                 self.assertIn(key, s)
+                 self.assertIsNotNone(s[key], key)
+             self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
+-            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(1.0)")
++            self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(0.8)")
+ 
+     def test_td_only_fields_not_sent(self):
+         s = self.build()["request"]["deforum_settings"]
+diff --git a/tests/test_presets.py b/tests/test_presets.py
+index 2852393..9dcafa3 100644
+--- a/tests/test_presets.py
++++ b/tests/test_presets.py
+@@ -34,24 +34,35 @@ class PresetDataTest(unittest.TestCase):
+         self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
+         self.assertEqual(s["extract_nth_frame"], 1)
+ 
+-    def test_thirtyone_examples_good_and_extreme_per_mode(self):
+-        self.assertEqual(len(presets.PRESETS), 31)
++    def test_pulse_composite_writes_its_raw_saws_and_none_clears_them(self):
++        pulse = presets.BY_ID["hybrid_ballet_pulse"]
++        self.assertEqual(sorted(pulse.raws), ["fov_schedule", "strength_schedule", "translation_z"])
++        for api, sched in pulse.raws.items():
++            self.assertNotIn(",", sched)                       # Deforum splits schedules on commas
++            body = sched.split(":", 1)[1].strip()[1:-1]
++            values = [eval(body, {"t": t}) for t in range(12)]
++            self.assertAlmostEqual(values[0], values[10])        # a 10-frame saw
++            self.assertGreater(values[0], values[9])
++
++    def test_thirtytwo_examples_good_and_extreme_per_mode(self):
++        self.assertEqual(len(presets.PRESETS), 32)
+ 
+     def test_four_hybrid_presets_use_the_video_and_the_sweep(self):
+         hybrids = [p for p in presets.PRESETS if p.id.startswith("hybrid_")]
+-        self.assertEqual(len(hybrids), 4)
++        self.assertEqual(len(hybrids), 5)
+         defaults = dict((f.api, f.default) for f in schema.FIELDS)
+         for p in hybrids:
+             self.assertIn(p.mode, ("2D", "3D"))
+             self.assertNotEqual(p.values["hybrid_motion"], "None", p.id)
+             self.assertTrue(p.values["sweep_enabled"], p.id)
+-            self.assertEqual(p.values["feed_1_mode"], "sweep", p.id)
++            # the sweep guides ControlNet unit 1, or is the mask while unit 1 records a TOP
++            self.assertTrue(p.values["feed_1_mode"] == "sweep" or p.values["sweep_as_mask"], p.id)
+             values = _comp_values(**presets.resolve(p, defaults))
+             self.assertIsNone(sweep.check(values), p.id)
+             result = payload.build_request(values, {"0": "x"}, MODELS)
+             s = result["request"]["deforum_settings"]
+             self.assertIs(s["hybrid_generate_inputframes"], True, p.id)
+-            self.assertEqual(s["diffusion_cadence"], 2, p.id)
++            self.assertEqual(s["diffusion_cadence"], 8 if p.id == "hybrid_ballet_pulse" else 2, p.id)
+         self.assertTrue(presets.BY_ID["hybrid_ghost_peel"].values["sweep_as_mask"])
+         for mode in ("3D", "2D", "Video Input"):
+             levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
+@@ -187,6 +198,18 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
+     def pick(self, name):
+         self.ui.par.Preset.val = name
+ 
++    def test_preset_raws_are_set_driven_bases_keep_theirs_and_none_clears_them(self):
++        ui = self.make()
++        ui.par.Strengthschedule.mode, ui.par.Strengthschedule.expr = ParMode.EXPRESSION, "op('wave1')['wave1']"
++        self.pick("hybrid_ballet_pulse")
++        self.assertTrue(ctl.apply_preset(self.root))
++        self.assertEqual(ui.par.Translationzraw.val, "0:(1.3 - 0.0620689*(t%10))")
++        self.assertEqual(ui.par.Strengthscheduleraw.val, "")         # its base is a CHOP link: left alone
++        self.assertEqual(ui.par.Feed1mode.val, "top_loop")
++        self.pick("none")
++        ctl.apply_preset(self.root)
++        self.assertEqual((ui.par.Translationzraw.val, ui.par.Fovscheduleraw.val), ("", ""))
++
+     def test_nothing_happens_on_none(self):
+         ui = self.make()
+         self.assertFalse(ctl.apply_preset(self.root))
+-- 
+2.43.0
+

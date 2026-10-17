@@ -1,0 +1,129 @@
+From eee3e18f8b4a89f58cc663b183b71910ee9f1d24 Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 06:12:30 +0000
+Subject: [PATCH] Fit Perlin cells and octaves to the frame size: Deforum
+ crashes when they do not divide it
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ docs/deforum_parameters.md   |  2 +-
+ scripts/tdeforum/__init__.py |  2 +-
+ scripts/tdeforum/payload.py  | 41 ++++++++++++++++++++++++++++++++++++
+ tests/test_payload.py        | 15 +++++++++++++
+ 4 files changed, 58 insertions(+), 2 deletions(-)
+
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index a9ba757..435ab89 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -163,7 +163,7 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
+ | `Noisetype` | Noise Type | perlin | Shape of the added noise: Perlin (smooth, cloudy) or Uniform (fine grain). |
+ | `Perlinw` | Perlin W | 4 | Perlin noise cells across the width; lower = bigger blobs. |
+ | `Perlinh` | Perlin H | 4 | Perlin noise cells down the height. |
+-| `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. |
++| `Perlinoctaves` | Perlin Octaves | 4 | Layers of Perlin detail; more = finer texture on top of the blobs. Height / (Perlin W x 2^(octaves-1)) and Width / (Perlin H x 2^(octaves-1)) must be whole numbers, or Deforum crashes; the payload lowers octaves (then cell counts) to fit and warns. |
+ | `Perlinpersistence` | Perlin Persistence | 0.5 | How strong each finer Perlin octave is relative to the previous one. |
+ | `Colorcoherence` | Color Coherence | LAB | Keeps colours from drifting by matching each frame to a reference: LAB/HSV/RGB (first frame), Video Input (the video frame), Image, or None. |
+ | `Colorforcegrayscale` | Color Force Grayscale | Off | Converts every frame to greyscale before diffusing. |
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 6829e0b..64f2977 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -28,7 +28,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.12.1"
++__version__ = "0.12.2"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "inputloop", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/payload.py b/scripts/tdeforum/payload.py
+index 903ad87..8a78e01 100644
+--- a/scripts/tdeforum/payload.py
++++ b/scripts/tdeforum/payload.py
+@@ -418,6 +418,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
+ 
+     _check_sampling(values, settings, options, ranges, mode, warnings)
+     _check_depth(settings, warnings)
++    _check_perlin(settings, warnings)
+     if hybrid:
+         # Deforum reads the video's frames from <outdir>/hybridframes; extract them every run.
+         settings["hybrid_generate_inputframes"] = True
+@@ -505,6 +506,46 @@ def _check_depth(settings, warnings):
+                         "no attribute 'target'); sent %s instead" % (algo, DEPTH_FALLBACK))
+ 
+ 
++def perlin_fits(h, w, perlin_w, perlin_h, octaves):
++    """Deforum's rand_perlin_2d_octaves builds each octave on a (H, W) grid of
++    (perlin_w * f, perlin_h * f) cells, f = 1, 2, 4 ... 2**(octaves-1); it crashes ("size of tensor a
++    (576) must match ... (512)") unless every grid divides the image exactly. Note the pairing
++    in Deforum's code: Perlin W divides the HEIGHT and Perlin H the WIDTH."""
++    f = 2 ** (max(1, int(octaves)) - 1)
++    return int(h) % (int(perlin_w) * f) == 0 and int(w) % (int(perlin_h) * f) == 0
++
++
++def _fit_perlin(h, w, perlin_w, perlin_h, octaves):
++    """The closest (perlin_w, perlin_h, octaves) that fits: fewer octaves first, then smaller cells."""
++    for octs in range(int(octaves), 0, -1):
++        if perlin_fits(h, w, perlin_w, perlin_h, octs):
++            return perlin_w, perlin_h, octs
++    pw = max(d for d in range(1, int(perlin_w) + 1) if int(h) % d == 0)
++    ph = max(d for d in range(1, int(perlin_h) + 1) if int(w) % d == 0)
++    for octs in range(int(octaves), 0, -1):
++        if perlin_fits(h, w, pw, ph, octs):
++            return pw, ph, octs
++    return pw, ph, 1
++
++
++def _check_perlin(settings, warnings):
++    if settings.get("noise_type", "perlin") != "perlin":
++        return
++    try:
++        h, w = int(settings.get("H", 576)), int(settings.get("W", 1024))
++        pw, ph, octs = (int(settings.get("perlin_w", 8)), int(settings.get("perlin_h", 8)),
++                        int(settings.get("perlin_octaves", 4)))
++    except (TypeError, ValueError):
++        return
++    if pw < 1 or ph < 1 or perlin_fits(h, w, pw, ph, octs):
++        return
++    fixed = _fit_perlin(h, w, pw, ph, octs)
++    settings["perlin_w"], settings["perlin_h"], settings["perlin_octaves"] = fixed
++    warnings.append("Perlin %d x %d with %d octaves does not divide %dx%d (Deforum would crash: 'size of tensor "
++                    "a must match'); sent %d x %d with %d octaves. Rule: Height / (Perlin W x 2^(octaves-1)) and "
++                    "Width / (Perlin H x 2^(octaves-1)) must be whole" % ((pw, ph, octs, w, h) + fixed))
++
++
+ def _check_sampling(values, settings, options, ranges, mode, warnings):
+     """Settings that quietly ruin renders with LCM checkpoints (and Video Input)."""
+     sampler = _text(settings.get("sampler", ""))
+diff --git a/tests/test_payload.py b/tests/test_payload.py
+index bb8bf1d..d207146 100644
+--- a/tests/test_payload.py
++++ b/tests/test_payload.py
+@@ -102,6 +102,21 @@ class PayloadTest(unittest.TestCase):
+             self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
+             self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(0.8)")
+ 
++    def test_perlin_that_does_not_divide_the_frame_is_fixed(self):
++        # the gvispc1 crash: 1024x576, perlin 8 x 8, 6 octaves -> 8 * 32 = 256 does not divide 576
++        self.assertFalse(payload.perlin_fits(576, 1024, 8, 8, 6))
++        result = payload.build_request(_comp_values(perlin_w=8, perlin_h=8, perlin_octaves=6), {"0": "x"}, MODELS)
++        s = result["request"]["deforum_settings"]
++        self.assertEqual((s["perlin_w"], s["perlin_h"], s["perlin_octaves"]), (8, 8, 4))
++        self.assertTrue(any("Perlin 8 x 8 with 6 octaves" in w for w in result["warnings"]))
++        self.assertTrue(payload.perlin_fits(576, 1024, 4, 4, 3))           # the reference pass
++        ok = payload.build_request(_comp_values(perlin_w=4, perlin_h=4, perlin_octaves=3), {"0": "x"}, MODELS)
++        self.assertFalse(any("Perlin" in w for w in ok["warnings"]))
++        odd = payload._fit_perlin(600, 1000, 7, 3, 2)                      # 7 does not divide 600
++        self.assertTrue(payload.perlin_fits(600, 1000, *odd))
++        for w, h in ((1024, 576), (768, 768), (512, 896)):                  # schema defaults always fit
++            self.assertTrue(payload.perlin_fits(h, w, 4, 4, schema.BY_API["perlin_octaves"].default))
++
+     def test_zoe_depth_is_sent_as_midas_with_a_warning(self):
+         for algo in ("Zoe", "Zoe+AdaBins (old)"):
+             result = payload.build_request(_comp_values(depth_algorithm=algo, animation_mode="3D"), {"0": "x"}, MODELS)
+-- 
+2.43.0
+

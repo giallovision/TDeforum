@@ -1,0 +1,182 @@
+From cfd62173f2ab1a136d8e8af7b93670559c1af38c Mon Sep 17 00:00:00 2001
+From: Joseph <joseph@giallovision.com>
+Date: Sat, 17 Oct 2026 07:25:24 +0000
+Subject: [PATCH] Reload Render + Input + Sweep: the reload pulse also reloads
+ the sweep video the render used (output 2)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BhiEzmwUbwDK67k3BY9b4Y
+---
+ README.md                         |  2 +-
+ docs/deforum_parameters.md        |  4 ++--
+ scripts/tdeforum/__init__.py      |  2 +-
+ scripts/tdeforum/schema.py        |  2 +-
+ scripts/tdeforum/td_controller.py | 31 +++++++++++++++++++++++++++----
+ tests/test_controller.py          |  7 +++++++
+ tests/test_outputs.py             | 12 ++++++++++++
+ 7 files changed, 51 insertions(+), 9 deletions(-)
+
+diff --git a/README.md b/README.md
+index bb03356..102c115 100644
+--- a/README.md
++++ b/README.md
+@@ -251,7 +251,7 @@ sudo mount -a && make down && make up
+ | 2 `out_sweep` | the last Sweep Depth mask video |
+ | 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit). When the init video is not visible on the share (`td_inputs/comfy_videos` is a symlink Samba does not follow), it is downloaded from ComfyUI's `/view` first; failing that, output 3 is made from the frames Deforum extracted (`<render>/inputframes`) once the render is done |
+ 
+-*Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
++*Pipeline › Reload Render + Input + Sweep* loads the last render, its input video and the Sweep Depth video that render used again (outputs 1, 3 and 2); with nothing loaded yet it takes the newest render, plans the loop from the current settings and shows the newest sweep.
+ 
+ ### Snapshots
+ 
+diff --git a/docs/deforum_parameters.md b/docs/deforum_parameters.md
+index 435ab89..0051399 100644
+--- a/docs/deforum_parameters.md
++++ b/docs/deforum_parameters.md
+@@ -1,6 +1,6 @@
+ # deforum COMP: parameter reference
+ 
+-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
++Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.3). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+ 
+ Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+ 
+@@ -287,7 +287,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
+ | `Loopoffset` | Loop Player Offset (frames) | 0 | Shifts the loop player's start against the timeline. |
+ | `Feedloopstart` | Feed: loop start frame (0 = timeline start) | 0 | Timeline frame where TOP feeds and beat_clock start counting (0 = timeline start). |
+ | `Feedmethod` | Feed: recording method | addframe | Add Frame: the recorder steps the timeline frame by frame. Continuous: records every cooked frame. |
+-| `Reloadoutputs` | Reload Render + Input (outputs 1 and 3) | (button) | Loads the last render (output 1) and its input video (output 3) again; with nothing loaded yet, the newest render with the current settings' loop plan. |
++| `Reloadoutputs` | Reload Render + Input + Sweep (outputs 1-3) | (button) | Loads the last render (output 1), its input video (output 3) and the sweep video it used (output 2) again; with nothing loaded yet, the newest render with the current settings' loop plan and the newest sweep. |
+ | `Loopinstart` | Input loop: first video frame | (read-only) | Read-only: first init-video frame the render used (output 3 starts there). |
+ | `Loopinstride` | Input loop: video frames per render frame | (read-only) | Read-only: init-video frames per render frame (more than 1 with Video Frame Mode = Stride). |
+ | `Loopinrate` | Input loop: render frames per output frame | (read-only) | Read-only: render frames per output frame (0.5 when the render is interpolated x2); keeps output 3 in step with output 1. |
+diff --git a/scripts/tdeforum/__init__.py b/scripts/tdeforum/__init__.py
+index 4b9c66f..85fbda5 100644
+--- a/scripts/tdeforum/__init__.py
++++ b/scripts/tdeforum/__init__.py
+@@ -28,7 +28,7 @@ import this package and forward their callbacks to ``td_controller``.
+ import importlib
+ import sys
+ 
+-__version__ = "0.12.3"
++__version__ = "0.12.4"
+ 
+ # Leaves first, so dependants pick up reloaded modules.
+ _SUBMODULES = ("config", "schedules", "tempo", "modulation", "chop_link", "snapshots", "inputloop", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
+diff --git a/scripts/tdeforum/schema.py b/scripts/tdeforum/schema.py
+index 9d0d367..e32fa61 100644
+--- a/scripts/tdeforum/schema.py
++++ b/scripts/tdeforum/schema.py
+@@ -437,7 +437,7 @@ FIELDS = [
+     F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
+       label="Feed: recording method", target=None),
+     # Outputs: 1 = render loop, 2 = sweep, 3 = the input video looped the same way as the render
+-    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input (outputs 1 and 3)", target=None),
++    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input + Sweep (outputs 1-3)", target=None),
+     F("loop_in_start", "0", PL, STATUS, label="Input loop: first video frame", target=None),
+     F("loop_in_stride", "1", PL, STATUS, label="Input loop: video frames per render frame", target=None),
+     F("loop_in_rate", "1", PL, STATUS, label="Input loop: render frames per output frame", target=None),
+diff --git a/scripts/tdeforum/td_controller.py b/scripts/tdeforum/td_controller.py
+index 296240e..50cbd51 100644
+--- a/scripts/tdeforum/td_controller.py
++++ b/scripts/tdeforum/td_controller.py
+@@ -690,9 +690,25 @@ def _expectation(result, cfg=None):
+         # Capped by a shorter init / mask video: the loop is what was rendered, with no seam tail.
+         expect.update(out_loop=rendered * x, overlap_out=0, capped=rendered)
+     expect["input"] = _input_expect(result, cfg, 1.0 / x, tp["render_fps"])
++    expect["sweep"] = _sweep_used(result, cfg)
+     return expect
+ 
+ 
++def _sweep_used(result, cfg):
++    """Share path of the Sweep Depth video this render uses (mask or a ControlNet guide), or None."""
++    if cfg is None:
++        return None
++    settings = result.get("request", {}).get("deforum_settings", {})
++    keys = ["video_mask_path"] + ["cn_%d_vid_path" % n for n in range(1, payload.CN_UNITS + 1)]
++    for key in keys:
++        path = str(settings.get(key, "") or "")
++        if os.path.basename(path).startswith("cn_sweep_") and (
++                key == "video_mask_path" and settings.get("use_mask_video")
++                or key != "video_mask_path" and settings.get(key.replace("_vid_path", "_enabled"))):
++            return config.to_share(cfg, path) or None
++    return None
++
++
+ def _input_expect(result, cfg, rate, fps=30.0):
+     settings = result.get("request", {}).get("deforum_settings", {})
+     init = str(settings.get("video_init_path", "") or "").strip()
+@@ -2022,8 +2038,9 @@ def _load_input(root, ui, info, render_path=None):
+ 
+ 
+ def reload_outputs(root):
+-    """Pipeline > Reload Render + Input: load the last render and its input video again
+-    (outputs 1 and 3); without one, the newest render with the current settings' plan."""
++    """Pipeline > Reload Render + Input + Sweep: load the last render, its input video and its
++    Sweep Depth video again (outputs 1, 3 and 2); without a render loaded yet, the newest render
++    with the current settings' plan. The sweep falls back to the newest sweep video."""
+     stored = root.fetch(LAST_LOAD_KEY, None, search=False) or {}
+     path, expect = stored.get("path"), stored.get("expect")
+     if not path or not os.path.isfile(path):
+@@ -2041,8 +2058,14 @@ def reload_outputs(root):
+             log("reload: could not plan the loop from the current settings (%s)" % exc)
+             expect = None
+     _load_movie(root, path, expect)
+-    log("reloaded render %s%s" % (os.path.basename(path),
+-                                  " + input video" if (expect or {}).get("input") else " (no input video)"))
++    sweep_path = (expect or {}).get("sweep")
++    if sweep_path and os.path.isfile(sweep_path):
++        _show_sweep(_op(root, "ui"), sweep_path)
++    else:
++        sweep_path = show_latest_sweep(root, quiet=True)
++    log("reloaded render %s%s%s" % (
++        os.path.basename(path), " + input video" if (expect or {}).get("input") else " (no input video)",
++        " + sweep %s" % os.path.basename(sweep_path) if sweep_path else " (no sweep video)"))
+     return path
+ 
+ 
+diff --git a/tests/test_controller.py b/tests/test_controller.py
+index 0998138..b68746c 100644
+--- a/tests/test_controller.py
++++ b/tests/test_controller.py
+@@ -262,7 +262,14 @@ class TempoCompTest(ControllerTest.__bases__[0]):
+                          ("0", "1", "0.5"))
+         # Reload Render + Input: the same files again, even after they were cleared
+         ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
++        sweep_file = self.share + "/td_masks/feeds/cn_sweep_abc.mp4"         # the sweep this render used
++        os.makedirs(os.path.dirname(sweep_file), exist_ok=True)
++        open(sweep_file, "wb").close()
++        stored = self.root.storage[ctl.LAST_LOAD_KEY]
++        stored["expect"]["sweep"] = sweep_file
++        ui.op("sweep_preview").par.file.val = ""
+         self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
++        self.assertEqual(ui.op("sweep_preview").par.file.val, sweep_file)
+         self.assertEqual(ui.op("loop_head").par.file.val, path)
+         self.assertEqual(ui.op("in_head").par.file.val, conformed)
+ 
+diff --git a/tests/test_outputs.py b/tests/test_outputs.py
+index 72ad937..9b034da 100644
+--- a/tests/test_outputs.py
++++ b/tests/test_outputs.py
+@@ -25,6 +25,18 @@ class LoopCapTest(unittest.TestCase):
+         expect = ctl._expectation(result)
+         self.assertEqual((expect["out_loop"], expect["overlap_out"]), (380 * 3, 0))   # not 1536
+ 
++    def test_the_sweep_a_render_used_is_remembered_for_reload(self):
++        cfg = config.load()
++        mask = "/opt/a1111/td_masks/feeds/cn_sweep_e16888def3.mp4"
++        result = {"request": {"deforum_settings": {"use_mask_video": True, "video_mask_path": mask,
++                                                   "cn_1_enabled": True, "cn_1_vid_path": "/x/cn1_feed.mp4"}}}
++        self.assertTrue(ctl._sweep_used(result, cfg).endswith("td_masks/feeds/cn_sweep_e16888def3.mp4"))
++        guide = {"request": {"deforum_settings": {"use_mask_video": False, "video_mask_path": mask,
++                                                  "cn_2_enabled": True, "cn_2_vid_path": mask}}}
++        self.assertTrue(ctl._sweep_used(guide, cfg).endswith("cn_sweep_e16888def3.mp4"))
++        off = {"request": {"deforum_settings": {"use_mask_video": False, "video_mask_path": mask}}}
++        self.assertIsNone(ctl._sweep_used(off, cfg))
++
+     def test_fit_bars(self):
+         # 150 bpm at 20 fps: 8 frames a beat, 32 a bar; 380 frames hold 11 bars
+         self.assertEqual(payload.fit_bars(self.values(), 380), 11)
+-- 
+2.43.0
+
