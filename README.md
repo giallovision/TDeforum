@@ -186,7 +186,7 @@ The four **Hybrid** examples run Sweep Depth on the same video that drives the m
 
 ### Prompt presets
 
-*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and switches *Prompt Source* to the sequence. The rows it replaced come back when you pick **None**. The Negative Prompt (Globals) still applies.
+*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and changes nothing else: while a preset is picked it is used whatever *Prompt Source* says (also with a manual length). The rows it replaced, and your prompt.json if that is your source, come back when you pick **None**. The Negative Prompt (Globals) still applies.
 
 | id | name | prompt |
 |---|---|---|

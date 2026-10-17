@@ -356,7 +356,10 @@ def ui_watched():
 
 
 def apply_prompt_preset(root):
-    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back)."""
+    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back).
+
+    Changes nothing else on the COMP: while a preset is picked the payload uses prompt_seq
+    whatever Prompt Source says, so prompt.json users get the preset without a mode switch."""
     ui = _op(root, "ui")
     menu = getattr(ui.par, "Promptpreset", None) if ui is not None else None
     table = _inner(ui, "prompt_seq")
@@ -385,11 +388,10 @@ def apply_prompt_preset(root):
     if preset is None:
         log("prompt preset None: your prompt_seq rows are back")
         return True
+    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
     source = getattr(ui.par, "Promptsource", None)
     if source is not None and str(source.eval()) != "sequence":
-        _set_constant(source, "sequence")
-        log("Prompt Source switched to the prompt_seq sequence")
-    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
+        log("  (used instead of prompt.json while a Prompt Preset is picked; Prompt Source is unchanged)")
     return True
 
 

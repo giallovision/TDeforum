@@ -285,7 +285,13 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
         self.assertTrue(ctl.apply_prompt_preset(self.root))
         self.assertEqual(table.rows[0], ["beat", "prompt", "xfade"])
         self.assertIn("cosmic eye", table.rows[1][1])
-        self.assertEqual(ui.par.Promptsource.val, "sequence")
+        self.assertEqual(ui.par.Promptsource.val, "json", "picking a prompt changes nothing else")
+        values = ctl.read_ui(ui)
+        sent = payload.build_request(values, {"0": "from json"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
+        self.assertIn("cosmic eye", sent["request"]["deforum_settings"]["prompts"]["0"])
+        manual = payload.build_request(dict(values, length_source="manual"), {"0": "from json"}, MODELS,
+                                       prompt_rows=ctl.read_prompt_rows(ui))
+        self.assertIn("cosmic eye", manual["request"]["deforum_settings"]["prompts"]["0"])
         ui.par.Promptpreset.val = "neural_bloom"
         ctl.apply_prompt_preset(self.root)
         self.assertIn("neural network", table.rows[1][1])
@@ -293,6 +299,9 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
         ctl.apply_prompt_preset(self.root)
         self.assertEqual(table.rows, [["beat", "prompt", "xfade"], ["0", "gold", ""]])
         values = ctl.read_ui(ui)
+        prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
+        self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "x")   # json again
+        values["prompt_source"] = "sequence"
         prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
         self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "gold")
 

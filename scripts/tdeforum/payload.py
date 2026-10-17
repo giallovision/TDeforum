@@ -427,11 +427,18 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             _check_cn_guide(values, unit, settings, total, frame_counter, warnings)
 
     # --- prompts ------------------------------------------------------------------------
+    # A Prompt Preset (Prompts page) wins over Prompt Source: picking one changes the prompt and
+    # nothing else, so it is used whatever the source and whether or not the length is tempo-based.
     sequence = None
-    if tp and prompt_rows and _text(values.get("prompt_source", "sequence")) == "sequence":
-        sequence, prompt_warnings = prompt_seq.compile_sequence(
-            prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
-        warnings.extend(prompt_warnings)
+    preset_on = _text(values.get("prompt_preset", "none")) not in ("", "none")
+    if prompt_rows and (preset_on or _text(values.get("prompt_source", "sequence")) == "sequence"):
+        if tp:
+            sequence, prompt_warnings = prompt_seq.compile_sequence(
+                prompt_rows, tp, _as_number(values.get("prompt_xfade_beats", 1.0), float))
+            warnings.extend(prompt_warnings)
+        elif preset_on:
+            first = [r for r in prompt_rows[1:] if len(r) > 1 and str(r[1]).strip()]
+            sequence = {"0": str(first[0][1]).strip()} if first else None
     settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
 
     # --- output: fps / interpolation, and what the TD side relies on -----------------------

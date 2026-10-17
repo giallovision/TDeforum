@@ -1,6 +1,6 @@
 # deforum COMP: parameter reference
 
-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.2). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
 Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
@@ -83,8 +83,8 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 
 | TD name | Label | Default | What it does |
 |---|---|---|---|
-| `Promptsource` | Prompt Source | sequence | Sequence: prompts from the beat-indexed prompt_seq table inside the COMP. prompt.json: frame-keyed prompts from scripts/prompt.json. |
-| `Promptpreset` | Prompt Preset (writes prompt_seq) | none | Writes one of ten visionary prompts into prompt_seq and switches Prompt Source to it; None restores your rows. |
+| `Promptsource` | Prompt Source | sequence | Sequence: prompts from the beat-indexed prompt_seq table inside the COMP. prompt.json: frame-keyed prompts from scripts/prompt.json. A picked Prompt Preset overrides either. |
+| `Promptpreset` | Prompt Preset (writes prompt_seq) | none | Writes one of ten visionary prompts into prompt_seq and changes nothing else; while one is picked it is the prompt whatever Prompt Source says. None restores your rows (and prompt.json, if that is your source). |
 | `Promptedit` | Edit prompt_seq (opens deforum/prompt_seq) | (button) | Opens deforum/prompt_seq in a floating editor. |
 | `Promptxfadebeats` | Default Crossfade (beats) | 1.0 | Default crossfade length between prompt_seq rows when a row has no xfade of its own. |
 
