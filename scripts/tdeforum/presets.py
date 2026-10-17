@@ -76,6 +76,7 @@ _VIDEO = {"animation_mode": "Video Input", "seamless_loop": False, "diffusion_ca
 # Sweep Depth: the depth video's band is recorded as ControlNet unit 1's guide (QR Monster).
 _SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "DepthAnythingV2Preprocessor",
           "sweep_softness": 6, "sweep_fill": "white", "sweep_shape": "ramp", "sweep_direction": "forward",
+          "sweep_trail": 6, "sweep_smooth": 0.3,
           "feed_1_mode": "sweep", "cn_1_enabled": True, "cn_1_module": "none",
           "cn_1_model": "ctrl_v1p_qr_monster_v2", "cn_1_guidance_start": 0.0, "cn_1_guidance_end": 1.0,
           "cn_1_control_mode": "Balanced"}
@@ -157,6 +158,7 @@ PRESETS = [
            _merge(_VIDEO, _SWEEP, {"strength_schedule": 0.4, "noise_schedule": 0.08, "color_coherence": "None",
                                    "sweep_mode": "min", "sweep_cycles": 4.0, "sweep_shape": "pingpong",
                                    "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 10,
+                                   "sweep_trail": 14,
                                    "cn_1_weight": 1.3, "cn_1_control_mode": "ControlNet is more important"})),
 ]
 

@@ -49,7 +49,8 @@ This document outlines the macro-architecture for our generative visual performa
 - [x] Example Preset drop-down: 15 good / extreme configurations (3D, 2D, Video Input) laid over the COMP on bake, reversible.
 - [x] ControlNet guides from TOPs (`final_out`): timeline-synced recording to a Deforum-readable video/still, Units 1-3 on the COMP.
 
-- [x] Sweep Depth (Video Input): ComfyUI depth video -> sweeping grey band -> ControlNet guide / mask video, plus three examples in the preset list. Unverified in TouchDesigner: Script TOP numpy calls, Movie File In index/preread.
+- [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
+- [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).
@@ -60,7 +61,6 @@ This document outlines the macro-architecture for our generative visual performa
 - [ ] ControlNet Units 4-5 pages (payload already supports them).
 - [ ] Verify the TOP feed recording in TouchDesigner; ComfyUI preprocessing of TOP feeds.
 - [ ] OSC Architecture: send the tempo/loop state and Mod Matrix values to Resolume's OSC routing addresses.
-- [ ] Beat clock CHOP inside the `deforum` COMP (beat / bar phase at the COMP's BPM) for driving live TD visuals in sync with the renders.
 - [ ] Parseq-style per-parameter keyframe editor (Animation COMP → Mod CHOP) for hand-drawn curves.
 - [ ] Route Deforum image sequence outputs back into TouchDesigner for real-time playback monitoring (finished `.mp4` already auto-loads; per-frame preview still open).
 - [ ] Decide on the `record1` branch: the crossfade morph never reaches `wave_generator`. To use it now, feed it (channels renamed to parameter names) into the `deforum` COMP's Mod CHOP input.

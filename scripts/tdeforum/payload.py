@@ -174,6 +174,51 @@ def read_slots(values, warnings):
     return slots
 
 
+def _sample_loop(samples, loop_frames, t):
+    """One value of a CHOP describing one loop, at render frame t (wraps, linear)."""
+    n = len(samples)
+    if n == 1:
+        return float(samples[0])
+    pos = (t % loop_frames) * n / float(loop_frames)
+    i = int(math.floor(pos))
+    a, b = float(samples[i % n]), float(samples[(i + 1) % n])
+    return a + (b - a) * (pos - i)
+
+
+def live_values(values, chop, loop_timeline_frame, project_rate):
+    """{api: value} the render uses at the loop position ``loop_timeline_frame``.
+
+    For the ``mod_live`` Script CHOP: every MOD parameter that a Mod Matrix slot or a Mod CHOP
+    channel moves (raw overrides are Deforum's own schedules and are left out), evaluated the
+    way the render evaluates it, so live TouchDesigner visuals can follow the same curves.
+    Also ``render_frame``: the render frame at this timeline position.
+    """
+    warnings = []
+    tp = tempo_plan(values)
+    render_fps = float(tp["render_fps"]) if tp else 15.0
+    fpb = tp["fpb"] if tp else tempo.frames_per_beat(_as_number(values.get("bpm", 120), float), 15)
+    t = float(loop_timeline_frame) * render_fps / float(project_rate or 60.0)
+    loop_frames = float(tp["loop_frames"]) if tp else None
+    slots = read_slots(values, warnings)
+    chop_fields = _chop_by_field(chop, warnings)
+    chop_mode = _text(values.get("chop_mode", "add")) or "add"
+    out = {"render_frame": t}
+    for field in schema.MOD_FIELDS:
+        if field.api not in values or _text(values.get(raw_key(field.api), "")):
+            continue
+        field_slots = [s for s in slots if s.target == field.api and s.depth]
+        samples = chop_fields.get(field.api)
+        if not field_slots and not samples:
+            continue
+        try:
+            base = coerce(field, values[field.api])
+        except (TypeError, ValueError):
+            base = float(field.default)
+        chop_value = _sample_loop(samples, loop_frames or len(samples), t) if samples else None
+        out[field.api] = modulation.evaluate(base, field_slots, fpb, t, chop_value, chop_mode)
+    return out
+
+
 def _chop_by_field(chop, warnings):
     """{channel name: samples} -> {api: samples}; names may be api or TD names."""
     lookup = {}

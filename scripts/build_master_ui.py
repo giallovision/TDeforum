@@ -17,6 +17,11 @@
 #   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
 #   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
 #                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
+#   sweep_preview     Movie File In TOP  the last Sweep Depth mask video (set by the controller)
+#   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
+#   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
+#                                    channels named after parameters (drive live visuals with it)
+# and removes ops older versions made that are no longer used (sweep_depth, sweep_mask, ...).
 
 import json
 import os
@@ -227,27 +232,15 @@ def build_inner(comp, values):
         if kind is not None:
             _set_menu(kind, 'movie')
 
-    # Sweep Depth: depth video player -> band mask. The controller sets `index` and the stored
-    # band per recorded frame (Sweep Depth page); nothing here runs until a sweep is queued.
-    depth = _get(comp, moviefileinTOP, td_controller.SWEEP_DEPTH, -300, -700)
-    mode = getattr(depth.par, 'playmode', None)
-    if mode is not None:
-        _set_menu(mode, 'specify', 'specifyindex')
-    unit = getattr(depth.par, 'indexunit', None)
-    if unit is not None:
-        _set_menu(unit, 'indices', 'index', 'frames')
-    pre = getattr(depth.par, 'prereadframes', None)
-    if pre is not None:
-        pre.val = 0
-    sweep_mask = _get(comp, scriptTOP, td_controller.SWEEP_MASK, -50, -700)
-    sweep_mask.inputConnectors[0].connect(depth)
-    callbacks = _get(comp, textDAT, 'sweep_callbacks', -50, -850)
-    callbacks.par.file.val = _scripts + '/sweep_script_top.py'
-    callbacks.par.syncfile.val = 1
-    if getattr(sweep_mask.par, 'callbacks', None) is not None:
-        sweep_mask.par.callbacks.val = callbacks
-    else:
-        say('NOTE %s has no callbacks parameter; point it at sweep_callbacks by hand' % sweep_mask.name)
+    # Sweep Depth: the controller renders the mask video itself; this just shows the result.
+    for name in td_controller.OBSOLETE_INNER:
+        stale = comp.op(name)
+        if stale is not None:
+            stale.destroy()
+            say('removed %s/%s (Sweep Depth renders its video directly now)' % (comp.name, name))
+    _get(comp, moviefileinTOP, td_controller.SWEEP_PREVIEW, -300, -700)
+
+    build_clock(comp)
 
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)
@@ -259,6 +252,57 @@ def build_inner(comp, values):
                           '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
     out = _get(comp, outTOP, 'out_loop', 400, 0)
     out.inputConnectors[0].connect(cross)
+
+
+# Timeline position inside the loop, the same way the feed recorder and the render count it:
+# frame 0 = Pipeline > Feed loop start (or the timeline start), tempo from the Tempo page.
+_START = '(parent().par.Feedloopstart.eval() or me.time.start)'
+_F = '(me.time.frame - %s)' % _START
+_BEATS = '(%s / me.time.rate * parent().par.Bpm.eval() / 60.0)' % _F
+_LOOP_BEATS = '(parent().par.Loopbars.eval() * parent().par.Beatsperbar.eval())'
+CLOCK = [
+    ('loop_frame', '(%s %% (%s * 60.0 / parent().par.Bpm.eval() * me.time.rate))' % (_F, _LOOP_BEATS)),
+    ('loop_phase', '((%s / %s) %% 1)' % (_BEATS, _LOOP_BEATS)),
+    ('beat', '(%s %% %s)' % (_BEATS, _LOOP_BEATS)),
+    ('beat_phase', '(%s %% 1)' % _BEATS),
+    ('bar_phase', '((%s / parent().par.Beatsperbar.eval()) %% 1)' % _BEATS),
+    ('kick', '(2.718281828459045 ** (-6.0 * (%s %% 1)))' % _BEATS),
+]
+
+
+def _constant_channels(chop, channels):
+    """Name + expression per channel on a Constant CHOP (sequential pars or the older nameN)."""
+    block = getattr(getattr(chop, 'seq', None), 'const', None)
+    if block is not None:
+        block.numBlocks = len(channels)
+        name_fmt, value_fmt = 'const%dname', 'const%dvalue'
+    else:
+        name_fmt, value_fmt = 'name%d', 'value%d'
+    for i, (name, expression) in enumerate(channels):
+        npar = getattr(chop.par, name_fmt % i, None)
+        vpar = getattr(chop.par, value_fmt % i, None)
+        if npar is None or vpar is None:
+            say('NOTE %s has no %s / %s; set channel %s = %s by hand'
+                % (chop.name, name_fmt % i, value_fmt % i, name, expression))
+            return False
+        npar.val = name
+        vpar.expr = expression
+        vpar.mode = ParMode.EXPRESSION
+    return True
+
+
+def build_clock(comp):
+    clock = _get(comp, constantCHOP, 'beat_clock', -400, -400)
+    _constant_channels(clock, CLOCK)
+    live = _get(comp, scriptCHOP, 'mod_live', -200, -400)
+    live.inputConnectors[0].connect(clock)          # cooks whenever the clock moves
+    callbacks = _get(comp, textDAT, 'mod_live_callbacks', -200, -550)
+    callbacks.par.file.val = _scripts + '/mod_live_chop.py'
+    callbacks.par.syncfile.val = 1
+    if getattr(live.par, 'callbacks', None) is not None:
+        live.par.callbacks.val = callbacks
+    else:
+        say('NOTE %s has no callbacks parameter; point it at mod_live_callbacks by hand' % live.name)
 
 
 # --------------------------------------------------------------------------- side tables

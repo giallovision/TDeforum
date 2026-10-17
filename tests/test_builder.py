@@ -127,6 +127,10 @@ class Node(object):
         self.children[name] = node
         return node
 
+    def destroy(self):
+        self.parent_.children.pop(self.name, None)
+        self.destroyed = True
+
     def appendCustomPage(self, name):
         page = Page(self, name)
         self.customPages.append(page)
@@ -164,7 +168,9 @@ BUILTINS = {
                        ("reloadpulse", "Pulse", 0, ())],
     "crossTOP": [("cross", "Float", 0, ())],
     "selectTOP": [("top", "Str", "", ())],
-    "scriptTOP": [("callbacks", "Str", "", ())],
+    "scriptCHOP": [("callbacks", "Str", "", ())],
+    "constantCHOP": [(n % i, "Str" if n.startswith("name") else "Float", "" if n.startswith("name") else 0.0, ())
+                     for i in range(10) for n in ("name%d", "value%d")],
     "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
                         ("record", "Toggle", False, ()), ("pause", "Toggle", False, ()),
                         ("addframe", "Pulse", 0, ())],
@@ -177,12 +183,13 @@ def run_builder(root, scripts_dir, out):
     me.par.file.val = scripts_dir + "/build_master_ui.py"
     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
-                 "selectTOP", "moviefileoutTOP", "scriptTOP"):
+                 "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP"):
         env[kind] = kind
     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
         with open(BUILDER, encoding="utf-8") as fh:
             code = fh.read()
         exec(compile(code, BUILDER, "exec"), env)
+    return env
 
 
 def old_ui(root):
@@ -266,21 +273,58 @@ class BuilderTest(unittest.TestCase):
         self.assertEqual(len(presets.NAMES), 16)
         self.assertTrue(any("presets: 15 examples" in line for line in self.log), self.log[-6:])
 
-    def test_sweep_depth_ops(self):
+    def test_sweep_preview_and_old_live_sweep_ops_removed(self):
         comp = self.build()
-        depth, script = comp.op("sweep_depth"), comp.op("sweep_mask")
-        self.assertIsNotNone(depth)
-        self.assertIs(script.inputConnectors[0].source, depth)
-        self.assertEqual(depth.par.playmode.val, "specify")
-        self.assertEqual(depth.par.indexunit.val, "indices")
-        cb = comp.op("sweep_callbacks")
-        self.assertTrue(cb.par.file.val.endswith("sweep_script_top.py"))
-        self.assertEqual(cb.par.syncfile.val, 1)
-        self.assertIs(script.par.callbacks.val, cb)
-        self.assertFalse(any("NOTE sweep" in line for line in self.log))
-        for name in ("Sweepenabled", "Sweepmode", "Sweepcycles", "Sweepwidth", "Sweepinfo"):
+        for name in ("sweep_depth", "sweep_mask", "sweep_callbacks"):     # what 0011 built
+            comp.create("textDAT", name)
+        comp = self.build()
+        self.assertIsNotNone(comp.op("sweep_preview"))
+        for name in ("sweep_depth", "sweep_mask", "sweep_callbacks"):
+            self.assertIsNone(comp.op(name), name)
+        self.assertTrue(any("removed deforum/sweep_mask" in line for line in self.log))
+        for name in ("Sweepenabled", "Sweepmode", "Sweeptrail", "Sweepsmooth", "Sweepinfo"):
             self.assertTrue(hasattr(comp.par, name), name)
         self.assertIn("Sweep Depth", [p.name for p in comp.customPages])
+
+    def test_beat_clock_and_mod_live(self):
+        comp = self.build()
+        clock, live = comp.op("beat_clock"), comp.op("mod_live")
+        names = [getattr(clock.par, "name%d" % i).val for i in range(6)]
+        self.assertEqual(names, ["loop_frame", "loop_phase", "beat", "beat_phase", "bar_phase", "kick"])
+        for i in range(6):
+            value = getattr(clock.par, "value%d" % i)
+            self.assertEqual(value.mode, ParMode.EXPRESSION)
+            self.assertIn("me.time.frame", value.expr)
+            self.assertIn("parent().par.Bpm", value.expr)
+        self.assertIs(live.inputConnectors[0].source, clock)
+        cb = comp.op("mod_live_callbacks")
+        self.assertTrue(cb.par.file.val.endswith("mod_live_chop.py"))
+        self.assertIs(live.par.callbacks.val, cb)
+        self.assertFalse(any("NOTE beat_clock" in line or "NOTE mod_live" in line for line in self.log))
+
+    def test_clock_expressions_count_like_the_feed_recorder(self):
+        env = run_builder(self.root, self.scripts, self.log)
+
+        def value(par_val):
+            return type("P", (), {"eval": lambda self: par_val})()
+
+        comp = type("C", (), {})()
+        comp.par = type("Pars", (), {"Feedloopstart": value(0), "Bpm": value(120.0),
+                                     "Beatsperbar": value(4), "Loopbars": value(2)})()
+        # 120 bpm at 60 fps = 30 frames a beat; timeline starts at 1 (= render frame 0)
+        me = type("Me", (), {})()
+        me.time = type("Time", (), {"frame": 1 + 30 * 9 + 15, "start": 1, "rate": 60.0})()
+        ch = dict((name, eval(expr, {"me": me, "parent": lambda: comp})) for name, expr in env["CLOCK"])
+        self.assertAlmostEqual(ch["beat"], 1.5)                    # 9.5 beats -> 1.5 into the 8-beat loop
+        self.assertAlmostEqual(ch["beat_phase"], 0.5)
+        self.assertAlmostEqual(ch["loop_frame"], 45.0)
+        self.assertAlmostEqual(ch["loop_phase"], 1.5 / 8)
+        self.assertAlmostEqual(ch["bar_phase"], (9.5 / 4) % 1)
+        self.assertAlmostEqual(ch["kick"], 2.718281828459045 ** -3.0)
+        comp.par.Feedloopstart = value(16)                         # Pipeline > Feed loop start
+        me.time.frame = 16
+        ch = dict((name, eval(expr, {"me": me, "parent": lambda: comp})) for name, expr in env["CLOCK"])
+        self.assertEqual((ch["loop_frame"], ch["beat"]), (0.0, 0.0))
 
     def test_rebuild_keeps_values_and_tables(self):
         comp = self.build()
@@ -311,3 +355,34 @@ class BuilderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SETUP = os.path.join(ROOT_DIR, "scripts", "setup_network.py")
+
+
+class SetupNetworkTest(unittest.TestCase):
+    def run_setup(self, root):
+        me = Node("textDAT", "setup", root, BUILTINS["textDAT"])
+        me.par.file.val = os.path.join(ROOT_DIR, "scripts", "setup_network.py")
+        out = []
+        env = {"me": me, "ParMode": ParMode, "op": lambda path: root,
+               "print": lambda *a: out.append(" ".join(str(x) for x in a))}
+        for kind in ("executeDAT", "textDAT", "chopexecuteDAT"):
+            env[kind] = kind
+        with open(SETUP, encoding="utf-8") as fh:
+            exec(compile(fh.read(), SETUP, "exec"), env)
+        return out
+
+    def test_cross1_overshoot_is_fixed_once(self):
+        root = Node("baseCOMP", "project1")
+        root.create("baseCOMP", "deforum")
+        cross = root.create("crossCHOP", "cross1")
+        cross.par.cross = Par(cross, "cross", "Float", 0.0)
+        cross.par.cross.mode = ParMode.EXPRESSION
+        cross.par.cross.expr = "op('crossfade')[0] * len(me.inputs)"
+        out = self.run_setup(root)
+        self.assertEqual(cross.par.cross.expr, "op('crossfade')[0] * (len(me.inputs) - 1)")
+        self.assertTrue(any("cross1.cross:" in line for line in out), out)
+        out = self.run_setup(root)
+        self.assertEqual(cross.par.cross.expr, "op('crossfade')[0] * (len(me.inputs) - 1)")
+        self.assertFalse(any("cross1.cross:" in line for line in out))

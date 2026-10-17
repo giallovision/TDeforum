@@ -37,6 +37,13 @@ DEFAULTS = {
         "preprocessed_vids": "/opt/a1111/td_masks/preprocessed_vids",
     },
     "comfy_output_node": "21",
+    # ComfyUI's input/ and output/ folders live outside the share on the GPU host (the A1111
+    # container sees them through its own volume mounts, TouchDesigner does not). Files TD
+    # must read itself (the Sweep Depth video) are downloaded from ComfyUI's /view endpoint
+    # into this folder (container path; must be under path_map).
+    "comfy_fetch_dir": "/opt/a1111/td_masks/comfy_fetch",
+    # Sweep Depth renders: give up waiting for the background render after this long.
+    "sweep_timeout_s": 600.0,
     "comfy_client_id": "tdeforum",
     # Where TouchDesigner writes ControlNet guide feeds (container path; must be under
     # path_map so both sides see it) and their container format (.mov for ProRes/Animation).
@@ -122,6 +129,38 @@ def to_comfy_input(cfg, container_path):
     """Container path of an init video -> path ComfyUI's VHS loader understands."""
     mapped = _map_prefix(container_path, cfg["comfy_input_map"])
     return mapped if mapped is not None else _norm(container_path)
+
+
+def comfy_view(cfg, container_path):
+    """(type, subfolder, filename) to ask ComfyUI's /view for a container path, or None.
+
+    Outputs: comfy_output_map ("preprocessed_vids" -> /opt/a1111/td_masks/preprocessed_vids).
+    Inputs: comfy_input_map (/opt/a1111/td_inputs/comfy_videos/ -> input/).
+    """
+    path = _norm(container_path)
+    for subfolder, base in cfg["comfy_output_map"].items():
+        base = base.rstrip("/") + "/"
+        if path.startswith(base):
+            rest = path[len(base):]
+            sub, _, name = rest.rpartition("/")
+            return "output", (subfolder.strip("/") + ("/" + sub if sub else "")), name
+    mapped = _map_prefix(path, cfg["comfy_input_map"])
+    if mapped is not None and mapped.startswith("input/"):
+        sub, _, name = mapped[len("input/"):].rpartition("/")
+        return "input", sub, name
+    return None
+
+
+def comfy_view_url(cfg, kind, subfolder, filename):
+    from urllib.parse import urlencode
+    return comfy_url(cfg, "/view?" + urlencode({"filename": filename, "subfolder": subfolder, "type": kind}))
+
+
+def fetch_paths(cfg, container_path):
+    """(share path, container path) of the downloaded copy of a ComfyUI file."""
+    name = _norm(container_path).rsplit("/", 1)[-1]
+    container = cfg["comfy_fetch_dir"].rstrip("/") + "/" + name
+    return to_share(cfg, container), container
 
 
 def comfy_output_to_container(cfg, subfolder, filename):

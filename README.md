@@ -134,17 +134,45 @@ Notes:
 
 ### Sweep Depth (Animation Mode = Video Input)
 
-A moving band through the depth of your init video, recorded as a ControlNet guide (and optionally the mask video).
+A moving band through the depth of your init video, rendered as a ControlNet guide (and optionally the mask video).
 
-1. **Sweep Depth** page: switch it **On**, pick a depth preprocessor, then on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
-2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`, 240 in a 240-frame project) through the same workflow as *Preprocess via ComfyUI*; the result is cached like it.
-3. TouchDesigner plays that depth video through `sweep_depth` -> the Script TOP `sweep_mask`, which keeps only the grey band for the frame being recorded (white inside the band, black elsewhere) and records one frame per render frame, exactly like the TOP feeds. The finished movie becomes the unit's `vid_path`.
+1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
+2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Preprocessor* you picked, through the same workflow as *Preprocess via ComfyUI*. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
+3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`. Same depth video + same look + same frames = cache hit, no re-render.
+4. Then the render is submitted as usual.
 
-The depth video is made from the **Video Init Path** itself (not from unit 1's preprocessed video), named after the init video, size, model and frame count, so the same settings reuse it (*Force ComfyUI re-preprocess* remakes it). To prepare it beforehand switch on *Queue only makes the depth video*: Queue stops once it exists and the *Depth Video* field shows its path. To use a depth video you made yourself, put its container path in *Pre-made Depth Video*; ComfyUI is then skipped.
+Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse.
 
-Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse. *Cycles* repeats it over the render, *Shape* = ping-pong goes out and back, *Direction* = reverse swaps start and end, *Band Width* / *Edge Softness* are in grey levels (of 255), *Band Fill* = Depth keeps the depth shading inside the band, *Also use as Video Mask* sets `video_mask_path` / `use_mask_video` to the same movie (the unit may then stay off). The log and the *Sweep Plan* field show the band at the first and last frame.
+| Setting | What it does |
+|---|---|
+| Cycles / Shape / Direction | sweeps over the render; ping-pong goes out and back; reverse swaps start and end |
+| Band Width / Edge Softness | in grey levels (of 255); softness feathers both edges |
+| Trail | frames the band keeps glowing after it passed (fades to 5 %); 0 = a clean band |
+| Depth Smoothing | blends each depth frame with the previous ones (0-0.9), so per-frame depth flicker does not make the band jitter |
+| Band Fill | white, or the depth shading inside the band |
+| Also use as Video Mask | `video_mask_path` / `use_mask_video` = the same movie (the unit may then stay off) |
+| Pre-made Depth Video | a container path of your own depth video; ComfyUI is skipped |
+| Queue only prepares the sweep | stops after the mask video exists: look at `sweep_preview`, tweak, Queue again (cached), then switch it off to render |
 
-Render frame k shows source frame `extract_from + k * nth`, and the sweep position follows k, so the sweep is recorded sequentially (the timeline is lengthened for the recording and restored, as for any feed).
+Render frame k shows source frame `extract_from + k * nth`. If the depth video turns out shorter than the frames the render needs, the init video is shorter too: the controller remembers its length (doctor shows it) and plans the render to it.
+
+### Share layout
+
+TouchDesigner reaches the GPU host through `T:` = `~/Codebase/TDeforum`. Two folders the container uses are **not** under it: `td_inputs/comfy_videos` is a symlink to `~/Codebase/comfyui/input` (Samba does not follow links that leave the share), and the container mounts `~/Codebase/comfyui/output/preprocessed_vids` over `td_masks/preprocessed_vids` (on the share that folder is the repo's own, empty one). Renders do not care. TouchDesigner only reads those files for frame counts and for Sweep Depth, and the latter downloads what it needs from ComfyUI. To see them on `T:` anyway, bind-mount instead of symlinking (on the GPU host):
+
+```bash
+rm td_inputs/comfy_videos && mkdir -p td_inputs/comfy_videos td_masks/preprocessed_vids
+echo "$HOME/Codebase/comfyui/input $PWD/td_inputs/comfy_videos none bind 0 0" | sudo tee -a /etc/fstab
+echo "$HOME/Codebase/comfyui/output/preprocessed_vids $PWD/td_masks/preprocessed_vids none bind 0 0" | sudo tee -a /etc/fstab
+sudo mount -a && make down && make up
+```
+
+### Live CHOPs: `beat_clock` and `mod_live`
+
+Two CHOPs inside the COMP make live TouchDesigner visuals line up with what Deforum renders:
+
+* **`beat_clock`** (Constant CHOP): `loop_frame`, `loop_phase`, `beat`, `beat_phase`, `bar_phase`, `kick`, counted from *Pipeline > Feed loop start* (or the timeline start) at the COMP's BPM, exactly like the feed recorder and the render count frames. Time your LFOs / Pattern CHOPs / noise offsets from `loop_phase` instead of `absTime` and a TOP you record as a ControlNet guide loops perfectly.
+* **`mod_live`** (Script CHOP): for the current loop position, the value of every parameter the Mod Matrix or the Mod CHOP moves (`translation_z`, `zoom`, `strength_schedule`, ...; raw overrides are left out), the same numbers the render uses, plus `render_frame`. Bind a TD camera or a displacement to it and the guide moves with Deforum's camera.
 
 ### Tempo
 
@@ -185,6 +213,7 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
 | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
 | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
 | Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
+| `deforum/mod_live` cooks (input `beat_clock`) | `deforum/mod_live_callbacks` | `mod_live_chop.py` | `td_controller.mod_live_cook` |
 | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
 
 ### What Queue does
@@ -215,7 +244,7 @@ scripts/
     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
-    sweep.py           # Sweep Depth: band maths + numpy mask for the depth video
+    sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
     presets.py         # 15 example configurations (Example Preset drop-down)
     migrate.py         # Deforum_UI -> deforum COMP value migration
     payload.py         # batch request + frame plan

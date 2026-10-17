@@ -5,6 +5,7 @@
 #   * Textport:  exec(open('T:/scripts/setup_network.py', encoding='utf-8').read())
 #
 # Every change is printed. Nothing is deleted.
+# (cross1's crossfade expression is corrected if it still overshoots: see step 8.)
 
 import os
 import sys
@@ -148,7 +149,7 @@ def main():
     set_par(builder, 'file', SCRIPTS + '/build_master_ui.py')
     set_par(builder, 'syncfile', True)
 
-    # 8. Report (no changes): creative-chain wiring worth a look.
+    # 8. Creative chain: fix what is plainly wrong, report the rest.
     comp = ROOT.op('deforum')
     wave = ROOT.op('wave_generator')
     if comp is None:
@@ -156,16 +157,21 @@ def main():
     elif wave is not None and wave not in list(comp.inputs):
         say('NOTE wave_generator is not wired into the deforum COMP. The bake button no longer '
             'writes keyframe strings; connect a CHOP whose channels are named after parameters '
-            '(translation_z, zoom, strength_schedule, ...) to the COMP input, one loop long.')
+            '(translation_z, zoom, strength_schedule, ...) to the COMP input, one loop long. '
+            'To make live visuals loop with the render, time them from deforum/beat_clock '
+            '(loop_phase, beat_phase, kick) and read the render\'s own curves from deforum/mod_live.')
     record = ROOT.op('record1')
     if record is not None and not record.outputs:
         say('NOTE record1 has no outputs: cross1/crossfade never reach wave_generator. '
             'Wire record1 -> math1 if the crossfade morph is meant to modulate Deforum.')
     cross = ROOT.op('cross1')
-    if cross is not None and 'len(me.inputs)' in (cross.par.cross.expr or '') \
-            and '- 1' not in cross.par.cross.expr:
-        say('NOTE cross1.cross = %r overshoots: Cross CHOP expects 0..(inputs-1), '
-            'e.g. op(\'crossfade\')[0] * (len(me.inputs) - 1)' % cross.par.cross.expr)
+    if cross is not None:
+        expr = cross.par.cross.expr or ''
+        if cross.par.cross.mode == ParMode.EXPRESSION and 'len(me.inputs)' in expr and '- 1' not in expr:
+            fixed = expr.replace('len(me.inputs)', '(len(me.inputs) - 1)')
+            cross.par.cross.expr = fixed
+            say('cross1.cross: %r -> %r (a Cross CHOP blends 0..inputs-1; the old one overshot past '
+                'the last input)' % (expr, fixed))
 
     say('done. Next: run builder_master_ui, then op("deforum_payload_exec").module.doctor()')
 
