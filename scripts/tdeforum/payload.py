@@ -282,6 +282,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     if tp and tp["seamless"]:
         warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
     compiled = {}
+    ranges = {}
 
     for field in schema.FIELDS:
         if field.target is None or field.api.startswith("cn_") or field.api not in values:
@@ -307,6 +308,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
                 int(_as_number(values.get("bake_points", 0), float)))
             settings[field.key] = sched
             compiled[field.api] = (how, sched)
+            ranges[field.api] = bounds if bounds else None
             _check_field(field, how, bounds, mode, field_slots, override, warnings)
             continue
 
@@ -341,6 +343,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     if "border" in settings and "padding_mode" not in settings and "border" in values \
             and "padding_mode" not in values:
         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
+
+    _check_sampling(values, settings, options, ranges, mode, warnings)
 
     # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
     # Deforum parses every unit's schedules even when the unit is off, so a unit the
@@ -398,6 +402,27 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
         request["options_overrides"] = options
     return {"request": request, "plan": plan, "tempo": tp, "schedules": compiled,
             "warnings": warnings}
+
+
+def _check_sampling(values, settings, options, ranges, mode, warnings):
+    """Settings that quietly ruin renders with LCM checkpoints (and Video Input)."""
+    sampler = _text(settings.get("sampler", ""))
+    cfg = ranges.get("cfg_scale_schedule")
+    if "lcm" in sampler.lower() and cfg and cfg[1] > 3.0:
+        warnings.append("CFG reaches %g with the LCM sampler: LCM checkpoints burn and smear above ~2 "
+                        "(use 1.5-2)" % cfg[1])
+    keep = ranges.get("strength_schedule")
+    steps = settings.get("steps")
+    if keep and isinstance(steps, int) and not _as_bool(options.get("img2img_fix_steps", False)):
+        actual = int(steps * (1.0 - min(0.999, keep[1])))
+        if actual < 3:
+            warnings.append("A1111 runs int(steps x (1 - Strength)) steps on img2img frames: %d step(s) at "
+                            "Strength %g; switch on Globals > Exact Steps" % (actual, keep[1]))
+    cadence = _as_number(settings.get("diffusion_cadence", 1), int)
+    if mode == "Video Input" and cadence > 1:
+        warnings.append("Video Input with Diffusion Cadence %d: only every %s video frame is diffused and the "
+                        "frames between are warped from it; use 1 to restyle every frame"
+                        % (cadence, {2: "2nd", 3: "3rd"}.get(cadence, "%dth" % cadence)))
 
 
 def _loop_seeds(values, settings, tp, warnings):

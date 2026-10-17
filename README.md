@@ -104,15 +104,19 @@ Notes:
 * `cn_feed_dir` and `cn_feed_ext` (`.mov` for ProRes/Animation) can be changed in `scripts/tdeforum.local.json`.
 * Units 1-3 have pages; units 4-5 stay available through the payload only.
 
+### LCM baseline
+
+The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, noise 0.02, noise multiplier 1.0. *Globals › Exact Steps* (on) sends A1111's `img2img_fix_steps`: without it A1111 runs only `int(steps × (1 − Strength))` steps on every frame after the first, which is a single step at 4 steps and Strength 0.65. The payload warns when CFG goes above 3 with LCM, when too few img2img steps would run, and when Video Input uses a cadence above 1. A rebuild moves a COMP that still has the old defaults (10 steps, CFG 7, noise 0.065 / 1.05) to these once; values you set yourself are kept.
+
 ### Example presets
 
-*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP when you press **bake** (or Queue). The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
 
 * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
 * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
 * Motion (2D/3D camera) and the Mod Matrix slots a preset does not mention are set to the baseline, so each example starts from a neutral camera.
-* The values a preset replaced are remembered: pick another preset, or **None**, and press bake to get them back first. Your own tweaks after applying stay until the selection changes.
-* Seed, seed behaviour (baseline: **Iterate +1, seed 424242**), sampler, steps, CFG, size, model, prompts are never touched. ControlNet is left alone too, except by the three *Depth sweep* examples (below), which take over unit 1.
+* The values a preset replaced are remembered: pick another preset, or **None**, to get them back. Your own tweaks after applying stay until the selection changes or you press *Re-apply Preset*.
+* The seed (424242), sampler, steps, CFG, size, model and prompts are never touched. Seed behaviour stays **Iterate (+1)**, except in the Video Input examples, which use **Fixed**: one seed on every video frame is what stops video-to-video from boiling. ControlNet is left alone too, except by the three *Depth sweep* examples, which switch Sweep Depth on and take over unit 1 (QR Monster, weight 0.75, guidance ending at 80 %).
 
 | id | name | what it does |
 |---|---|---|
@@ -126,18 +130,18 @@ Notes:
 | `2d_scroll` | 2D - Scroll (good) | Sideways scroll with wrapped edges, so the picture tiles instead of smearing. |
 | `2d_spiral_crash` | 2D - Spiral crash (extreme) | Fast zoom and spin with low keep: the image keeps collapsing into new structure. |
 | `2d_twirl` | 2D - Twirl (extreme) | Spin swings left and right over 4 beats (slot 1) while every beat pulses the zoom (slot 2). |
-| `video_soft_restyle` | Video Input - Soft restyle (good) | Keeps most of the init video's structure and colour; frames follow the video (needs Globals > Video Init Path). |
-| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video: heavy restyle, extra noise, no colour matching. |
-| `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep, nearest levels (245-255) to farthest (0-10): the white band seems to travel away from you. |
-| `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same the other way: farthest levels first, ending on the nearest. |
-| `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps, wide band that keeps the depth shading, strong ControlNet, loose hold. |
+| `video_soft_restyle` | Video Input - Soft restyle (good) | Every video frame restyled with the same seed: keeps the video's structure and colour, no boiling (needs Globals > Video Init Path). |
+| `video_melt` | Video Input - Melt (extreme) | Loose hold on the video and a new seed every frame: heavy restyle that boils on purpose. |
+| `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep: a soft glowing band starts on the nearest depth (white) and travels to the farthest, so it seems to move away from you. Needs Globals > Video Init Path; takes over ControlNet unit 1. |
+| `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same, the other way: the band starts on the farthest depth and ends on the nearest, so it seems to rush toward you. |
+| `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps of a wide band that keeps the depth shading and leaves long trails; ControlNet leads, so the picture pulses through the depth layers. |
 
 ### Sweep Depth (Animation Mode = Video Input)
 
 A moving band through the depth of your init video, rendered as a ControlNet guide (and optionally the mask video).
 
 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
-2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Preprocessor* you picked, through the same workflow as *Preprocess via ComfyUI*. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
+2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
 3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`. Same depth video + same look + same frames = cache hit, no re-render.
 4. Then the render is submitted as usual.
 
@@ -147,6 +151,7 @@ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a
 |---|---|
 | Cycles / Shape / Direction | sweeps over the render; ping-pong goes out and back; reverse swaps start and end |
 | Band Width / Edge Softness | in grey levels (of 255); softness feathers both edges |
+| Grow / Blur | widen the band shapes by N px, then soften them (Gaussian, px): QR Monster reads a soft glow better than a hard stencil |
 | Trail | frames the band keeps glowing after it passed (fades to 5 %); 0 = a clean band |
 | Depth Smoothing | blends each depth frame with the previous ones (0-0.9), so per-frame depth flicker does not make the band jitter |
 | Band Fill | white, or the depth shading inside the band |
@@ -201,6 +206,8 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
 * in prompt weights (backticks) every letter `t` is replaced by the frame number, so avoid functions containing a `t` (`tanh`, `sqrt`); `sin`, `cos`, `exp`, `abs` are fine;
 * the anti-blur *kernel* must be odd (OpenCV), so it is a plain integer, not modulatable.
 
+`make test` on a machine without OpenCV skips the 28 tests that encode real video (`pip install opencv-python-headless` to run them); TouchDesigner ships its own.
+
 ### Network map
 
 | Trigger | DAT | File | Calls |
@@ -213,6 +220,7 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
 | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
 | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
 | Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
+| Example Preset, *Re-apply Preset*, *Edit prompt_seq* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
 | `deforum/mod_live` cooks (input `beat_clock`) | `deforum/mod_live_callbacks` | `mod_live_chop.py` | `td_controller.mod_live_cook` |
 | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
 

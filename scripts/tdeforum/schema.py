@@ -57,6 +57,7 @@ MOD = "mod"                # float base + <Name>raw override; modulated by the M
 SEED = "seed"              # string par (seeds overflow TD int pars); sent as int
 CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
 STATUS = "status"          # read-only string written by the controller
+PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
 
 RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
 MOD_SLOTS = 8
@@ -162,11 +163,11 @@ _MODS = [
     _mod("perspective_flip_fv", 53.0, CA, (10, 120), "Flip FV", (0.001, None)),
     # Diffusion
     _mod("strength_schedule", 0.65, DI, (0, 1), "Strength (keep of previous frame)", (0, 1)),
-    _mod("noise_schedule", 0.065, DI, (0, 0.2), "Noise", (0, 1)),
+    _mod("noise_schedule", 0.02, DI, (0, 0.2), "Noise", (0, 1)),
     _mod("contrast_schedule", 1.0, DI, (0.8, 1.2), "Contrast", (0, None)),
-    _mod("cfg_scale_schedule", 7.0, DI, (1, 15), "CFG Scale", (0, None)),
+    _mod("cfg_scale_schedule", 1.8, DI, (1, 15), "CFG Scale (LCM: 1.5-2)", (0, None)),
     _mod("steps_schedule", 25.0, DI, (1, 50), "Steps (needs Enable Steps Scheduling)", (1, None)),
-    _mod("noise_multiplier_schedule", 1.05, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
+    _mod("noise_multiplier_schedule", 1.0, DI, (0.9, 1.2), "Noise Multiplier", (0, None)),
     _mod("subseed_strength_schedule", 0.0, DI, (0, 1), "Subseed Strength (needs Enable Subseed)", (0, 1)),
     _mod("ddim_eta_schedule", 0.0, DI, (0, 1), "DDIM Eta (needs Enable)", (0, None)),
     _mod("ancestral_eta_schedule", 1.0, DI, (0, 1.5), "Ancestral Eta (needs Enable)", (0, None)),
@@ -235,7 +236,8 @@ def _cn_unit_fields(n):
 FIELDS = [
     # --- Tempo -----------------------------------------------------------------
     F("preset", presets.NONE, TE, MENU, menu=presets.NAMES, labels=presets.LABELS,
-      label="Example Preset (applied on bake)", target=None),
+      label="Example Preset (applied when picked)", target=None),
+    F("preset_apply", 0, TE, PULSE, label="Re-apply Preset", target=None),
     F("preset_info", "", TE, STATUS, label="Preset", target=None),
     F("bpm", 120.0, TE, FLOAT, norm=(60, 200), label="BPM", target=None),
     F("beats_per_bar", 4, TE, INT, norm=(1, 8), label="Beats per Bar", target=None),
@@ -262,7 +264,11 @@ FIELDS = [
     F("sd_vae", "Automatic", G, STR, label="VAE", target="options"),
     F("W", 1024, G, INT, norm=(0, 1920)),
     F("H", 576, G, INT, norm=(0, 1920)),
-    F("steps", 10, G, INT, norm=(1, 50)),
+    F("steps", 4, G, INT, norm=(1, 50), label="Steps (LCM: 4)"),
+    # A1111 runs only int(steps x denoise) steps on img2img frames (4 steps at Strength 0.65 = 1
+    # step); with this on it runs exactly `steps`, which is what LCM checkpoints need.
+    F("img2img_fix_steps", True, G, TOGGLE, label="Exact Steps on every frame (A1111 img2img_fix_steps)",
+      target="options"),
     F("sampler", "LCM", G, STR),
     F("scheduler", "Automatic", G, STR),
     F("animation_mode", "3D", G, MENU, menu=["2D", "3D", "Video Input", "Interpolation"]),
@@ -283,6 +289,7 @@ FIELDS = [
     # --- Prompts ---------------------------------------------------------------
     F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
       labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
+    F("prompt_edit", 0, PR, PULSE, label="Edit prompt_seq (opens deforum/prompt_seq)", target=None),
     F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
 
     # --- Motion 2D -------------------------------------------------------------
@@ -350,6 +357,8 @@ FIELDS = [
       label="Direction", target=None),
     F("sweep_width", 10, SW, INT, norm=(1, 128), label="Band Width (grey levels of 255)", target=None),
     F("sweep_softness", 0, SW, INT, norm=(0, 64), label="Edge Softness (grey levels)", target=None),
+    F("sweep_grow", 0, SW, INT, norm=(0, 48), label="Grow (px, widens the band shapes)", target=None),
+    F("sweep_blur", 0.0, SW, FLOAT, norm=(0, 24), label="Blur (px, soft glow for ControlNet)", target=None),
     F("sweep_trail", 0, SW, INT, norm=(0, 60), label="Trail (frames the band glows on, 0 = off)",
       target=None),
     F("sweep_smooth", 0.0, SW, FLOAT, norm=(0, 0.9), label="Depth Smoothing (steadier band, 0 = off)",
@@ -357,8 +366,8 @@ FIELDS = [
     F("sweep_fill", sweep.WHITE, SW, MENU, menu=sweep.FILLS, labels=sweep.FILL_LABELS, label="Band Fill",
       target=None),
     F("sweep_as_mask", False, SW, TOGGLE, label="Also use as Video Mask", target=None),
-    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, label="Depth Preprocessor (ComfyUI)",
-      target=None),
+    F("sweep_model", sweep.MODELS[0], SW, MENU, menu=sweep.MODELS, labels=sweep.MODEL_LABELS,
+      label="Depth Model (ComfyUI)", target=None),
     F("sweep_depth_video", "", SW, STR,
       label="Pre-made Depth Video (container path; empty = make it from Video Init Path)", target=None),
     F("sweep_prepare_only", False, SW, TOGGLE,

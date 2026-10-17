@@ -77,6 +77,9 @@ class Page(object):
     def appendMenu(self, name, label=""):
         return self._add(name, "Menu", "")
 
+    def appendPulse(self, name, label=""):
+        return self._add(name, "Pulse", 0)
+
     def destroy(self):
         self.comp.customPages.remove(self)
         for p in [p for p in self.comp.customPars]:
@@ -169,6 +172,8 @@ BUILTINS = {
     "crossTOP": [("cross", "Float", 0, ())],
     "selectTOP": [("top", "Str", "", ())],
     "scriptCHOP": [("callbacks", "Str", "", ())],
+    "parameterexecuteDAT": [(n, "Str", "", ()) for n in ("file", "syncfile", "op", "pars", "custom", "builtin",
+                                                         "valuechange", "onpulse", "active")],
     "constantCHOP": [(n % i, "Str" if n.startswith("name") else "Float", "" if n.startswith("name") else 0.0, ())
                      for i in range(10) for n in ("name%d", "value%d")],
     "moviefileoutTOP": [("file", "Str", "", ()), ("type", "Menu", "movie", ("movie", "image")),
@@ -183,7 +188,7 @@ def run_builder(root, scripts_dir, out):
     me.par.file.val = scripts_dir + "/build_master_ui.py"
     env = {"me": me, "ParMode": ParMode, "print": lambda *a: out.append(" ".join(str(x) for x in a))}
     for kind in ("baseCOMP", "tableDAT", "textDAT", "inCHOP", "moviefileinTOP", "crossTOP", "outTOP",
-                 "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP"):
+                 "selectTOP", "moviefileoutTOP", "scriptCHOP", "constantCHOP", "parameterexecuteDAT"):
         env[kind] = kind
     with mock.patch.object(ctl, "_constant_mode", lambda par: ParMode.CONSTANT):
         with open(BUILDER, encoding="utf-8") as fh:
@@ -338,6 +343,31 @@ class BuilderTest(unittest.TestCase):
         self.assertEqual(comp.par.Angleraw.val, "0:(0), 24:(5)")
         self.assertEqual(comp.op("prompt_seq").rows[-1], ["8", "fire", "2"])
         self.assertIn("values kept", "\n".join(self.log))
+
+    def test_lcm_baseline_bump_applies_once(self):
+        comp = self.build()
+        self.assertEqual(comp.storage["tdeforum_baseline"], 2)
+        self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
+        comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...
+        comp.par.Cfgscaleschedule.val = 7.0            # ...still at the old CFG
+        comp.par.Steps.val = 6                         # a value you chose is kept
+        comp = self.build()
+        self.assertEqual((comp.par.Cfgscaleschedule.val, comp.par.Steps.val), (1.8, 6))
+        self.assertTrue(any("Cfgscaleschedule was the old baseline (7.0); now 1.8" in l for l in self.log))
+        comp.par.Cfgscaleschedule.val = 7.0            # set on purpose after the upgrade: kept
+        comp = self.build()
+        self.assertEqual(comp.par.Cfgscaleschedule.val, 7.0)
+
+    def test_ui_exec_watches_the_buttons(self):
+        comp = self.build()
+        ui_exec = comp.op("ui_exec")
+        self.assertTrue(ui_exec.par.file.val.endswith("ui_exec.py"))
+        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit")
+        self.assertEqual(ui_exec.par.op.val, comp.path)
+        self.assertEqual((ui_exec.par.valuechange.val, ui_exec.par.onpulse.val), (1, 1))
+        for name in ("Presetapply", "Promptedit"):
+            self.assertEqual(getattr(comp.par, name).style, "Pulse")
+        self.assertFalse(any("NOTE ui_exec" in line for line in self.log))
 
     def test_controller_reads_the_built_comp(self):
         comp = self.build()

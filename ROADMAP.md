@@ -51,6 +51,7 @@ This document outlines the macro-architecture for our generative visual performa
 
 - [x] Sweep Depth (Video Input): ComfyUI depth video (downloaded over `/view` when it is not on the share) -> sweeping grey band with trail / depth smoothing, rendered off the main thread with OpenCV, cached -> ControlNet guide / mask video; three presets.
 - [x] Beat clock and live Mod Matrix CHOPs inside the `deforum` COMP (`beat_clock`, `mod_live`).
+- [x] LCM baseline (4 exact steps, CFG 1.8) with payload checks; presets apply when picked, Re-apply button; Video Input presets on a fixed seed; Sweep Depth grow/blur and the fast vits depth model.
 
 ### 🚧 In Progress
 - [ ] Analyze cross-pollination of models (e.g., applying geometric/QR Monster ControlNets to gradient Depth Maps).

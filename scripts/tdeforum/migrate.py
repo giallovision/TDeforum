@@ -32,38 +32,54 @@ def _const(value):
     return {"mode": "CONSTANT", "expr": "", "bind": "", "val": value}
 
 
-# Baselines that changed: a saved value equal to the OLD default is not carried over, so the COMP
-# picks up the new baseline. Anything you set to something else is kept.
+# Baselines that changed: api -> (baseline version, old default, new default). A saved value
+# equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
+# you set to something else is kept. Each bump applies once: build_master_ui stores the version
+# it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
+BASELINE_VERSION = 2
 BASELINE_BUMPS = {
-    "seed": ("-1", "424242"),
-    "loop_seeds": (True, False),
+    "seed": (1, "-1", "424242"),
+    "loop_seeds": (1, True, False),
+    # 2: LCM checkpoints (4 steps, CFG 1.5-2, little noise) and the fast depth model.
+    "steps": (2, 10, 4),
+    "cfg_scale_schedule": (2, 7.0, 1.8),
+    "noise_schedule": (2, 0.065, 0.02),
+    "noise_multiplier_schedule": (2, 1.05, 1.0),
+    "sweep_model": (2, "DepthAnythingV2Preprocessor", "depth_anything_v2_vits"),
 }
 
 
-def _is_old_default(field, entry):
+def _is_old_default(field, entry, since=0):
     bump = BASELINE_BUMPS.get(field.api)
-    if bump is None or entry.get("mode", "CONSTANT") != "CONSTANT":
+    if bump is None or bump[0] <= since or entry.get("mode", "CONSTANT") != "CONSTANT":
         return False
-    value = entry.get("val")
-    if isinstance(bump[0], bool):
-        return str(value).strip().lower() in ("1", "1.0", "true", "on") if bump[0] else \
+    old, value = bump[1], entry.get("val")
+    if isinstance(old, bool):
+        return str(value).strip().lower() in ("1", "1.0", "true", "on") if old else \
             str(value).strip().lower() in ("0", "0.0", "false", "off", "")
-    return str(value).strip() == bump[0]
+    if isinstance(old, (int, float)):
+        try:
+            return abs(float(value) - float(old)) < 1e-9
+        except (TypeError, ValueError):
+            return False
+    return str(value).strip() == old
 
 
-def plan(saved, from_old_ui):
-    """Actions that move ``saved`` onto the new COMP's parameters."""
+def plan(saved, from_old_ui, since=0):
+    """Actions that move ``saved`` onto the new COMP's parameters.
+
+    ``since``: the baseline version the COMP was last built with (bumps newer than it apply)."""
     actions = []
     for field in schema.FIELDS:
         name = field.td_name
-        if field.kind == schema.STATUS or name not in saved:
+        if field.kind in (schema.STATUS, schema.PULSE) or name not in saved:
             continue
         entry = saved[name]
         mode = entry.get("mode", "CONSTANT")
 
-        if _is_old_default(field, entry):
+        if _is_old_default(field, entry, since):
             bump = BASELINE_BUMPS[field.api]
-            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[0], bump[1])))
+            actions.append(("note", "%s was the old baseline (%s); now %s" % (name, bump[1], bump[2])))
             continue
 
         if field.kind == schema.MOD and from_old_ui:

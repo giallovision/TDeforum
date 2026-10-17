@@ -364,3 +364,51 @@ class MigrateTest(unittest.TestCase):
         actions = migrate.plan({"Zoom": c(1.1), "Zoomraw": c("0:(1), 9:(2)")}, from_old_ui=False)
         sets = dict((a[1], a[2]["val"]) for a in actions if a[0] == "set")
         self.assertEqual(sets, {"Zoom": 1.1, "Zoomraw": "0:(1), 9:(2)"})
+
+
+class SamplingChecksTest(unittest.TestCase):
+    def build(self, **overrides):
+        return payload.build_request(_comp_values(**overrides), {"0": "x"}, MODELS)
+
+    def test_defaults_are_lcm_ready_and_send_exact_steps(self):
+        result = self.build()
+        s = result["request"]["deforum_settings"]
+        self.assertEqual((s["steps"], s["cfg_scale_schedule"], s["sampler"]), (4, "0:(1.8)", "LCM"))
+        self.assertIs(result["request"]["options_overrides"]["img2img_fix_steps"], True)
+        self.assertFalse([w for w in result["warnings"] if "LCM" in w or "int(steps" in w])
+
+    def test_high_cfg_with_lcm_warns(self):
+        warnings = self.build(cfg_scale_schedule=7.0)["warnings"]
+        self.assertTrue([w for w in warnings if "CFG reaches 7 with the LCM sampler" in w], warnings)
+        self.assertFalse([w for w in self.build(cfg_scale_schedule=7.0, sampler="Euler a")["warnings"]
+                          if "LCM" in w])
+
+    def test_too_few_img2img_steps_warn_without_exact_steps(self):
+        warnings = self.build(img2img_fix_steps=False, strength_schedule=0.65)["warnings"]
+        self.assertTrue([w for w in warnings if "1 step(s) at Strength 0.65" in w], warnings)
+        self.assertFalse([w for w in self.build(strength_schedule=0.65)["warnings"] if "int(steps" in w])
+
+    def test_video_input_with_cadence_warns(self):
+        warnings = self.build(animation_mode="Video Input", diffusion_cadence=4)["warnings"]
+        self.assertTrue([w for w in warnings if "Diffusion Cadence 4" in w and "every 4th" in w], warnings)
+        self.assertFalse([w for w in self.build(animation_mode="Video Input", diffusion_cadence=1)["warnings"]
+                          if "Cadence" in w])
+
+
+class DepthNodeTest(unittest.TestCase):
+    def test_vits_uses_the_dedicated_node_at_512(self):
+        with open(os.path.join(ROOT_DIR, "scripts", "templates", "TD_CN_PreProc.json")) as fh:
+            template = json.load(fh)
+        cfg = config.load()
+        values = _comp_values(comfy_preprocessor="depth_anything_v2_vits", comfy_resolution=512)
+        plan = payload.plan_frames("Video Input", 240)
+        job = comfy.build_prompt(template, cfg, values, plan)
+        node = job["body"]["prompt"]["19"]
+        self.assertEqual(node["class_type"], "DepthAnythingV2Preprocessor")
+        self.assertEqual(node["inputs"]["ckpt_name"], "depth_anything_v2_vits.pth")
+        self.assertEqual(node["inputs"]["resolution"], 512)
+        self.assertEqual(node["inputs"]["image"], ["11", 0])
+        self.assertIn("depth_anything_v2_vits_240f", job["cache_key"])
+        aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
+        self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
+        self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)

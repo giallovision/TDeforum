@@ -21,6 +21,8 @@
 #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
 #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
 #                                    channels named after parameters (drive live visuals with it)
+#   ui_exec           Parameter Execute DAT  Example Preset applies when picked; Re-apply Preset
+#                                    and Edit prompt_seq buttons
 # and removes ops older versions made that are no longer used (sweep_depth, sweep_mask, ...).
 
 import json
@@ -113,6 +115,9 @@ def create(page, field, section=False):
     elif kind in (schema.FLOAT, schema.MOD):
         p = page.appendFloat(name, label=label)[0]
         p.default = float(field.default)
+    elif kind == schema.PULSE:
+        p = page.appendPulse(name, label=label)[0]
+        return [p]
     else:  # str, schedule, seed, checkpoint, status
         p = page.appendStr(name, label=label)[0]
         p.default = str(field.default)
@@ -242,6 +247,17 @@ def build_inner(comp, values):
 
     build_clock(comp)
 
+    # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
+    ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
+    for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
+                        ('pars', 'Preset Presetapply Promptedit'), ('custom', 1), ('builtin', 0),
+                        ('valuechange', 1), ('onpulse', 1), ('active', 1)):
+        par = getattr(ui_exec.par, name, None)
+        if par is None:
+            say('NOTE %s has no parameter %r; set it to %r by hand' % (ui_exec.name, name, value))
+            continue
+        par.val = value
+
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)
     cross.inputConnectors[1].connect(tail)
@@ -365,7 +381,8 @@ def run():
             by_name[p.name] = p
 
     kept, notes = [], []
-    for action in migrate.plan(saved, from_old):
+    since = 0 if first else int(comp.fetch('tdeforum_baseline', 0, search=False) or 0)
+    for action in migrate.plan(saved, from_old, since):
         if action[0] == 'note':
             notes.append(action[1])
             continue
@@ -379,6 +396,7 @@ def run():
         except Exception as exc:
             say('could not restore %s: %s' % (name, exc))
 
+    comp.store('tdeforum_baseline', migrate.BASELINE_VERSION)
     values = td_controller.read_ui(comp)
     build_inner(comp, values)
     write_map_table(root, comp)

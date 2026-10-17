@@ -11,9 +11,14 @@ from test_controller import FEED_UI, respond
 from tdeforum import config, feed, modulation, payload, schema, sweep
 from tdeforum import td_controller as ctl
 
-import cv2
 import shutil
 import tempfile
+
+try:
+    import cv2
+except ImportError:          # the GPU host's system Python may not have OpenCV (TouchDesigner does)
+    cv2 = None
+NEEDS_CV2 = unittest.skipIf(cv2 is None, "OpenCV not installed (pip install opencv-python-headless)")
 
 
 def S(**kw):
@@ -157,6 +162,7 @@ def white_columns(frame, level=128):
     return np.nonzero(frame.mean(axis=0) > level)[0]
 
 
+@NEEDS_CV2
 class RenderTest(unittest.TestCase):
     """The real thing: OpenCV decodes a depth video, numpy masks it, OpenCV encodes the result."""
 
@@ -192,6 +198,14 @@ class RenderTest(unittest.TestCase):
         glow = trail[12].mean(axis=0)[behind]
         self.assertTrue((glow > 20).any(), glow)               # ...still glow with a trail
         self.assertTrue((glow < 250).all())
+
+    def test_grow_widens_and_blur_softens_the_band(self):
+        _r, plain = self.render(sweep_width=12)
+        _r, grown = self.render(sweep_width=12, sweep_grow=4)
+        _r, blurred = self.render(sweep_width=12, sweep_blur=3.0)
+        self.assertGreater(len(white_columns(grown[10])), len(white_columns(plain[10])) + 4)
+        grey = lambda f: ((f.mean(axis=0) > 20) & (f.mean(axis=0) < 235)).sum()
+        self.assertGreater(grey(blurred[10]), grey(plain[10]) + 2)
 
     def test_output_is_resized_to_the_render_size(self):
         _result, frames = self.render(size=(96, 48))
@@ -283,6 +297,7 @@ class SchemaFeedTest(unittest.TestCase):
         self.assertEqual(sorted(f.api for f in fields), sorted(
             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
+             "sweep_grow", "sweep_blur",
              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
         self.assertTrue(all(f.target is None for f in fields))
         self.assertEqual(fields[0].api, "sweep_enabled")
@@ -303,6 +318,7 @@ SWEEP_UI = dict(FEED_UI, animation_mode="Video Input", sweep_enabled=True, feed_
                 video_mask_path="/opt/a1111/td_masks/mask_01.mov", use_mask_video=False, sweep_width=10)
 
 
+@NEEDS_CV2
 class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
     setUp_base = test_controller.FeedTest.setUp
     state = test_controller.FeedTest.state
@@ -355,7 +371,9 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         ctl.queue(self.root)
         self.assertEqual(self.state(), ctl.COMFY_SUBMITTED)
         job = json.loads(self.root.op("webclient_comfyui").requests[0][2])
-        self.assertIn("DepthAnythingV2Preprocessor", json.dumps(job))
+        node = job["prompt"]["19"]
+        self.assertEqual((node["class_type"], node["inputs"]["ckpt_name"]),
+                         ("DepthAnythingV2Preprocessor", "depth_anything_v2_vits.pth"))
         self.depth_done()
         self.assertEqual(ui.par.Sweepdepthpath.val, self.DEPTH_CONTAINER)
         self.assertEqual(len(self.spawned), 1)

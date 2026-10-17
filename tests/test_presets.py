@@ -42,13 +42,31 @@ class PresetDataTest(unittest.TestCase):
                     self.assertIsInstance(value, bool)
 
     def test_presets_leave_the_seed_and_checkpoint_setup_alone(self):
-        protected = {"seed", "seed_behavior", "loop_seeds", "sampler", "scheduler", "steps", "W", "H",
+        protected = {"seed", "loop_seeds", "sampler", "scheduler", "steps", "W", "H", "img2img_fix_steps",
                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
         for preset in presets.PRESETS:
             self.assertFalse(protected & set(preset.values), preset.id)
+            if preset.mode != "Video Input":
+                self.assertNotIn("seed_behavior", preset.values, preset.id)
             if "sweep" not in preset.id:
                 self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
                                  preset.id)
+
+    def test_video_presets_hold_the_seed_and_restyle_every_frame(self):
+        for preset in presets.PRESETS:
+            if preset.mode != "Video Input":
+                continue
+            self.assertEqual(preset.values["diffusion_cadence"], 1, preset.id)
+            expected = "iter" if preset.id == "video_melt" else "fixed"
+            self.assertEqual(preset.values["seed_behavior"], expected, preset.id)
+
+    def test_good_presets_pass_the_lcm_checks(self):
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        for preset in presets.PRESETS:
+            values = _comp_values(**presets.resolve(preset, defaults))
+            warnings = payload.build_request(values, {"0": "x"}, MODELS)["warnings"]
+            self.assertFalse([w for w in warnings if "LCM" in w or "int(steps" in w or "Cadence" in w],
+                             "%s: %s" % (preset.id, warnings))
 
     def test_sweep_presets_switch_sweep_on_and_use_unit_one_as_the_guide(self):
         sweeps = [p for p in presets.PRESETS if p.id.startswith("video_depth_sweep")]
@@ -61,6 +79,9 @@ class PresetDataTest(unittest.TestCase):
             self.assertTrue(p.values["sweep_enabled"] and p.values["cn_1_enabled"])
             self.assertEqual(p.values["feed_1_mode"], "sweep")
             self.assertTrue([k for k in p.values if k.startswith("sweep_")])
+            self.assertEqual(p.values["sweep_model"], "depth_anything_v2_vits")
+            self.assertGreater(p.values["sweep_grow"], 0)
+            self.assertGreater(p.values["sweep_blur"], 0)
 
     def test_reset_keys_are_motion_or_slot_toggles(self):
         for key in presets.RESET_KEYS:
@@ -76,7 +97,8 @@ class PresetDataTest(unittest.TestCase):
             s = result["request"]["deforum_settings"]
             self.assertEqual(s["animation_mode"], preset.mode, preset.id)
             self.assertEqual(sorted(k for k in s if k not in KNOWN_KEYS), [], preset.id)
-            self.assertEqual((s["seed"], s["seed_behavior"]), (424242, "iter"), preset.id)
+            behaviour = preset.values.get("seed_behavior", "iter")
+            self.assertEqual((s["seed"], s["seed_behavior"]), (424242, behaviour), preset.id)
             json.dumps(result["request"])
             if preset.level == presets.GOOD:
                 bad = [w for w in result["warnings"]
@@ -134,7 +156,7 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
         self.assertEqual(ui.par.Animationmode.val, "3D")
         self.assertEqual((ui.par.Translationz.val, ui.par.Translationzraw.val), (0.6, ""))
         self.assertEqual(ui.par.Zoom.val, 1.0, "motion not named by the preset goes back to baseline")
-        self.assertEqual(ui.par.Strengthschedule.val, 0.78)
+        self.assertEqual(ui.par.Strengthschedule.val, 0.75)
         self.assertEqual(ui.par.Seed.val, "424242")
         self.assertIn("3D - Tunnel roll", ui.par.Presetinfo.val)
 
@@ -182,6 +204,32 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
         self.pick("none")
         ctl.apply_preset(self.root)
         self.assertEqual((ui.par.Translationz.mode, ui.par.Translationz.expr), (ParMode.EXPRESSION, "op('lfo')[0]"))
+
+    def test_reapply_puts_the_preset_back_after_tweaks(self):
+        ui = self.make()
+        self.pick("video_depth_sweep_away")
+        ctl.apply_preset(self.root)
+        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val, ui.par.Feed1mode.val,
+                          ui.par.Cn1enabled.val), ("Video Input", 1, "sweep", 1))
+        ui.par.Animationmode.val, ui.par.Sweepenabled.val = "3D", 0       # tweaked / reset elsewhere
+        self.assertFalse(ctl.apply_preset(self.root))                     # same selection: kept
+        self.assertTrue(ctl.apply_preset(self.root, force=True))          # Re-apply Preset
+        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val), ("Video Input", 1))
+        self.pick("none")
+        ctl.apply_preset(self.root)
+        self.assertEqual((ui.par.Animationmode.val, ui.par.Sweepenabled.val), ("3D", 0))
+
+    def test_reapply_with_none_selected_does_nothing(self):
+        self.make()
+        self.assertFalse(ctl.apply_preset(self.root, force=True))
+
+    def test_edit_prompt_seq_opens_the_table(self):
+        self.make()
+        table = self.ui.op("prompt_seq")
+        opened = []
+        table.openViewer = lambda: opened.append(True)
+        ctl.open_prompt_seq(self.root)
+        self.assertEqual(opened, [True])
 
     def test_every_preset_applies_and_then_queues(self):
         ui = self.make()

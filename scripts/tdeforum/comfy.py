@@ -35,8 +35,14 @@ def build_prompt(template, cfg, values, plan, force=False, stamp=""):
     load["select_every_nth"] = 1
     workflow["11"]["inputs"]["width"] = width
     workflow["11"]["inputs"]["height"] = height
-    workflow["19"]["inputs"]["preprocessor"] = preprocessor
-    workflow["19"]["inputs"]["resolution"] = min(width, height)
+    resolution = int(values.get("comfy_resolution") or 0) or min(width, height)
+    if preprocessor.startswith("depth_anything_v2_vit"):
+        from . import sweep           # a dedicated node: the AIO one always loads the large model
+        workflow["19"] = sweep.comfy_depth_node(preprocessor, workflow["19"]["inputs"]["image"],
+                                                min(resolution, min(width, height)))
+    else:
+        workflow["19"]["inputs"]["preprocessor"] = preprocessor
+        workflow["19"]["inputs"]["resolution"] = min(resolution, min(width, height))
     # A new prefix changes the output node's inputs, so ComfyUI's cache can't
     # skip writing the file when a re-preprocess is forced.
     prefix = "preprocessed_vids/" + key + ("_" + stamp if force and stamp else "")

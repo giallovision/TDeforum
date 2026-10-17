@@ -180,11 +180,12 @@ def _apply_preset_safely(root):
         log("preset could not be applied: %s" % exc)
 
 
-def apply_preset(root):
+def apply_preset(root, force=False):
     """Lay the selected Example Preset over the deforum COMP (see presets.py). True if it changed anything.
 
     Does nothing while the selection equals what was last applied, so your tweaks after applying
-    stay. Picking another preset or None first puts back the values the last preset replaced.
+    stay (``force``, the Re-apply button, applies it again anyway). Picking another preset or None
+    first puts back the values the last preset replaced.
     Only constant parameters are touched; driven ones (expression / bind / export) keep their driver.
     """
     ui = _op(root, "ui")
@@ -194,7 +195,7 @@ def apply_preset(root):
     selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
     stored = root.fetch(PRESET_KEY, None, search=False)
     stored = dict(stored) if isinstance(stored, dict) else {}
-    if selected == stored.get("applied", presets.NONE):
+    if selected == stored.get("applied", presets.NONE) and not (force and selected != presets.NONE):
         return False
 
     restored = 0
@@ -242,6 +243,22 @@ def apply_preset(root):
     if kept:
         log("  driven (expression / bind / export) and left alone: %s" % ", ".join(sorted(kept)))
     return True
+
+
+def open_prompt_seq(root):
+    """Prompts page > Edit prompt_seq: the table lives inside the COMP; open it in a window."""
+    ui = _op(root, "ui")
+    table = _inner(ui, "prompt_seq")
+    if table is None:
+        log("no prompt_seq inside %s: run builder_master_ui" % (ui.path if ui is not None else "the COMP"))
+        return
+    try:
+        table.openViewer()
+    except Exception as exc:
+        log("could not open %s (%s); dive into the COMP (select it, press i) to edit it" % (table.path, exc))
+    source = getattr(ui.par, "Promptsource", None)
+    if source is not None and str(source.eval()) == "json":
+        log("note: Prompts > Prompt Source is prompt.json, so prompt_seq is not used until you switch it")
 
 
 def read_ui(ui):
@@ -661,7 +678,8 @@ def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1")
     force = payload._as_bool(values.get("force_preprocess", False))
     job_values = values
     if purpose == "sweep":        # same workflow, a depth preprocessor instead of unit 1's
-        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model)
+        job_values = dict(values, comfy_preprocessor=sweep.from_values(values).model,
+                          comfy_resolution=sweep.DEPTH_RESOLUTION)
     job = comfy.build_prompt(template, cfg, job_values, result["plan"], force=force,
                              stamp=time.strftime("%Y%m%d%H%M%S"))
     cache = dict(root.fetch(CACHE_KEY, {}, search=False) or {})
@@ -1662,7 +1680,9 @@ def doctor(root):
             log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
         rows = read_prompt_rows(ui)
-        log("prompt_seq rows: %d (source: %s)" % (max(0, len(rows or []) - 1), values.get("prompt_source")))
+        source = values.get("prompt_source")
+        log("prompt_seq rows: %d in %s/prompt_seq (Prompts > Edit prompt_seq opens it); prompts come from %s"
+            % (max(0, len(rows or []) - 1), ui.path, "prompt_seq" if source == "sequence" else "prompt.json"))
         _doctor_feeds(root, cfg, ui, values)
     for api in ("video_init_path", "video_mask_path", "cn_1_vid_path"):
         container_path = str(values.get(api, "") or "")

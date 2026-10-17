@@ -38,10 +38,17 @@ DIRECTION_LABELS = ["Forward (as the mode says)", "Reverse (swap start and end)"
 WHITE, DEPTH = "white", "depth"
 FILLS = [WHITE, DEPTH]
 FILL_LABELS = ["White (a flat white band)", "Depth (keep the depth shading inside the band)"]
-# ComfyUI AIO_Preprocessor names that make a depth map (comfyui_controlnet_aux).
-MODELS = ["DepthAnythingV2Preprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]
+# Depth models. depth_anything_v2_* run comfyui_controlnet_aux's DepthAnythingV2Preprocessor node
+# with that checkpoint (vits ~25M parameters: several times faster than vitl, plenty for a mask);
+# the others are AIO_Preprocessor names (the AIO DepthAnythingV2 entry always loads vitl).
+MODELS = ["depth_anything_v2_vits", "depth_anything_v2_vitb", "depth_anything_v2_vitl",
+          "DepthAnythingV2Preprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]
+MODEL_LABELS = ["Depth Anything V2 small (vits, fast)", "Depth Anything V2 base (vitb)",
+                "Depth Anything V2 large (vitl, slow)", "Depth Anything V2 via AIO (vitl, old default)",
+                "MiDaS", "Zoe"]
+DEPTH_RESOLUTION = 512      # ComfyUI detect resolution for the sweep depth (the mask is resized anyway)
 VIDEO_INPUT = "Video Input"
-RENDER_VERSION = 2          # bump when the pixels a job produces change
+RENDER_VERSION = 3          # bump when the pixels a job produces change
 FOURCCS = ("mp4v", "avc1")  # first one the OpenCV build can open wins
 _EPS = 1e-9
 
@@ -61,10 +68,10 @@ def _num(value, default):
 
 class Settings(object):
     __slots__ = ("mode", "cycles", "shape", "direction", "width", "softness", "fill", "model",
-                 "trail", "smooth")
+                 "trail", "smooth", "grow", "blur")
 
     def __init__(self, mode=MAX, cycles=1.0, shape=RAMP, direction=FORWARD, width=10,
-                 softness=0, fill=WHITE, model=MODELS[0], trail=0, smooth=0.0):
+                 softness=0, fill=WHITE, model=MODELS[0], trail=0, smooth=0.0, grow=0, blur=0.0):
         self.mode = mode if mode in MODES else MAX
         self.cycles = max(0.05, float(cycles))
         self.shape = shape if shape in SHAPES else RAMP
@@ -75,6 +82,8 @@ class Settings(object):
         self.model = model if model else MODELS[0]
         self.trail = min(240.0, max(0.0, float(trail)))
         self.smooth = min(0.95, max(0.0, float(smooth)))
+        self.grow = int(min(64, max(0, round(float(grow)))))
+        self.blur = min(48.0, max(0.0, float(blur)))
 
     def as_dict(self):
         return dict((name, getattr(self, name)) for name in self.__slots__)
@@ -88,7 +97,8 @@ def from_values(values):
         shape=str(get("sweep_shape", RAMP)), direction=str(get("sweep_direction", FORWARD)),
         width=_num(get("sweep_width", 10), 10), softness=_num(get("sweep_softness", 0), 0),
         fill=str(get("sweep_fill", WHITE)), model=str(get("sweep_model", MODELS[0]) or MODELS[0]),
-        trail=_num(get("sweep_trail", 0), 0), smooth=_num(get("sweep_smooth", 0), 0))
+        trail=_num(get("sweep_trail", 0), 0), smooth=_num(get("sweep_smooth", 0), 0),
+        grow=_num(get("sweep_grow", 0), 0), blur=_num(get("sweep_blur", 0), 0))
 
 
 def enabled(values):
@@ -177,6 +187,10 @@ def describe(sweep_plan):
         s.mode, s.cycles, "" if s.cycles == 1 else "s", s.shape, round(s.width),
         levels(first[0], first[1]), levels(last[0], last[1]), len(bands))
     extras = []
+    if s.grow:
+        extras.append("grow %dpx" % s.grow)
+    if s.blur:
+        extras.append("blur %gpx" % s.blur)
     if s.trail:
         extras.append("trail %g frames" % s.trail)
     if s.smooth:
@@ -187,6 +201,30 @@ def describe(sweep_plan):
 def trail_decay(trail_frames):
     """Per-frame multiplier so a trail has faded to ~5 % after ``trail_frames`` frames."""
     return math.exp(-3.0 / trail_frames) if trail_frames > 0 else 0.0
+
+
+def comfy_depth_node(model, image_link, resolution=DEPTH_RESOLUTION):
+    """The ComfyUI node that makes the depth map for ``model`` (replaces the AIO node)."""
+    if str(model).startswith("depth_anything_v2_vit"):
+        return {"class_type": "DepthAnythingV2Preprocessor",
+                "inputs": {"ckpt_name": "%s.pth" % model, "resolution": int(resolution), "image": image_link},
+                "_meta": {"title": "TD_PREPROCESSOR"}}
+    return {"class_type": "AIO_Preprocessor",
+            "inputs": {"preprocessor": model, "resolution": int(resolution), "image": image_link},
+            "_meta": {"title": "TD_PREPROCESSOR"}}
+
+
+def shape_mask(m, grow=0, blur=0.0):
+    """Widen (dilate by ``grow`` px) and soften (Gaussian, sigma ``blur`` px) a float mask."""
+    if not grow and not blur:
+        return m
+    import cv2
+    if grow:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1))
+        m = cv2.dilate(m, kernel)
+    if blur:
+        m = cv2.GaussianBlur(m, (0, 0), blur)
+    return m
 
 
 def mask(depth, lo, hi, softness=0.0, fill=WHITE):
@@ -308,7 +346,7 @@ def render(depth_path, out_path, sweep_plan, size, fps=30.0):
                 ema = s.smooth * ema + (1.0 - s.smooth) * depth
             else:
                 ema = depth
-            m = mask(ema, lo, hi, soft, fill)
+            m = shape_mask(mask(ema, lo, hi, soft, fill), s.grow, s.blur)
             acc = m if (acc is None or not decay) else np.maximum(m, acc * decay)
             pixels = np.clip(acc * 255.0 + 0.5, 0, 255).astype(np.uint8)
             writer.write(cv2.cvtColor(pixels, cv2.COLOR_GRAY2BGR))
