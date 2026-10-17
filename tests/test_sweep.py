@@ -333,7 +333,8 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         self.spawned = []
 
         def inline(target, *args):            # the background render runs right here
-            self.spawned.append(args)
+            if target is sweep.run_job:       # (output 3's input-loop jobs are not counted)
+                self.spawned.append(args)
             target(*args)
         patcher = mock.patch.object(ctl, "_spawn", side_effect=inline)
         patcher.start()

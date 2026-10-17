@@ -10,6 +10,9 @@ if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
 
+os.environ["TDEFORUM_OFFLINE"] = "1"      # output 3's init-video download never leaves the test machine
+
+
 class ParMode(enum.Enum):
     CONSTANT = 0
     EXPRESSION = 1

@@ -707,20 +707,34 @@ def _input_expect(result, cfg, rate, fps=30.0):
     if folder and info["size"][0] and info["size"][1]:
         info["job"] = inputloop.make_job(info["share"], folder, cfg["cn_feed_dir"], info["size"], info["start"],
                                          info["stride"], int(plan.get("max_frames") or 0) or 1, fps)
+        view = config.comfy_view(cfg, init) if not os.path.isfile(info["share"]) else None
+        if view:          # not visible over SMB: ComfyUI serves its input folder over HTTP
+            info["job"]["fetch_url"] = config.comfy_view_url(cfg, *view)
+            info["job"]["fetch_local"] = config.fetch_paths(cfg, init)[0]
     return info
 
 
 _INPUT_RUNNING = set()
+_INPUT_WARNED = set()
 
 
-def _start_input_job(info):
-    """Conform the init video for output 3 in the background (no-op when cached / running)."""
+def _start_input_job(info, quiet=False):
+    """Conform the init video for output 3 in the background (no-op when cached / running).
+    False when its source cannot be read from TouchDesigner (said once per source)."""
     job = (info or {}).get("job")
     if not job or job["key"] in _INPUT_RUNNING or inputloop.ready(job):
-        return
-    if not os.path.isfile(job["src"]):
-        log("input loop: %s is not readable from TouchDesigner; output 3 stays empty" % job["src"])
-        return
+        return True
+    if not inputloop.source_readable(job):
+        if not quiet and job["src"] not in _INPUT_WARNED:
+            _INPUT_WARNED.add(job["src"])
+            log("input loop: TouchDesigner cannot read %s (check that the share serves that folder: a "
+                "symlink outside the share is invisible over SMB); output 3 will use the frames Deforum "
+                "extracts, once the render is done" % job["src"])
+        return False
+    if not os.path.isfile(job["src"]) and job.get("fetch_url") and job["src"] not in _INPUT_WARNED:
+        _INPUT_WARNED.add(job["src"])
+        log("input loop: %s is not visible over the share; downloading it from ComfyUI for output 3"
+            % os.path.basename(job["src"]))
     try:
         os.remove(job["sidecar"])
     except OSError:
@@ -733,6 +747,7 @@ def _start_input_job(info):
         finally:
             _INPUT_RUNNING.discard(j["key"])
     _spawn(work, job)
+    return True
 
 
 def _write_runtime_json(cfg, name, data):
@@ -1158,6 +1173,7 @@ def _submit_deforum(root, cfg, result, st):
     expect = _expectation(result, cfg)
     _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now, "expect": expect})
     _start_input_job((expect or {}).get("input"))   # conform output 3 while Deforum renders
+    root.store(INPUT_PENDING_KEY, None)
     _set_status(root, "render: submitted")
     log("render submitted: " + payload.summary(result))
 
@@ -1569,8 +1585,8 @@ def _poll_input(root):
         return
     done = inputloop.read_result(job["sidecar"])
     if done is None:
-        if job["key"] not in _INPUT_RUNNING:
-            _start_input_job(info)        # e.g. TD was restarted while it ran
+        if job["key"] not in _INPUT_RUNNING and not _start_input_job(info):   # e.g. TD restarted meanwhile
+            root.store(INPUT_PENDING_KEY, None)                              # unreadable: stop polling
         return
     root.store(INPUT_PENDING_KEY, None)
     if done.get("ok"):
@@ -1929,7 +1945,7 @@ def _load_movie(root, path, expect=None):
             reload_ = getattr(player.par, "reloadpulse", None)
             if reload_ is not None:
                 reload_.pulse()
-    _load_input(root, ui, (expect or {}).get("input"))
+    _load_input(root, ui, (expect or {}).get("input"), path)
     root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
     if expect and expect.get("out_loop"):
         loop = int(expect["out_loop"])                 # output frames per loop
@@ -1950,24 +1966,39 @@ def _load_movie(root, path, expect=None):
                "" if frames else " (file length unknown, used the plan)"))
 
 
-def _load_input(root, ui, info):
+def _load_input(root, ui, info, render_path=None):
     """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross).
 
     Plays the conformed copy (inputloop.py: exactly the frames Deforum used, at render size, in a
-    codec TD opens); while that is still being written it waits (tick() fills it in)."""
+    codec TD opens); while that is still being written it waits (tick() fills it in). When TD
+    cannot read the init video, the frames Deforum extracted next to the render are used."""
     if ui is None:
         return
     job = (info or {}).get("job")
+    if job and not job.get("src_dir") and not inputloop.ready(job) and not inputloop.source_readable(job) \
+            and render_path:
+        folder = inputloop.frames_dir(os.path.dirname(render_path))
+        if folder:
+            cfg = config.load()
+            job = inputloop.make_frames_job(folder, os.path.dirname(job["out_share"]), cfg["cn_feed_dir"],
+                                            job["size"], job["frames"], job["fps"])
+            info = dict(info, job=job)
+            log("input loop: using Deforum's extracted frames %s for output 3" % folder)
+        else:
+            log("input loop: no extracted frames next to %s either; output 3 stays empty" % render_path)
+            info, job = dict(info, job=None), None
     share = (info or {}).get("share") or ""
     start, stride = int((info or {}).get("start", 0)), int((info or {}).get("stride", 1))
     if job:
         if inputloop.ready(job):
             share, start, stride = job["out_share"], 0, 1         # frames already picked and sized
             root.store(INPUT_PENDING_KEY, None)
-        else:
-            _start_input_job(info)
+        elif _start_input_job(info):
             root.store(INPUT_PENDING_KEY, info)
             log("input loop: conforming %s for output 3 (fills in when ready)" % os.path.basename(job["src"]))
+            share = ""
+        else:
+            root.store(INPUT_PENDING_KEY, None)
             share = ""
     if info:
         _set_par(ui, "Loopinstart", str(start))
@@ -2303,8 +2334,9 @@ def _doctor_share_links(cfg, values):
     if hidden:
         log("NOTE %s live in ComfyUI's input/output folders. The container reaches them through its "
             "volume mounts, but on the GPU host td_inputs/comfy_videos is a symlink out of the share and "
-            "Samba does not follow it, so TouchDesigner cannot. Sweep Depth downloads what it needs from "
-            "ComfyUI (%s), and learns the init video's length from its depth video. To make them visible "
+            "Samba does not follow it, so TouchDesigner cannot. Sweep Depth and output 3 (the input loop) "
+            "download what they need from ComfyUI (%s), and the init video's length is learned from its depth "
+            "video. To make them visible "
             "on T: anyway, bind-mount the folders instead of symlinking (README > Share layout)."
             % (", ".join(hidden), cfg["comfy_fetch_dir"]))
 

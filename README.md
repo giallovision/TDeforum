@@ -249,7 +249,7 @@ sudo mount -a && make down && make up
 |---|---|
 | 1 `out_loop` | the render, seamless loop player |
 | 2 `out_sweep` | the last Sweep Depth mask video |
-| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit) |
+| 3 `out_input` | the **init video looped the same way as the render**: while Deforum renders, TouchDesigner's OpenCV writes the exact frames Deforum used (start / stride), at render size, in a codec TD opens, to `td_masks/feeds/input_loop_<key>.mp4` (cached); it plays with the render's playhead and seam crossfade, so outputs 1 and 3 line up frame for frame. This also fixes init videos TD's Movie File In cannot decode (AV1, VP9, HEVC, 10-bit). When the init video is not visible on the share (`td_inputs/comfy_videos` is a symlink Samba does not follow), it is downloaded from ComfyUI's `/view` first; failing that, output 3 is made from the frames Deforum extracted (`<render>/inputframes`) once the render is done |
 
 *Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
 

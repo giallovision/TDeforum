@@ -77,5 +77,72 @@ class InputPendingTest(unittest.TestCase):
         self.assertIsNone(self.root.fetch(ctl.INPUT_PENDING_KEY))
 
 
+    def test_unreadable_video_uses_deforums_extracted_frames_and_says_so_once(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV not installed")
+        from tdeforum import inputloop
+        render = self.share + "/outputs/Deforum_1/1_RIFE_x3.mp4"
+        frames = self.share + "/outputs/Deforum_1/inputframes"
+        os.makedirs(frames)
+        for i in range(8):                                   # Deforum's corridor000000000.jpg ...
+            cv2.imwrite(frames + "/corridor%09d.jpg" % i, np.full((40, 70, 3), 20 * i, np.uint8))
+        missing = self.share + "/td_inputs/corridor.mp4"     # a symlink the share does not serve
+        job = inputloop.make_job(missing, self.share + "/feeds", "/opt/a1111/td_masks/feeds", (64, 36), 0, 1, 6, 20)
+        info = {"share": missing, "start": 0, "stride": 1, "rate": 1.0, "job": job}
+        logged = []
+        with mock.patch.object(ctl, "log", side_effect=logged.append), \
+                mock.patch.object(ctl, "_spawn", side_effect=lambda target, *args: target(*args)), \
+                mock.patch.object(config, "load", return_value=dict(config.load(), cn_feed_dir="/opt/x/feeds")):
+            ctl._start_input_job(info)                        # at Queue: unreadable, said once
+            for _ in range(5):
+                ctl._start_input_job(info)
+                ctl._poll_input(self.root)
+            self.assertEqual(sum("cannot read" in line for line in logged), 1, logged)
+            ctl._load_input(self.root, self.ui, info, render)  # after the render
+            ctl._poll_input(self.root)
+        played = self.ui.op("in_head").par.file.val
+        self.assertIn("/feeds/input_loop_f", played)
+        capture = cv2.VideoCapture(played)
+        self.assertEqual((int(capture.get(7)), int(capture.get(3))), (6, 64))
+        capture.release()
+        self.assertTrue(any("extracted frames" in line for line in logged))
+
+
+    def test_init_video_not_on_the_share_is_downloaded_from_comfyui(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenCV not installed")
+        from tdeforum import inputloop
+        real = self.share + "/real.mp4"
+        writer = cv2.VideoWriter(real, cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 18))
+        for i in range(10):
+            writer.write(np.full((18, 32, 3), i * 20, np.uint8))
+        writer.release()
+        job = inputloop.make_job(self.share + "/hidden/corridor.mp4", self.share + "/feeds",
+                                 "/opt/a1111/td_masks/feeds", (64, 36), 0, 1, 5, 20)
+        job.update(fetch_url="http://comfy/view?filename=corridor.mp4&type=input",
+                   fetch_local=self.share + "/comfy_fetch/corridor.mp4")
+        fetched = []
+
+        def fake(url, path):
+            fetched.append(url)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            shutil.copy(real, path)
+            return os.path.getsize(path)
+        env = dict(os.environ)
+        env.pop("TDEFORUM_OFFLINE", None)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(inputloop, "download", side_effect=fake):
+            self.assertTrue(inputloop.source_readable(job))
+            result = inputloop.run_job(job)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((result["frames"], len(fetched)), (5, 1))
+        self.assertTrue(inputloop.ready(job))
+
+
 if __name__ == "__main__":
     unittest.main()
