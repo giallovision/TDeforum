@@ -34,7 +34,7 @@ class ControllerTest(unittest.TestCase):
         cfg.update(share_root=self.share + "/", runtime_dir=self.share + "/runtime",
                    prompt_file=self.share + "/prompt.json",
                    comfy_template=os.path.join(ROOT_DIR, "scripts", "templates", "TD_CN_PreProc.json"),
-                   poll_interval_s=0.0)
+                   poll_interval_s=0.0, comfy_transport="webclient")
         with open(cfg["prompt_file"], "w") as fh:
             json.dump({"0": "liquid gold"}, fh)
         self.cfg = cfg
@@ -44,6 +44,9 @@ class ControllerTest(unittest.TestCase):
         ports = mock.patch.object(ctl, "_reachable", return_value="open")
         ports.start()
         self.addCleanup(ports.stop)
+        http = mock.patch.object(ctl, "_http", return_value=(200, "{}"))
+        http.start()
+        self.addCleanup(http.stop)
         self.addCleanup(shutil.rmtree, self.share)
         self.root = make_network(dict(UI))
 

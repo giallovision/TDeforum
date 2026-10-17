@@ -313,6 +313,48 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         ctl.queue(self.root)
         self.assertEqual(self.state(), ctl.CAPTURING)
 
+    def test_urllib_transport_runs_the_whole_depth_stage(self):
+        self.cfg["comfy_transport"] = "urllib"
+        ui = self.make()
+        path = config.to_share(self.cfg, "/opt/a1111/td_masks/preprocessed_vids/" + self.DEPTH)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * 50)
+        calls = []
+
+        def fake(method, url, data=None, timeout=15.0):
+            calls.append((method, url))
+            if method == "POST":
+                return 200, json.dumps({"prompt_id": "p1", "number": 1, "node_errors": {}})
+            return 200, json.dumps({"p1": {"status": {"status_str": "success", "completed": True},
+                                           "outputs": {"21": {"gifs": [{"filename": self.DEPTH,
+                                                                        "subfolder": "preprocessed_vids"}]}}}})
+        with mock.patch.object(ctl, "_http", side_effect=fake):
+            ctl.queue(self.root)
+            self.assertEqual(self.state(), ctl.COMFY_RUNNING)
+            self.tick()
+        self.assertEqual([c[0] for c in calls], ["POST", "GET"])
+        self.assertTrue(calls[0][1].endswith(":8188/prompt") and calls[1][1].endswith("/history/p1"))
+        self.assertEqual(self.state(), ctl.CAPTURING)
+        self.assertEqual(self.root.op("webclient_comfyui").requests, [], "the Web Client DAT is not used")
+
+    def test_urllib_failure_names_the_reason(self):
+        self.cfg["comfy_transport"] = "urllib"
+        ui = self.make()
+        with mock.patch.object(ctl, "_http", side_effect=OSError("[WinError 10061] refused")):
+            ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("WinError 10061", ui.par.Pipelinestatus.val)
+
+    def test_comfy_rejection_text_reaches_the_status(self):
+        self.cfg["comfy_transport"] = "urllib"
+        ui = self.make()
+        bad = json.dumps({"error": {"message": "Prompt outputs failed validation"}, "node_errors": {}})
+        with mock.patch.object(ctl, "_http", return_value=(400, bad)):
+            ctl.queue(self.root)
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("rejected the workflow (HTTP 400)", ui.par.Pipelinestatus.val)
+
     def test_unreachable_comfyui_fails_at_once_with_the_address(self):
         ui = self.make()
         ctl.queue(self.root)

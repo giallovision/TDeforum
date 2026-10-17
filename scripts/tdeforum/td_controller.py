@@ -457,8 +457,7 @@ def cancel(root):
         _op(root, "progress").request(
             config.deforum_url(cfg, "/deforum_api/jobs/%s" % st["job_id"]), "DELETE")
     elif st.get("state") in (COMFY_SUBMITTED, COMFY_RUNNING):
-        _op(root, "comfy").request(config.comfy_url(cfg, "/interrupt"), "POST",
-                                   header=JSON_HEADERS, data="{}")
+        _comfy_call(root, cfg, "POST", "/interrupt", "{}")
     elif st.get("state") in (CAPTURING, WAITING_FEED):
         _abort_capture(root, st)
     _finish(root, st, "cancelled (was %s)" % st.get("state", IDLE))
@@ -504,15 +503,14 @@ def _start_preprocess(root, cfg, values, result, st, then_render, purpose="cn1")
         log("preprocess cache hit: %s" % cache[job["cache_key"]])
         return False
 
-    _op(root, "comfy").request(config.comfy_url(cfg, "/prompt"), "POST",
-                               header=JSON_HEADERS, data=json.dumps(job["body"]))
     now = time.time()
     st = {"state": COMFY_SUBMITTED, "submitted": now, "updated": now,
           "cache_key": job["cache_key"], "then_render": then_render, "purpose": purpose}
-    _save(root, st)
+    _save(root, st)                       # before the call: the answer may arrive inside it
     _set_status(root, "preprocessing: submitted")
     log("ComfyUI %s submitted: %s (%s frames)" % ("depth preprocess" if purpose == "sweep" else "preprocess",
                                                   job["cache_key"], result["plan"]["source_frames"]))
+    _comfy_call(root, cfg, "POST", "/prompt", json.dumps(job["body"]))
     return True
 
 
@@ -1014,7 +1012,9 @@ def tick(root):
         _fail(root, st, "lost contact while %s (no response for %ds)" % (current, LOST_CONTACT_S))
         return
     elif current == COMFY_RUNNING:
-        _op(root, "comfy").request(config.comfy_url(cfg, "/history/%s" % st["comfy_prompt_id"]), "GET")
+        _save(root, st)                   # the answer may be handled inside the call
+        _comfy_call(root, cfg, "GET", "/history/%s" % st["comfy_prompt_id"])
+        return
     elif current == DEFORUM_RUNNING:
         _op(root, "progress").request(
             config.deforum_url(cfg, "/deforum_api/jobs/%s" % st["job_id"]), "GET")
@@ -1061,6 +1061,37 @@ def on_response(root, dat, status_code, data):
     except Exception as exc:
         traceback.print_exc()
         log("response handling failed for %s: %s" % (dat.name, exc))
+
+
+def _http(method, url, data=None, timeout=15.0):
+    """(status code, body text) of a plain HTTP call from this computer; raises on no answer."""
+    import urllib.error
+    import urllib.request
+    body = data.encode("utf-8") if isinstance(data, str) else data
+    request = urllib.request.Request(url, data=body, method=method, headers=JSON_HEADERS)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            return reply.status, reply.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:         # an answer, just not a good one
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def _comfy_call(root, cfg, method, path, data=None):
+    """Send a request to ComfyUI; its answer reaches _on_comfy() either way.
+
+    Default transport is Python's urllib (ComfyUI's replies are small and quick), which also
+    says *why* a call failed. cfg["comfy_transport"] = "webclient" uses the Web Client DAT."""
+    url = config.comfy_url(cfg, path)
+    if cfg.get("comfy_transport", "urllib") == "webclient":
+        _op(root, "comfy").request(url, method, header=JSON_HEADERS, data=data)
+        return
+    dat = _op(root, "comfy")
+    try:
+        code, text = _http(method, url, data)
+    except Exception as exc:
+        on_error(root, dat, "%s %s: %s" % (method, url, exc))
+        return
+    on_response(root, dat, {"code": code}, text.encode("utf-8"))
 
 
 def on_error(root, dat, error):
@@ -1437,6 +1468,11 @@ def doctor(root):
         getattr(sys.modules.get("tdeforum"), "__version__", "?"), len(presets.PRESETS),
         "yes" if schema.PAGE_SWEEP in schema.PAGE_ORDER else "no"))
     log("Deforum %s | ComfyUI %s" % (config.deforum_url(cfg), config.comfy_url(cfg)))
+    try:
+        code, _text = _http("GET", config.comfy_url(cfg, "/system_stats"), timeout=4.0)
+        log("ComfyUI answered GET /system_stats with HTTP %s" % code)
+    except Exception as exc:
+        log("ComfyUI GET /system_stats failed: %s" % exc)
     log("port check from this computer: Deforum %s:%s %s | ComfyUI %s:%s %s" % (
         cfg["server_host"], cfg["deforum_port"], _reachable(cfg["server_host"], cfg["deforum_port"]),
         cfg["server_host"], cfg["comfy_port"], _reachable(cfg["server_host"], cfg["comfy_port"])))

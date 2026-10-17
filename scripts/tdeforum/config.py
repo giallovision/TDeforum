@@ -17,6 +17,9 @@ DEFAULTS = {
     "server_host": "192.168.1.42",
     "deforum_port": 7865,
     "comfy_port": 8188,
+    # How TouchDesigner talks to ComfyUI: "urllib" (Python, real error messages) or "webclient"
+    # (the webclient_comfyui Web Client DAT).
+    "comfy_transport": "urllib",
     # Container path prefix -> path relative to the share root (T:/).
     # Mirrors the volume list in docker-compose.yml; longest prefix wins.
     # NOTE: /opt/a1111/outputs is ./td_outputs on the host, not ./outputs.
