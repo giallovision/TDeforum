@@ -774,10 +774,17 @@ def _start_sweep_render(root, cfg, st):
                 "out_share": job["out_share"], "sidecar": job["sidecar"], "init": values.get("video_init_path")}
         if done and done.get("ok") and done.get("out_container"):
             meta.update(out=done["out_container"], out_share=done.get("out_share") or job["out_share"])
-        if done and done.get("ok") and os.path.isfile(meta["out_share"]):
+        forced = sweep_forced(values)
+        if done and done.get("ok") and os.path.isfile(meta["out_share"]) and not forced:
             log("sweep cache hit: %s (%s frames)" % (meta["out"], done.get("frames")))
             _after_sweep(root, cfg, st, meta, done)
             return
+        if forced:
+            meta.update(out=job["out_container"], out_share=job["out_share"])
+            log("sweep: cache ignored (%s), rendering it again" % (
+                "Force Re-render Sweep" if payload._as_bool(values.get("sweep_force", False))
+                else "Force Preprocess"))
+            _release_sweep_preview(_op(root, "ui"), job["out_share"])
         if job["fetch_url"]:
             log("sweep: downloading the depth video from ComfyUI -> %s" % job["depth_local"])
         try:
@@ -905,6 +912,28 @@ def _remake_depth(root, cfg, st, done):
     except Exception as exc:
         traceback.print_exc()
         _fail(root, st, "Sweep Depth: %s" % exc)
+
+
+def sweep_forced(values):
+    """Sweep Depth > Force Re-render Sweep, or Pipeline > Force Preprocess (which also remakes
+    the depth video): render the band mask again even when the same one is cached."""
+    return payload._as_bool(values.get("sweep_force", False)) or \
+        payload._as_bool(values.get("force_preprocess", False))
+
+
+def _release_sweep_preview(ui, share_path):
+    """Let go of the file sweep_preview shows before it is overwritten (Windows keeps open
+    files locked, and the render replaces the file in place)."""
+    preview = _inner(ui, "sweep_preview")
+    par = getattr(getattr(preview, "par", None), "file", None)
+    if par is None:
+        return
+    try:
+        shown = str(par.eval() or "")
+    except Exception:
+        return
+    if os.path.normcase(os.path.normpath(shown or ".")) == os.path.normcase(os.path.normpath(share_path)):
+        _set_constant(par, "")
 
 
 def _show_sweep(ui, share_path):
@@ -1196,11 +1225,11 @@ def _begin_loop_capture(root, cfg, values, result, loops):
     units = []
     for want in loops:
         sel, out = _feed_ops(ui, want.unit)
-        _resolve_top(root, want.top, want.unit)
+        top_path = getattr(_resolve_top(root, want.top, want.unit), "path", None) or want.top
         share, container = _feed_target(cfg, want)
         if os.path.isfile(share):
             os.remove(share)                  # so "file exists" below means "this recording"
-        _set_constant(_par(sel, "top"), want.top)
+        _set_constant(_par(sel, "top"), top_path)   # absolute: the Select TOP sits inside the COMP
         _set_constant(_par(out, "file"), share)
         for name, value in (("type", "movie"), ("pause", 0), ("record", 0)):
             par = getattr(out.par, name, None)

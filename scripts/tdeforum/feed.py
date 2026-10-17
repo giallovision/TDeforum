@@ -42,6 +42,8 @@ def _truthy(value):
     return bool(value)
 
 
+DEFAULT_TOP = "/project1/final_out"   # Source TOP of every unit until you set another
+
 class Request(object):
     """One ControlNet unit whose guide comes from a TOP."""
     __slots__ = ("unit", "mode", "top")

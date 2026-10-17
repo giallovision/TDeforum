@@ -36,7 +36,7 @@ def _const(value):
 # equal to the OLD default is not carried over, so the COMP picks up the new baseline; anything
 # you set to something else is kept. Each bump applies once: build_master_ui stores the version
 # it built with in the COMP, so setting an old value again on purpose survives later rebuilds.
-BASELINE_VERSION = 2
+BASELINE_VERSION = 3
 BASELINE_BUMPS = {
     "seed": (1, "-1", "424242"),
     "loop_seeds": (1, True, False),
@@ -46,6 +46,10 @@ BASELINE_BUMPS = {
     "noise_schedule": (2, 0.065, 0.02),
     "noise_multiplier_schedule": (2, 1.05, 1.0),
     "sweep_model": (2, "DepthAnythingV2Preprocessor", "depth_anything_v2_vits"),
+    # 3: every ControlNet unit's Source TOP defaults to final_out (empty ones pick it up).
+    "feed_1_top": (3, "", "/project1/final_out"),
+    "feed_2_top": (3, "", "/project1/final_out"),
+    "feed_3_top": (3, "", "/project1/final_out"),
 }
 
 

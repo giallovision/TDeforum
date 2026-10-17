@@ -1,6 +1,6 @@
 # deforum COMP: parameter reference
 
-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
 Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
@@ -237,6 +237,7 @@ Slots 1-8 each have the same seven parameters (`Mod1active` ... `Mod8sharpness`)
 | `Sweepmodel` | Depth Model (ComfyUI) | depth_anything_v2_vits | Depth model ComfyUI uses for the depth video (Depth Anything V2 small is the fast default). |
 | `Sweepdepthvideo` | Pre-made Depth Video (container path; empty = make it from Video Init Path) | (empty) | A depth video you made yourself (container path); ComfyUI is skipped. |
 | `Sweepprepareonly` | Queue only prepares the sweep (depth + mask video, no render) | Off | Queue stops after the depth and sweep videos exist, so you can preview before rendering. |
+| `Sweepforce` | Force Re-render Sweep (ignore the sweep cache; depth video kept) | Off | Renders the sweep mask again at the next Queue even if the same one is cached (the depth video is reused). Turn it off again afterwards, or every Queue re-renders. |
 | `Sweepdepthpath` | Depth Video | (read-only) | Read-only: the depth video in use. |
 | `Sweepinfo` | Sweep Plan | (read-only) | Read-only: the sweep plan (bands at start/end, frames, render time). |
 | `Sweepshowlatest` | Show Latest Sweep (sweep_preview / COMP output 2) | (button) | Points sweep_preview (COMP output 2) at the newest sweep video. |
@@ -250,7 +251,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
 | `Pagepresetcn1val` | Page Preset (ControlNet Unit 1) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Cn1enabled` | Enabled | Off | Turns this ControlNet unit on. |
 | `Feed1mode` | Guide Source | file | Where the guide video comes from: File (Vid Path), a TOP recorded as a loop or as a still, or Sweep Depth. |
-| `Feed1top` | Source TOP (path, e.g. /project1/final_out) | (empty) | The TOP to record as the guide when Guide Source is a TOP. |
+| `Feed1top` | Source TOP (path, e.g. /project1/final_out) | /project1/final_out | The TOP to record as the guide when Guide Source is a TOP (default /project1/final_out on every unit). |
 | `Feed1info` | Last Feed | (read-only) | Read-only: when and how the last guide was made. |
 | `Cn1module` | Module | none | ControlNet preprocessor run inside A1111 (none = use the guide as-is, right for QR Monster and ready-made maps). |
 | `Cn1model` | Model | ctrl_v1p_qr_monster_v2 | ControlNet model, e.g. ctrl_v1p_qr_monster_v2. |
@@ -278,7 +279,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
 | `Pagepresetpipeline` | Page Preset (Pipeline) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Pipelinestatus` | Status | (read-only) | Read-only: what the pipeline is doing right now (preprocessing, sweep, render %, idle). |
 | `Autoload` | Auto-load finished render | On | Loads the finished render into moviefilein1 and the loop player automatically. |
-| `Forcepreprocess` | Force ComfyUI re-preprocess | Off | Ignores cached ComfyUI results and makes them again. |
+| `Forcepreprocess` | Force ComfyUI re-preprocess | Off | Ignores cached ComfyUI results (Unit 1 preprocessing and the Sweep depth video) and the sweep mask cache, and makes them all again. |
 | `Loopoutframes` | Loaded loop length (frames) | (read-only) | Read-only: loop length of the loaded render (frames). |
 | `Loopoutoverlap` | Loaded loop overlap (frames) | (read-only) | Read-only: seam overlap of the loaded render (frames). |
 | `Loopoutrate` | Loaded file frames per output frame | (read-only) | Read-only: file frames per output frame (0.5 when an un-interpolated render plays at half speed). |

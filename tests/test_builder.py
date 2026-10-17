@@ -364,7 +364,8 @@ class BuilderTest(unittest.TestCase):
 
     def test_lcm_baseline_bump_applies_once(self):
         comp = self.build()
-        self.assertEqual(comp.storage["tdeforum_baseline"], 2)
+        self.assertEqual(comp.storage["tdeforum_baseline"], 3)
+        self.assertEqual(comp.par.Feed2top.val, "/project1/final_out")
         self.assertEqual((comp.par.Steps.val, comp.par.Cfgscaleschedule.val), (4, 1.8))
         comp.storage["tdeforum_baseline"] = 1          # a COMP built before this baseline...
         comp.par.Cfgscaleschedule.val = 7.0            # ...still at the old CFG

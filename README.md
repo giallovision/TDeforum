@@ -207,7 +207,7 @@ A moving band through the depth of your init video, rendered as a ControlNet gui
 
 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
 2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
-3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render.
+3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render. To render it again anyway, turn on *Force Re-render Sweep* (keeps the depth video) or *Pipeline › Force Preprocess* (remakes the depth video too) for one Queue.
 4. Then the render is submitted as usual.
 
 Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse.
@@ -223,6 +223,7 @@ Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a
 | Also use as Video Mask | `video_mask_path` / `use_mask_video` = the same movie (the unit may then stay off) |
 | Pre-made Depth Video | a container path of your own depth video; ComfyUI is skipped |
 | Queue only prepares the sweep | stops after the mask video exists: look at `sweep_preview`, tweak, Queue again (cached), then switch it off to render |
+| Force Re-render Sweep | ignore the sweep cache at the next Queue (depth video reused); switch it off again afterwards |
 
 Render frame k shows source frame `extract_from + k * nth`. If the depth video turns out shorter than the frames the render needs, the init video is shorter too: the controller remembers its length (doctor shows it) and plans the render to it.
 

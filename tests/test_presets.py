@@ -166,6 +166,9 @@ class BaselineTest(unittest.TestCase):
         self.assertEqual(len([a for a in actions if a[0] == "note"]), 2)
         kept = migrate.plan({"Seed": const("99"), "Loopseeds": const(0)}, False)
         self.assertEqual(sorted(a[1] for a in kept if a[0] == "set"), ["Loopseeds", "Seed"])
+        tops = migrate.plan({"Feed1top": const(""), "Feed2top": const("/project1/my_top")}, False)
+        self.assertEqual([a[1] for a in tops if a[0] == "set"], ["Feed2top"])     # empty -> final_out
+        self.assertEqual(schema.BY_API["feed_3_top"].default, "/project1/final_out")
         driven = migrate.plan({"Seed": {"mode": "EXPRESSION", "expr": "absTime.frame", "bind": "", "val": "-1"}},
                               False)
         self.assertEqual([a[1] for a in driven if a[0] == "set"], ["Seed"])

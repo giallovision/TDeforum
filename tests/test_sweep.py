@@ -296,7 +296,7 @@ class SchemaFeedTest(unittest.TestCase):
         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
         fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP and not f.api.startswith("pagepreset")]
         self.assertEqual(sorted(f.api for f in fields), sorted(
-            ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
+            ["sweep_depth_video", "sweep_prepare_only", "sweep_force", "sweep_enabled", "sweep_model", "sweep_mode",
              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
              "sweep_grow", "sweep_blur", "sweep_show_latest",
              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
@@ -492,6 +492,20 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         self.assertEqual(len(posts), 1, "no second ComfyUI job")
         self.assertEqual(len(self.spawned), 1, "no second render")
         self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+
+    def test_force_re_render_ignores_the_sweep_cache_only(self):
+        ui = self.run_to_render()
+        ctl.cancel(self.root)
+        ui.par.Sweepforce = type(ui.par.Sweepwidth)("Sweepforce", True)
+        preview = ui.op("sweep_preview")
+        preview.par.file.val = self.spawned[0][0]["out_share"]      # TD shows the old sweep
+        ctl.queue(self.root)
+        posts = [r for r in self.root.op("webclient_comfyui").requests if r[0] == "POST"]
+        self.assertEqual(len(posts), 1, "the depth video stays cached")
+        self.assertEqual(len(self.spawned), 2, "the sweep renders again")
+        self.assertEqual(self.spawned[1][0]["out_share"], self.spawned[0][0]["out_share"])
+        self.assertEqual(preview.par.file.val, "", "the preview let go of the file it shows")
+        self.assertEqual(self.state(), ctl.SWEEP_RENDERING)
 
     def test_changing_the_look_renders_again(self):
         ui = self.run_to_render()
