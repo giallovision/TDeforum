@@ -179,15 +179,20 @@ def resample_loop(samples, loop_frames, total_frames):
 
 
 def compile_field(base, slots, fpb, total_frames, chop=None, chop_mode="add",
-                  raw="", points=0, precision=5):
+                  raw="", points=0, precision=5, base_curve=None):
     """Return (schedule string, (min, max) over the render, mode).
 
-    mode is "raw", "constant", "expression" or "baked".
+    mode is "raw", "constant", "expression", "baked" (Mod CHOP) or "chop" (a CHOP channel
+    linked to the parameter itself: ``base_curve`` gives the base per render frame).
     """
     raw = str(raw or "").strip()
     if raw:
         return schedules.as_schedule(raw), None, "raw"
     active = [s for s in slots if s.depth]
+    if base_curve is not None:
+        values = [evaluate(base_curve[t], active, fpb, t, chop[t] if chop is not None else None, chop_mode)
+                  for t in range(total_frames)]
+        return schedules.keyframe_string(values, points, precision), (min(values), max(values)), "chop"
     if chop is None:
         values = [evaluate(base, active, fpb, t) for t in range(total_frames)] or [float(base)]
         bounds = (min(values), max(values))

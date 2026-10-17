@@ -136,12 +136,14 @@ def create(page, field, section=False):
         p.mode = ParMode.EXPRESSION
     created = [p]
     if kind == schema.MOD:
-        _help(p, 'Base value. Keyframe it, export to it or bind it; the Mod Matrix and the Mod CHOP '
-                 'add beat-locked motion on top.')
+        _help(p, 'Base value. Drop a CHOP channel on it (CHOP Reference or Export CHOP) and the whole '
+                 'channel is baked into the schedule at Queue (Mod Matrix > CHOP Timing); the Mod Matrix '
+                 'and the Mod CHOP add beat-locked motion on top.')
         raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
         raw.default = ''
         _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
-                   'When not empty it is sent verbatim and the base + modulation are ignored.')
+                   'When not empty it is sent verbatim and the base + modulation are ignored. '
+                   'A CHOP channel dropped here works like one dropped on the base.')
         created.append(raw)
     return created
 

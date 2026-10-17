@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 
 import re
 
-from . import feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
+from . import chop_link, feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -182,7 +182,11 @@ _MODS = [
     _mod("amount_schedule", 0.1, FL, (0, 1), "Anti-blur Amount", (0, None)),
     _mod("sigma_schedule", 1.0, FL, (0.1, 5), "Anti-blur Sigma", (0, None)),
     _mod("threshold_schedule", 0.0, FL, (0, 1), "Anti-blur Threshold", (0, None)),
+    # Hybrid Video (2D / 3D with a Video Init Path)
+    _mod("hybrid_flow_factor_schedule", 1.0, HY, (0, 2), "Hybrid Flow Factor", (0, None)),
+    _mod("hybrid_comp_alpha_schedule", 0.5, HY, (0, 1), "Composite Alpha", (0, 1)),
 ]
+_HY_MODS = dict((f.api, f) for f in _MODS if f.page == HY)
 MOD_APIS = [f.api for f in _MODS]
 MOD_LABELS = [f.label for f in _MODS]
 SCHEDULE_APIS = MOD_APIS   # bake / preview targets (kept for older callers)
@@ -355,9 +359,9 @@ FIELDS = [
     F("hybrid_motion_use_prev_img", False, HY, TOGGLE, label="Flow from the previous generated image"),
     F("hybrid_flow_consistency", False, HY, TOGGLE),
     F("hybrid_consistency_blur", 2, HY, INT, norm=(0, 16)),
-    F("hybrid_flow_factor_schedule", 1.0, HY, FLOAT, norm=(0, 2), as_schedule=True, label="Hybrid Flow Factor"),
+    _HY_MODS["hybrid_flow_factor_schedule"],
     F("hybrid_composite", "None", HY, MENU, menu=HYBRID_COMPOSITES, label="Hybrid Composite (mix the video in)"),
-    F("hybrid_comp_alpha_schedule", 0.5, HY, FLOAT, norm=(0, 1), as_schedule=True, label="Composite Alpha"),
+    _HY_MODS["hybrid_comp_alpha_schedule"],
 ] + [f for f in _MODS if f.page == FL] + [
 
     # --- Mod Matrix ----------------------------------------------------------------
@@ -365,6 +369,9 @@ FIELDS = [
       labels=["Add to base", "Replace base"], label="Mod CHOP Mode", target=None),
     F("chop_path", "", MM, STR, label="Mod CHOP (empty = COMP input 1)", target=None),
     F("bake_points", 0, MM, INT, norm=(0, 256), label="CHOP Bake Points (0 = every frame)", target=None),
+    F("chop_timing", chop_link.TIMELINE, MM, MENU, menu=chop_link.TIMINGS, labels=chop_link.TIMING_LABELS,
+      label="CHOP Link Timing", target=None),
+    F("chop_links_info", "", MM, STATUS, label="CHOP-linked Parameters", target=None),
 ] + [f for n in range(1, MOD_SLOTS + 1) for f in _slot_fields(n)] + [
 
     # --- Sweep Depth (Animation Mode = Video Input) -----------------------------------

@@ -22,7 +22,7 @@ from tempo.plan(); see tempo.py, modulation.py and prompt_seq.py.
 
 import math
 
-from . import feed
+from . import chop_link, feed
 from . import modulation
 from . import prompt_seq
 from . import schedules
@@ -194,7 +194,7 @@ def _sample_loop(samples, loop_frames, t):
     return a + (b - a) * (pos - i)
 
 
-def live_values(values, chop, loop_timeline_frame, project_rate):
+def live_values(values, chop, loop_timeline_frame, project_rate, links=None):
     """{api: value} the render uses at the loop position ``loop_timeline_frame``.
 
     For the ``mod_live`` Script CHOP: every MOD parameter that a Mod Matrix slot or a Mod CHOP
@@ -211,21 +211,52 @@ def live_values(values, chop, loop_timeline_frame, project_rate):
     slots = read_slots(values, warnings)
     chop_fields = _chop_by_field(chop, warnings)
     chop_mode = _text(values.get("chop_mode", "add")) or "add"
+    timing = _text(values.get("chop_timing", chop_link.TIMELINE)) or chop_link.TIMELINE
+    links = links or {}
+    loop_seconds = _loop_seconds(tp, values, loop_frames or 1)
     out = {"render_frame": t}
     for field in schema.MOD_FIELDS:
         if field.api not in values or _text(values.get(raw_key(field.api), "")):
             continue
         field_slots = [s for s in slots if s.target == field.api and s.depth]
         samples = chop_fields.get(field.api)
-        if not field_slots and not samples:
+        link = links.get(field.api)
+        if link is not None and not link.get("samples"):
+            link = None
+        if not field_slots and not samples and link is None:
             continue
         try:
             base = coerce(field, values[field.api])
         except (TypeError, ValueError):
             base = float(field.default)
+        if link is not None:
+            one_loop = chop_link.loop_samples(link, timing, loop_seconds, link.get("loop_start_seconds", 0.0))
+            base = _sample_loop(one_loop, loop_frames or len(one_loop), t)
         chop_value = _sample_loop(samples, loop_frames or len(samples), t) if samples else None
         out[field.api] = modulation.evaluate(base, field_slots, fpb, t, chop_value, chop_mode)
     return out
+
+
+def _loop_seconds(tp, values, total):
+    """Seconds of one loop on the timeline (render frames / render fps)."""
+    if tp:
+        return float(tp["loop_frames"]) / float(tp["render_fps"] or 15)
+    fps = _as_number(values.get("out_fps", 15), float) or 15.0
+    return float(total) / float(fps)
+
+
+def _link_curve(field, link, override, timing, loop_seconds, loop_frames, total):
+    """(base curve over render frames 0..total-1 or None, warning or None) for a CHOP link."""
+    source = link.get("source") or "a CHOP"
+    if override:
+        return None, ("%s: the raw schedule is set, so %s on the base is ignored (clear raw to use it)"
+                      % (field.td_name, source))
+    if not link.get("samples"):
+        return None, "%s: %s gave no samples%s; base value used" % (
+            field.td_name, source, " (%s)" % link["note"] if link.get("note") else "")
+    one_loop = chop_link.loop_samples(link, timing, loop_seconds, link.get("loop_start_seconds", 0.0))
+    note = "%s: %s" % (field.td_name, link["note"]) if link.get("note") else None
+    return modulation.resample_loop(one_loop, loop_frames, total), note
 
 
 def _chop_by_field(chop, warnings):
@@ -247,7 +278,7 @@ def _chop_by_field(chop, warnings):
 
 
 def build_request(values, prompts=None, models=None, frame_counter=None,
-                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None):
+                  default_checkpoint=DEFAULT_CHECKPOINT, prompt_rows=None, chop=None, links=None):
     """Return {"request", "plan", "tempo", "schedules", "warnings"}.
 
     values         {api_name: value} as read from the COMP (missing keys = not on the COMP);
@@ -257,6 +288,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     frame_counter  callable(container_path) -> int | None, used to cap frame counts
     prompt_rows    [(beat, prompt, xfade)] from the COMP's prompt_seq table
     chop           {channel name: [samples]} describing one loop (the Mod CHOP)
+    links          {api: chop_link dict} CHOP channels dropped onto a MOD parameter (base or raw);
+                   the channel becomes the parameter's base curve (see chop_link.py)
     """
     models = models or {}
     warnings = []
@@ -289,6 +322,9 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     fpb = tp["fpb"] if tp else tempo.frames_per_beat(_as_number(values.get("bpm", 120), float), 15)
     loop_frames = tp["loop_frames"] if tp else total
     chop_fields = _chop_by_field(chop, warnings)
+    timing = _text(values.get("chop_timing", chop_link.TIMELINE)) or chop_link.TIMELINE
+    loop_seconds = _loop_seconds(tp, values, total)
+    links = links or {}
     if tp and tp["seamless"]:
         warnings.extend(modulation.loop_warnings(slots, tp["loop_beats"]))
     compiled = {}
@@ -307,6 +343,13 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             field_slots = [s for s in slots if s.target == field.api]
             samples = chop_fields.get(field.api)
             chop_values = modulation.resample_loop(samples, loop_frames, total) if samples else None
+            base_curve = None
+            link = links.get(field.api)
+            if link is not None:
+                base_curve, link_note = _link_curve(field, link, override, timing, loop_seconds,
+                                                    loop_frames, total)
+                if link_note:
+                    warnings.append(link_note)
             try:
                 base = float(field.default) if override or text == "" else coerce(field, raw)
             except (TypeError, ValueError):
@@ -315,7 +358,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
             sched, bounds, how = modulation.compile_field(
                 base, field_slots, fpb, total, chop_values,
                 _text(values.get("chop_mode", "add")), override,
-                int(_as_number(values.get("bake_points", 0), float)))
+                int(_as_number(values.get("bake_points", 0), float)), base_curve=base_curve)
             settings[field.key] = sched
             compiled[field.api] = (how, sched)
             ranges[field.api] = bounds if bounds else None
@@ -467,7 +510,7 @@ def _is_constant_schedule(text):
 
 
 def _check_field(field, how, bounds, mode, slots, override, warnings):
-    moving = how in ("expression", "baked") or (bool(override) and not _is_constant_schedule(override))
+    moving = how in ("expression", "baked", "chop") or (bool(override) and not _is_constant_schedule(override))
     if moving and field.dims and mode in ("2D", "3D") and field.dims != mode:
         warnings.append("%s is %s-only; Deforum ignores it in %s mode" % (field.api, field.dims, mode))
     if bounds and field.safe:
@@ -532,7 +575,7 @@ def summary(result):
         parts.append("capped by %s" % plan["limited_by"])
     parts.append("%sx%s" % (s.get("W"), s.get("H")))
     moving = sorted(api for api, (how, sched) in result.get("schedules", {}).items()
-                    if how in ("expression", "baked") or (how == "raw" and not _is_constant_schedule(sched)))
+                    if how in ("expression", "baked", "chop") or (how == "raw" and not _is_constant_schedule(sched)))
     if moving:
         parts.append("mod: " + ", ".join(moving))
     active = ["CN%d %s" % (u, s.get("cn_%d_model" % u)) for u in range(1, CN_UNITS + 1)

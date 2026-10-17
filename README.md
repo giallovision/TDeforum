@@ -70,9 +70,9 @@ make save                     # optional: tarball on NVMe for a no-build, no-dow
 
 Every Deforum parameter worth driving lives on one COMP, at Deforum's own baseline (motion neutral). Pages (the first one has the *Example Preset* drop-down): **Tempo · Globals · Prompts · Motion 2D · Motion 3D · Camera & Depth · Diffusion · Noise & Color · Flow & Anti-blur · Mod Matrix · ControlNet Unit 1 · ControlNet Unit 2 · ControlNet Unit 3 · Pipeline**.
 
-Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold) has:
+Each schedulable parameter (zoom, translation, rotation, FOV, perspective flip, strength, noise, contrast, CFG, steps, noise multiplier, subseed strength, eta, CLIP skip, cadence/redo flow factor, anti-blur amount/sigma/threshold, hybrid flow factor, hybrid composite alpha) has:
 
-* a **float base** (`Translationz`, `Strengthschedule`, …): keyframe it in TD, export a CHOP to it or bind it; the value at Queue time is the base;
+* a **float base** (`Translationz`, `Strengthschedule`, …): type a value, or **drop a CHOP channel on it** (see *CHOP links* below) to drive it with the channel's whole curve; any other expression / bind is read at Queue time as one value;
 * a **`…raw`** string (`Translationzraw`): a hand-written Deforum schedule; when not empty it is sent verbatim and base + modulation are ignored.
 
 On top of the base, three modulation sources, all tempo-locked:
@@ -82,6 +82,14 @@ On top of the base, three modulation sources, all tempo-locked:
 | **Mod Matrix** (8 slots) | *Mod Matrix* page: target, shape (sine, triangle, saw up/down, soft square, kick decay, bump), cycle in beats, depth, phase, sharpness | one math expression Deforum evaluates every frame, e.g. `0:(1 + 0.04*exp(-6*((t/30.0) % 1)))` |
 | **Mod CHOP** | COMP input 1 (or *Mod CHOP* path). One loop long, any sample rate; channels named after the parameter (`translation_z` or `Translationz`) | baked: every render frame sampled (base + CHOP + slots) |
 | **Prompt sequence** | `deforum/prompt_seq` table, columns *beat*, *prompt*, *xfade* | held prompt keys + beat-length crossfades written as weighted `AND` prompts |
+
+#### CHOP links: drop any channel on a parameter
+
+Make whatever CHOP you like (Pattern, LFO, Noise, Animation, Script, a math chain …), drag one of its channels onto a schedule parameter's **float base** (e.g. *Motion 3D › Translation Z*) and pick **CHOP Reference** (writes `op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live, and at Queue the **whole channel** is read and baked into that parameter's Deforum schedule (one key per render frame, or *CHOP Bake Points*); the Mod Matrix slots and the Mod CHOP still add on top. Expressions can do maths on channels (`op('pattern1')['chan1'] * 2 + 1`, sums of several CHOPs); they are evaluated once over the whole arrays. Something that cannot be evaluated that way (`math.sin(...)`) falls back to the first channel, as-is, with a warning.
+
+* Drop it on the **base**, not on `…raw`. A channel dropped on `…raw` is handled the same way, but a typed raw schedule always wins over a CHOP on the base (Queue warns).
+* *Mod Matrix › CHOP Link Timing*: **Timeline** (default) renders what the parameter shows while the timeline plays, from *Pipeline › Feed Loop Start* for one loop, using the CHOP's sample rate and start (a Pattern CHOP with Length `me.time.end` is exactly right; past its end it wraps). **Whole channel = one loop** stretches the channel over the loop whatever its length (Pattern *Cycles 4* = four cycles per loop).
+* *Mod Matrix › CHOP-linked Parameters* and the Textport (Queue, bake, `doctor()`) list what is linked; `mod_live` outputs the linked curves too.
 
 Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
 
@@ -306,6 +314,7 @@ scripts/
     schema.py          # deforum COMP fields: drives build_master_ui AND the payload
     tempo.py           # bpm / bars / fps -> render plan (cadence or interpolation)
     modulation.py      # beat-locked shapes -> Deforum expressions / baked keyframes
+    chop_link.py       # CHOP channels dropped onto a parameter -> its whole curve
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video

@@ -26,6 +26,7 @@ import sys
 import time
 import traceback
 
+from . import chop_link
 from . import comfy
 from . import config
 from . import feed
@@ -438,6 +439,73 @@ def read_ui(ui):
     return values
 
 
+def _resolver(ui):
+    """op(path) the way a deforum parameter expression sees it: siblings first, then children."""
+    def resolve(path):
+        bases = []
+        parent = getattr(ui, "parent", None)
+        if callable(parent):
+            try:
+                bases.append(parent())
+            except Exception:
+                pass
+        bases.append(ui)
+        for base in bases:
+            try:
+                found = base.op(path) if base is not None else None
+            except Exception:
+                found = None
+            if found is not None:
+                return found
+        try:
+            import td
+            return td.op(path)
+        except Exception:
+            return None
+    return resolve
+
+
+def read_links(ui, values):
+    """CHOP channels dropped onto MOD parameters -> {api: link dict} (see chop_link.py).
+
+    A channel on the raw schedule parameter counts like one on the base: its raw value
+    (the channel's current value as text) is cleared from ``values`` so it is not sent.
+    """
+    links = {}
+    if ui is None:
+        return links
+    resolve = _resolver(ui)
+    timeline = getattr(ui, "time", None)
+    rate = float(getattr(timeline, "rate", 0) or 0) or 60.0
+    first = float(getattr(timeline, "start", 1) or 1)
+    loop_start = float(values.get("feed_loop_start", 0) or 0) or first
+    start_seconds = max(0.0, (loop_start - first) / rate)
+    for field in schema.MOD_FIELDS:
+        for name, on_raw in ((field.td_name, False), (field.raw_td_name, True)):
+            par = getattr(ui.par, name, None)
+            try:
+                link = chop_link.link_of(par, ui, resolve)
+            except Exception as exc:
+                link = chop_link.Link([], source=name, note="could not read its CHOP (%s)" % exc)
+            if link is None:
+                continue
+            entry = link.as_dict()
+            entry["loop_start_seconds"] = start_seconds
+            entry["par"] = name
+            if on_raw:
+                values[payload.raw_key(field.api)] = ""
+            if field.api not in links or on_raw:
+                links[field.api] = entry
+    return links
+
+
+def describe_links(links):
+    if not links:
+        return "none (drag a CHOP channel onto a schedule parameter: CHOP Reference or Export)"
+    return "; ".join("%s <- %s" % (schema.BY_API[api].td_name, link.get("source") or "?")
+                     for api, link in sorted(links.items()))
+
+
 def read_prompt_rows(ui):
     """prompt_seq table -> [[beat, prompt, xfade], ...] (None when the COMP has no table)."""
     table = _inner(ui, "prompt_seq")
@@ -517,12 +585,16 @@ def build(root, cfg):
     if ui is None:
         raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
     values = read_ui(ui)
+    links = read_links(ui, values)
+    _set_par(ui, "Choplinksinfo", describe_links(links))
     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
                                                                 payload.DEFAULT_CHECKPOINT),
                                    prompt_rows=read_prompt_rows(ui),
-                                   chop=read_mod_chop(ui, values))
+                                   chop=read_mod_chop(ui, values), links=links)
+    if links:
+        log("CHOP-linked: " + describe_links(links))
     if result.get("tempo"):
         _set_par(ui, "Tempoinfo", tempo.describe(result["tempo"]))
     return values, result
@@ -1731,7 +1803,7 @@ def preview(root):
     values, result = build(root, cfg)
     for warning in result["warnings"]:
         log("warning: " + warning)
-    order = {"expression": 0, "baked": 1, "raw": 2, "constant": 3}
+    order = {"chop": 0, "expression": 1, "baked": 2, "raw": 3, "constant": 4}
     rows = sorted(result["schedules"].items(), key=lambda kv: (order.get(kv[1][0], 9), kv[0]))
     table = _inner(_op(root, "ui"), "preview")
     if table is not None:
@@ -1795,7 +1867,9 @@ def mod_live_cook(script_op):
         chan = clock["loop_frame"] if clock is not None else None
         loop_frame = float(chan[0]) if chan is not None else 0.0
         values = read_ui(ui)
-        live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame, script_op.time.rate)
+        links = read_links(ui, values)
+        live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame,
+                                   script_op.time.rate, links)
         script_op.clear()
         script_op.numSamples = 1
         for name in sorted(live):
@@ -1930,6 +2004,11 @@ def doctor(root):
             used = sorted(n for n in chop if n.lower() in known)
             log("Mod CHOP channels used: %s%s" % (", ".join(used) or "none", "" if len(used) == len(chop)
                                                  else " (others ignored: %s)" % ", ".join(sorted(set(chop) - set(used)))))
+        links = read_links(ui, values)
+        log("CHOP-linked parameters: %s" % describe_links(links))
+        for api, link in sorted(links.items()):
+            if link.get("note"):
+                log("  %s: %s" % (api, link["note"]))
         rows = read_prompt_rows(ui)
         source = values.get("prompt_source")
         log("prompt_seq rows: %d in %s/prompt_seq (Prompts > Edit prompt_seq opens it); prompts come from %s"
