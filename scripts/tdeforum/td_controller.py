@@ -30,6 +30,7 @@ from . import comfy
 from . import config
 from . import feed
 from . import payload
+from . import page_presets
 from . import presets
 from . import prompt_presets
 from . import schema
@@ -57,6 +58,7 @@ COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give
 COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
 FEED_FINALIZE_TIMEOUT_S = 60.0
 PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
 PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
 FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
@@ -200,41 +202,17 @@ def apply_preset(root, force=False):
     selected = str(menu.eval() or presets.NONE).strip() or presets.NONE
     stored = root.fetch(PRESET_KEY, None, search=False)
     stored = dict(stored) if isinstance(stored, dict) else {}
-    if selected == stored.get("applied", presets.NONE) and not (force and selected != presets.NONE):
+    if selected == stored.get("applied", presets.NONE) and not force:
         return False
 
-    restored = 0
-    for name, value in (stored.get("backup") or {}).items():
-        par = getattr(ui.par, name, None)
-        if par is not None and _is_constant(par):
-            par.val = value
-            restored += 1
-
+    pages = reset_page_presets(root)   # last on, first off: page presets sit on top of the example
+    restored = _restore_backup(ui, stored.get("backup"))
     preset, backup, changed, kept = presets.get(selected), {}, 0, []
+    if preset is None and not restored and not pages and selected == stored.get("applied", presets.NONE):
+        return False
     if preset is not None:
         defaults = dict((f.api, f.default) for f in schema.FIELDS)
-        for api, value in presets.resolve(preset, defaults).items():
-            field = schema.BY_API.get(api)
-            if field is None:
-                log("preset %s: unknown parameter %r skipped" % (preset.id, api))
-                continue
-            targets = [(field.td_name, _coerce_par(field, value))]
-            if field.kind == schema.MOD:
-                targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
-            for name, new in targets:
-                par = getattr(ui.par, name, None)
-                if par is None:
-                    continue
-                if not _is_constant(par):
-                    kept.append(name)
-                    continue
-                if field.menu and name == field.td_name and new not in field.menu:
-                    log("preset %s: %r is not a choice for %s, skipped" % (preset.id, new, name))
-                    continue
-                if par.val != new:
-                    backup[name] = par.val
-                    par.val = new
-                    changed += 1
+        backup, changed, kept = _lay_values(ui, presets.resolve(preset, defaults), preset.id)
     root.store(PRESET_KEY, {"applied": selected if preset else presets.NONE, "backup": backup})
     if preset is None:
         text = "None (restored %d parameters)" % restored
@@ -248,6 +226,132 @@ def apply_preset(root, force=False):
     if kept:
         log("  driven (expression / bind / export) and left alone: %s" % ", ".join(sorted(kept)))
     return True
+
+
+def _restore_backup(ui, backup):
+    restored = 0
+    for name, value in (backup or {}).items():
+        par = getattr(ui.par, name, None)
+        if par is not None and _is_constant(par):
+            par.val = value
+            restored += 1
+    return restored
+
+
+def _lay_values(ui, values, what):
+    """Set {api: value} on the COMP's constant parameters. Returns (backup, changed, kept)."""
+    backup, changed, kept = {}, 0, []
+    for api, value in values.items():
+        field = schema.BY_API.get(api)
+        if field is None:
+            log("preset %s: unknown parameter %r skipped" % (what, api))
+            continue
+        targets = [(field.td_name, _coerce_par(field, value))]
+        if field.kind == schema.MOD:
+            targets.append((field.raw_td_name, ""))          # a raw schedule would beat the base
+        for name, new in targets:
+            par = getattr(ui.par, name, None)
+            if par is None:
+                continue
+            if not _is_constant(par):
+                kept.append(name)
+                continue
+            if field.menu and name == field.td_name and new not in field.menu:
+                log("preset %s: %r is not a choice for %s, skipped" % (what, new, name))
+                continue
+            if par.val != new:
+                backup[name] = par.val
+                par.val = new
+                changed += 1
+    return backup, changed, kept
+
+
+def _page_of(api_name):
+    for page in page_presets.PAGES:
+        if page_presets.api(page) == api_name:
+            return page
+    return None
+
+
+def apply_page_preset(root, page, force=False):
+    """A page's Page Preset menu: lay that page's preset over it (None puts its values back)."""
+    ui = _op(root, "ui")
+    field = schema.BY_API.get(page_presets.api(page))
+    menu = getattr(ui.par, field.td_name, None) if ui is not None and field is not None else None
+    if menu is None:
+        return False
+    selected = str(menu.eval() or page_presets.NONE).strip() or page_presets.NONE
+    allstored = dict(root.fetch(PAGE_PRESET_KEY, None, search=False) or {})
+    stored = dict(allstored.get(field.api) or {})
+    if selected == stored.get("applied", page_presets.NONE) and not (force and selected != page_presets.NONE):
+        return False
+    restored = _restore_backup(ui, stored.get("backup"))
+    preset = page_presets.get(page, selected)
+    backup, changed, kept = ({}, 0, []) if preset is None else _lay_values(ui, preset.values, field.api)
+    allstored[field.api] = {"applied": selected if preset else page_presets.NONE, "backup": backup}
+    root.store(PAGE_PRESET_KEY, allstored)
+    if preset is None:
+        log("page preset %s: None (restored %d parameters)" % (page, restored))
+    else:
+        log("page preset %s: %s (%d parameters set%s)" % (page, preset.label, changed,
+                                                          ", %d driven kept" % len(kept) if kept else ""))
+    return True
+
+
+def reset_page_presets(root):
+    """Every Page Preset (and the Prompt Preset) back to None, newest values first undone."""
+    ui = _op(root, "ui")
+    if ui is None:
+        return 0
+    allstored = dict(root.fetch(PAGE_PRESET_KEY, None, search=False) or {})
+    count = 0
+    for api_name, stored in list(allstored.items()):
+        if (stored or {}).get("applied", page_presets.NONE) != page_presets.NONE:
+            _restore_backup(ui, stored.get("backup"))
+            count += 1
+        allstored[api_name] = {"applied": page_presets.NONE, "backup": {}}
+    root.store(PAGE_PRESET_KEY, allstored)        # stored first: the menu changes below are no-ops
+    for api_name in schema.PAGE_PRESET_APIS:
+        par = getattr(ui.par, schema.BY_API[api_name].td_name, None)
+        if par is not None and str(par.eval()) != page_presets.NONE:
+            _set_constant(par, page_presets.NONE)
+    prompt_menu = getattr(ui.par, "Promptpreset", None)
+    if prompt_menu is not None and str(prompt_menu.eval()) != prompt_presets.NONE:
+        _set_constant(prompt_menu, prompt_presets.NONE)
+        apply_prompt_preset(root)
+        count += 1
+    if count:
+        log("page presets: %d put back to None" % count)
+    return count
+
+
+def on_ui_value(root, name):
+    """ui_exec: a watched menu changed."""
+    if name == "Preset":
+        return apply_preset(root)
+    if name == "Promptpreset":
+        return apply_prompt_preset(root)
+    for page in page_presets.PAGES:
+        if schema.BY_API[page_presets.api(page)].td_name == name:
+            return apply_page_preset(root, page)
+    return False
+
+
+def on_ui_pulse(root, name):
+    """ui_exec: a button on the COMP."""
+    if name == "Presetapply":
+        return apply_preset(root, force=True)
+    if name == "Promptedit":
+        return open_prompt_seq(root)
+    if name == "Sweepshowlatest":
+        return show_latest_sweep(root)
+    return False
+
+
+def ui_watched():
+    """TD names ui_exec watches."""
+    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest"] + \
+        [schema.BY_API[a].td_name for a in schema.PAGE_PRESET_APIS]
 
 
 def apply_prompt_preset(root):

@@ -12,6 +12,7 @@ plain Python, so it can be unit-tested outside TouchDesigner (``make test``).
 * ``sweep``         Sweep Depth: band maths and the background render of the mask video
 * ``presets``       example configurations for the deforum COMP (Example Preset drop-down)
 * ``prompt_presets`` starting prompts for the Prompt Preset drop-down
+* ``page_presets``  the per-page Page Preset drop-downs
 * ``schema``        the deforum COMP's parameter list (drives UI *and* payload)
 * ``migrate``       old Deforum_UI values -> the COMP's parameters
 * ``payload``       builds the Deforum batch request + frame plan
@@ -25,10 +26,10 @@ import this package and forward their callbacks to ``td_controller``.
 import importlib
 import sys
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 # Leaves first, so dependants pick up reloaded modules.
-_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "schema",
+_SUBMODULES = ("config", "schedules", "tempo", "modulation", "prompt_seq", "feed", "sweep", "presets", "prompt_presets", "page_presets", "schema",
                "migrate", "payload", "comfy", "td_controller")
 
 

@@ -110,7 +110,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
 
 ### Example presets
 
-*Tempo › Example Preset* (first page of the COMP) lays one of 27 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+*Tempo › Example Preset* (first page of the COMP) lays one of 31 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
 
 * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
 * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
@@ -144,11 +144,36 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
 | `video_depth_peel` | Video Input - Depth peel (unorthodox) | The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it). |
 | `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
 | `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
+| `hybrid_flow_glow` | Hybrid - Flow glow (good) | The dream moves with the video's optical flow while a soft depth band travels away through the performer as a QR Monster glow. Needs Globals > Video Init Path. |
+| `hybrid_ghost_peel` | Hybrid - Ghost peel (good) | Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the band re-diffuses, so the scene is re-dreamed layer by layer toward you. |
+| `hybrid_camera_tide` | Hybrid - Camera tide (extreme) | Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive QR Monster hard: the space surges like a tide through the video's own depth. |
+| `hybrid_possession` | Hybrid - Possession (unorthodox) | Sticky flow measured from the generated image, a faint after-generation echo of the video and the whole depth map as relief: something else is wearing the performer's shape and movement. |
 | `interp_seed_walk` | Interpolation - Seed walk (unorthodox) | A walk through latent space: the noise blends from seed 424242 to its neighbour and back over the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. Perfectly seamless. |
 | `interp_beat_jolt` | Interpolation - Beat jolt (unorthodox) | On every beat the noise jumps towards another seed and relaxes back: the image flinches into a sibling version on the kick and settles, with no motion at all. |
 | `interp_guidance_bloom` | Interpolation - Guidance bloom (unorthodox) | CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into over-defined detail and back, while a slow seed drift keeps it alive. |
 
 The **unorthodox** dozen (three per mode, including **Interpolation**) lean on what only a generative feedback loop can do: zooming *out* into wrapped copies of the frame, folding the picture plane with perspective flip, moving a hallucination with a video's optical flow (*Hybrid Video* page), breathing aspect ratio / FOV that the depth warp re-paints, using the sweep as an inpainting **mask** instead of a guide (*Invert Mask* / *Overlay Mask* are on the Globals page), the whole depth map as a QR Monster relief, and in Interpolation mode (every frame drawn from noise) animating the **seed itself** with subseed strength, which closes the loop perfectly.
+
+### Page presets
+
+Every page except Globals starts with a **Page Preset** menu (Prompts has its Prompt Preset instead). A page preset only changes parameters on its own page, so they stack: *Motion 3D: Orbit* + *Camera: Wide lens* + *Flow: Deflicker*. Picking None on a page puts that page's values back. Picking an **Example Preset**, including None and *Re-apply*, first puts every page preset (and the Prompt Preset) back to None, so a remembered page value can never overwrite an example; then add page presets on top again.
+
+* **Tempo**: Smooth: 60 fps, cadence 4, 2-beat seam; Detailed: 60 fps, cadence 2; Fast: 30 fps + RIFE x2; Dreamy: 15 fps + RIFE x4; Long loop: 4 bars
+* **Motion 2D**: Still; Slow zoom in; Zoom out into tiles (wrap); Sideways drift (wrap); Off-centre spiral
+* **Motion 3D**: Still; Forward push; Orbit; Push and roll; Pull back (mirrored edges)
+* **Camera & Depth**: Standard lens 70 degrees; Wide lens 100 degrees (more parallax); Telephoto 35 degrees (flat, slow); Deep relief (depth weight 0.5); Perspective tilt 12 degrees
+* **Diffusion**: Steady (keep 0.8, no noise): least flicker; Balanced (keep 0.72, noise 0.015); Loose (keep 0.55, noise 0.04): keeps reinventing; Crisp LCM (CFG 2.0); Soft dream LCM (CFG 1.4, keep 0.78)
+* **Noise & Color**: Fine perlin noise; Coarse perlin (big soft blobs); Uniform noise; Colour locked (LAB); Colour free to drift
+* **Flow & Anti-blur**: Deflicker: RAFT cadence + RAFT redo (2x slower); Standard: RAFT between cadence frames; Fast: DIS Medium; Off (plain blend between cadence frames); Crisper (anti-blur 0.2)
+* **Hybrid Video**: Off; Move like the video (optical flow); Copy the video's camera (perspective); Flow + 25 % video ghost; Sticky flow (from the generated image, consistency masked)
+* **Mod Matrix**: All slots off; Kick push (slot 1: translation Z decay each beat); Breathing zoom (slot 1: zoom sine over a bar); Wobble (slot 1: pan sine over 2 beats); Regenerate on the beat (slot 2: Strength dip)
+* **Sweep Depth**: Off; Glow travelling away; Glow rushing toward; Ping-pong pulses (4 cycles, depth shaded); Depth strobe (8 hard cycles); Full depth relief (whole depth map); Peel mask (sweep drives the video mask)
+* **ControlNet Unit 1**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
+* **ControlNet Unit 2**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
+* **ControlNet Unit 3**: Off; QR Monster glow from Sweep Depth (0.75, ends 80 %); QR Monster leads from Sweep Depth (1.1, ControlNet first); QR Monster from a TOP loop (Source TOP below); QR Monster late (starts at 30 %: detail, not layout)
+* **Pipeline**: Performance (auto-load, reuse ComfyUI results); Fresh ComfyUI results every Queue; Record TOP feeds continuously
+
+The four **Hybrid** examples run Sweep Depth on the same video that drives the motion: Sweep Depth works in 2D / 3D whenever Globals › Video Init Path is set (render frame k uses video frame k, the same frame the Hybrid Video motion reads).
 
 ### Prompt presets
 
@@ -284,7 +309,8 @@ scripts/
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
-    presets.py         # 27 example configurations (Example Preset drop-down)
+    presets.py         # 31 example configurations (Example Preset drop-down)
+    page_presets.py    # Page Preset drop-downs (one per page except Globals)
     prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
     migrate.py         # Deforum_UI -> deforum COMP value migration
     payload.py         # batch request + frame plan

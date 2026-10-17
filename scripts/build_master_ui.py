@@ -253,7 +253,7 @@ def build_inner(comp, values):
     # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
     ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
     for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
-                        ('pars', 'Preset Presetapply Promptedit Promptpreset Sweepshowlatest'), ('custom', 1), ('builtin', 0),
+                        ('pars', ' '.join(td_controller.ui_watched())), ('custom', 1), ('builtin', 0),
                         ('valuechange', 1), ('onpulse', 1), ('active', 1)):
         par = getattr(ui_exec.par, name, None)
         if par is None:

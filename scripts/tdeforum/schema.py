@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 
 import re
 
-from . import feed, modulation, presets, prompt_presets, sweep, tempo
+from . import feed, modulation, page_presets, presets, prompt_presets, sweep, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -414,6 +414,22 @@ FIELDS = [
     F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
       label="Feed: recording method", target=None),
 ]
+
+def _with_page_presets(fields):
+    """A Page Preset menu at the top of each page that has presets (Tempo: below the Example Preset)."""
+    out, done = [], set()
+    for f in fields:
+        page = f.page
+        if page in page_presets.PAGES and page not in done and not (page == PAGE_TEMPO and f.api.startswith("preset")):
+            done.add(page)
+            out.append(F(page_presets.api(page), page_presets.NONE, page, MENU, menu=page_presets.names(page),
+                         labels=page_presets.labels(page), label="Page Preset (%s)" % page, target=None))
+        out.append(f)
+    return out
+
+
+FIELDS = _with_page_presets(FIELDS)
+PAGE_PRESET_APIS = [page_presets.api(p) for p in PAGE_ORDER if p in page_presets.PAGES]
 
 BY_API = dict((f.api, f) for f in FIELDS)
 BY_TD = dict((f.td_name, f) for f in FIELDS)

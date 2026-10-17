@@ -48,6 +48,8 @@ MODEL_LABELS = ["Depth Anything V2 small (vits, fast)", "Depth Anything V2 base 
                 "MiDaS", "Zoe"]
 DEPTH_RESOLUTION = 512      # ComfyUI detect resolution for the sweep depth (the mask is resized anyway)
 VIDEO_INPUT = "Video Input"
+# 2D / 3D: the init video is the Hybrid Video source; render frame k shows its frame k too.
+SWEEP_MODES = (VIDEO_INPUT, "2D", "3D")
 RENDER_VERSION = 3          # bump when the pixels a job produces change
 FOURCCS = ("mp4v", "avc1")  # first one the OpenCV build can open wins
 _EPS = 1e-9
@@ -113,8 +115,9 @@ def check(values):
     """None when Sweep Depth can run, else why not (shown to the user)."""
     if not enabled(values):
         return "Guide Source is Sweep Depth but Sweep Depth is switched off (Sweep Depth page > On)"
-    if str(values.get("animation_mode", "")) != VIDEO_INPUT:
-        return "Sweep Depth needs Animation Mode = Video Input (it sweeps the depth of the init video)"
+    if str(values.get("animation_mode", "")) not in SWEEP_MODES:
+        return ("Sweep Depth needs Animation Mode = Video Input, or 2D / 3D with a Video Init Path "
+                "(Hybrid Video): it sweeps the depth of the init video")
     if not str(values.get("video_init_path", "") or "").strip():
         return "Sweep Depth needs a Video Init Path (Globals page)"
     return None

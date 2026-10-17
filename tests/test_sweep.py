@@ -91,7 +91,8 @@ class PlanTest(unittest.TestCase):
         ok = {"sweep_enabled": True, "animation_mode": "Video Input", "video_init_path": "/x.mp4"}
         self.assertIsNone(sweep.check(ok))
         self.assertIn("switched off", sweep.check(dict(ok, sweep_enabled=False)))
-        self.assertIn("Video Input", sweep.check(dict(ok, animation_mode="3D")))
+        self.assertIsNone(sweep.check(dict(ok, animation_mode="3D")))           # Hybrid Video source
+        self.assertIn("Video Input", sweep.check(dict(ok, animation_mode="Interpolation")))
         self.assertIn("Video Init Path", sweep.check(dict(ok, video_init_path="")))
 
 
@@ -293,7 +294,7 @@ class ConfigViewTest(unittest.TestCase):
 class SchemaFeedTest(unittest.TestCase):
     def test_fields_and_page(self):
         self.assertEqual(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2], schema.PAGE_SWEEP)
-        fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP]
+        fields = [f for f in schema.FIELDS if f.page == schema.PAGE_SWEEP and not f.api.startswith("pagepreset")]
         self.assertEqual(sorted(f.api for f in fields), sorted(
             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
@@ -581,8 +582,20 @@ class SweepControllerTest(test_controller.FeedTest.__bases__[0]):
         self.assertIn("245-255 at the start", text)
         self.assertIn("-> ControlNet 1", text)
 
+    def test_hybrid_2d_render_uses_the_sweep_as_its_guide(self):
+        ui = self.make(animation_mode="2D", hybrid_motion="Optical Flow", hybrid_composite="None")
+        ctl.queue(self.root)
+        self.depth_done()
+        self.tick()
+        self.assertEqual(self.state(), ctl.DEFORUM_SUBMITTED)
+        s = self.sent()
+        self.assertEqual((s["animation_mode"], s["hybrid_motion"]), ("2D", "Optical Flow"))
+        self.assertIs(s["hybrid_generate_inputframes"], True)
+        self.assertIn("cn_sweep_", s["cn_1_vid_path"])
+        self.assertEqual(len(read_video(config.to_share(self.cfg, s["cn_1_vid_path"]))), s["max_frames"])
+
     def test_wrong_animation_mode_fails_with_a_reason(self):
-        self.make(animation_mode="3D")
+        self.make(animation_mode="Interpolation")
         ctl.queue(self.root)
         self.assertEqual(self.root.op("webclient_comfyui").requests, [])
         self.assertIn("Video Input", self.ui.par.Pipelinestatus.val)

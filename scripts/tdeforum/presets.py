@@ -95,6 +95,13 @@ _SWEEP = {"sweep_enabled": True, "sweep_as_mask": False, "sweep_model": "depth_a
           "cn_1_guidance_end": 0.8, "cn_1_control_mode": "Balanced",
           "strength_schedule": 0.55, "color_coherence": "LAB"}
 
+# Hybrid Video base: flow from the init video, cadence 2 with RAFT between diffusions, no loop
+# (the video does not loop); the sweep keys come from _SWEEP.
+_HYBRID_FLOW = {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT", "hybrid_composite": "None",
+                "hybrid_motion_use_prev_img": False, "hybrid_flow_consistency": False,
+                "hybrid_flow_factor_schedule": 1.0, "seamless_loop": False, "diffusion_cadence": 2,
+                "optical_flow_cadence": "RAFT"}
+
 PRESETS = [
     # ------------------------------------------------------------------ 3D
     Preset("3d_tunnel_roll", "3D - Tunnel roll (good)", "3D", GOOD,
@@ -236,6 +243,43 @@ PRESETS = [
                                    "sweep_grow": 2, "sweep_blur": 1.0, "sweep_trail": 0, "sweep_smooth": 0.3,
                                    "strength_schedule": 0.5, "cn_1_weight": 1.0, "cn_1_guidance_end": 0.9,
                                    "cn_1_control_mode": "ControlNet is more important"})),
+    # ------------------------------------------------------------------ Hybrid Video
+    # 2D / 3D feedback loop steered by the init video (Hybrid Video page), with Sweep Depth of the
+    # same video as a QR Monster guide or as the mask. Cadence 2 + RAFT: half the diffusions, flow
+    # in between, which is where most of the smoothness comes from.
+    Preset("hybrid_flow_glow", "Hybrid - Flow glow (good)", "2D", GOOD,
+           "The dream moves with the video's optical flow while a soft depth band travels away through the "
+           "performer as a QR Monster glow. Needs Globals > Video Init Path.",
+           _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP, {"sweep_mode": "max", "strength_schedule": 0.7,
+                                                      "noise_schedule": 0.01, "color_coherence": "LAB"})),
+    Preset("hybrid_ghost_peel", "Hybrid - Ghost peel (good)", "3D", GOOD,
+           "Slow 3D push, the video's flow plus a 25 % ghost of it, and the depth sweep as the MASK: only the "
+           "band re-diffuses, so the scene is re-dreamed layer by layer toward you.",
+           _merge(_SMOOTH, _3D, _HYBRID_FLOW, _SWEEP,
+                  {"translation_z": 0.3, "hybrid_composite": "Normal", "hybrid_comp_alpha_schedule": 0.25,
+                   "cn_1_enabled": False, "sweep_as_mask": True, "sweep_mode": "min", "sweep_width": 36,
+                   "sweep_softness": 14, "sweep_grow": 10, "sweep_blur": 8.0, "sweep_trail": 16,
+                   "overlay_mask": True, "invert_mask": False, "strength_schedule": 0.6,
+                   "noise_schedule": 0.015})),
+    Preset("hybrid_camera_tide", "Hybrid - Camera tide (extreme)", "3D", EXTREME,
+           "Copies the video's CAMERA (perspective), not its subject, while four ping-pong depth pulses drive "
+           "QR Monster hard: the space surges like a tide through the video's own depth.",
+           _merge(_SMOOTH, _3D, _HYBRID_FLOW, _SWEEP,
+                  {"hybrid_motion": "Perspective", "translation_z": 0.2, "sweep_mode": "min", "sweep_cycles": 4.0,
+                   "sweep_shape": "pingpong", "sweep_width": 28, "sweep_fill": "depth", "sweep_softness": 12,
+                   "sweep_grow": 10, "sweep_blur": 6.0, "sweep_trail": 16, "strength_schedule": 0.6,
+                   "noise_schedule": 0.03, "cn_1_weight": 1.0, "cn_1_guidance_end": 1.0,
+                   "cn_1_control_mode": "ControlNet is more important"})),
+    Preset("hybrid_possession", "Hybrid - Possession (unorthodox)", "2D", UNORTHODOX,
+           "Sticky flow measured from the generated image, a faint after-generation echo of the video and the "
+           "whole depth map as relief: something else is wearing the performer's shape and movement.",
+           _merge(_SMOOTH, _2D, _HYBRID_FLOW, _SWEEP,
+                  {"hybrid_motion_use_prev_img": True, "hybrid_flow_consistency": True,
+                   "hybrid_consistency_blur": 2, "hybrid_composite": "After Generation",
+                   "hybrid_comp_alpha_schedule": 0.15, "sweep_width": 255, "sweep_fill": "depth",
+                   "sweep_softness": 0, "sweep_grow": 0, "sweep_blur": 2.0, "sweep_trail": 0,
+                   "sweep_smooth": 0.5, "cn_1_weight": 0.9, "cn_1_guidance_end": 0.7,
+                   "strength_schedule": 0.65})),
     # ------------------------------------------------------------------ Interpolation
     # Every frame is drawn from noise (no previous frame), so with a fixed seed a frame is a pure
     # function of its settings: modulate the seed itself and the loop closes perfectly.

@@ -4,14 +4,15 @@ import unittest
 from _fakes import ParMode, make_network, ROOT_DIR  # noqa: F401  (puts scripts/ on sys.path)
 import test_controller
 from test_payload import KNOWN_KEYS, MODELS, _comp_values
-from tdeforum import migrate, payload, presets, schema
+from tdeforum import migrate, payload, presets, schema, sweep
 from tdeforum import td_controller as ctl
 
 
 class PresetDataTest(unittest.TestCase):
     def test_three_unorthodox_per_mode(self):
         for mode in ("2D", "3D", "Video Input", "Interpolation"):
-            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX]
+            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX
+                   and not p.id.startswith("hybrid_")]
             self.assertEqual(len(odd), 3, mode)
             for p in odd:
                 self.assertIn("(unorthodox)", p.label)
@@ -33,8 +34,25 @@ class PresetDataTest(unittest.TestCase):
         self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
         self.assertEqual(s["extract_nth_frame"], 1)
 
-    def test_twentyseven_examples_good_and_extreme_per_mode(self):
-        self.assertEqual(len(presets.PRESETS), 27)
+    def test_thirtyone_examples_good_and_extreme_per_mode(self):
+        self.assertEqual(len(presets.PRESETS), 31)
+
+    def test_four_hybrid_presets_use_the_video_and_the_sweep(self):
+        hybrids = [p for p in presets.PRESETS if p.id.startswith("hybrid_")]
+        self.assertEqual(len(hybrids), 4)
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        for p in hybrids:
+            self.assertIn(p.mode, ("2D", "3D"))
+            self.assertNotEqual(p.values["hybrid_motion"], "None", p.id)
+            self.assertTrue(p.values["sweep_enabled"], p.id)
+            self.assertEqual(p.values["feed_1_mode"], "sweep", p.id)
+            values = _comp_values(**presets.resolve(p, defaults))
+            self.assertIsNone(sweep.check(values), p.id)
+            result = payload.build_request(values, {"0": "x"}, MODELS)
+            s = result["request"]["deforum_settings"]
+            self.assertIs(s["hybrid_generate_inputframes"], True, p.id)
+            self.assertEqual(s["diffusion_cadence"], 2, p.id)
+        self.assertTrue(presets.BY_ID["hybrid_ghost_peel"].values["sweep_as_mask"])
         for mode in ("3D", "2D", "Video Input"):
             levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
@@ -303,3 +321,87 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PagePresetDataTest(unittest.TestCase):
+    def test_every_page_but_globals_has_a_menu_first(self):
+        from tdeforum import page_presets
+        for page in schema.PAGE_ORDER:
+            fields = [f for f in schema.FIELDS if f.page == page]
+            if page in (schema.PAGE_GLOBALS, schema.PAGE_PROMPTS):
+                self.assertFalse([f for f in fields if f.api.startswith("pagepreset")], page)
+                continue
+            self.assertIn(page, page_presets.PAGES, page)
+            menu = schema.BY_API[page_presets.api(page)]
+            first = [f.api for f in fields if not f.api.startswith("preset")][0]
+            self.assertEqual(first, menu.api, page)
+            self.assertEqual(menu.menu[0], "none")
+        self.assertIn("prompt_preset", schema.BY_API)          # the Prompts page's own preset
+
+    def test_page_presets_only_touch_their_page_with_valid_values(self):
+        from tdeforum import page_presets
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        for page, (_slug, items) in page_presets.PAGES.items():
+            self.assertGreaterEqual(len(items), 3, page)
+            for preset in items:
+                for api, value in preset.values.items():
+                    field = schema.BY_API[api]
+                    self.assertEqual(field.page, page, "%s/%s: %s" % (page, preset.id, api))
+                    if field.menu:
+                        self.assertIn(value, field.menu, "%s/%s: %s" % (page, preset.id, api))
+                values = _comp_values(**dict(defaults, **preset.values))
+                result = payload.build_request(values, {"0": "x"}, MODELS)
+                bad = [w for w in result["warnings"] if "LCM" in w or "outside" in w or "-only" not in w and
+                       "int(steps" in w]
+                self.assertEqual(bad, [], "%s/%s: %s" % (page, preset.id, result["warnings"]))
+
+
+class PagePresetApplyTest(test_controller.ControllerTest.__bases__[0]):
+    setUp = test_controller.ControllerTest.setUp
+    make = ApplyPresetTest.make
+
+    def test_page_preset_applies_and_none_restores(self):
+        ui = self.make()
+        ui.par.Pagepresetmotion3d.val = "orbit"
+        self.assertTrue(ctl.on_ui_value(self.root, "Pagepresetmotion3d"))
+        self.assertEqual((ui.par.Rotation3dy.val, ui.par.Paddingmode.val), (0.15, "reflection"))
+        ui.par.Pagepresetmotion3d.val = "push"                  # switching restores first
+        ctl.on_ui_value(self.root, "Pagepresetmotion3d")
+        self.assertEqual((ui.par.Rotation3dy.val, ui.par.Translationz.val, ui.par.Paddingmode.val),
+                         (0.0, 0.6, "border"))
+        ui.par.Pagepresetmotion3d.val = "none"
+        ctl.on_ui_value(self.root, "Pagepresetmotion3d")
+        self.assertEqual(ui.par.Translationz.val, 0.0)
+
+    def test_page_presets_stack_and_the_example_preset_resets_them(self):
+        ui = self.make()
+        ui.par.Pagepresetcamera.val = "wide"
+        ctl.on_ui_value(self.root, "Pagepresetcamera")
+        ui.par.Pagepresetflow.val = "deflicker"
+        ctl.on_ui_value(self.root, "Pagepresetflow")
+        ui.par.Promptpreset.val = "cosmic_eye"
+        ctl.on_ui_value(self.root, "Promptpreset")
+        self.assertEqual((ui.par.Fovschedule.val, ui.par.Opticalflowredogeneration.val), (100.0, "RAFT"))
+        ui.par.Preset.val = "3d_tunnel_roll"
+        ctl.on_ui_value(self.root, "Preset")
+        self.assertEqual((ui.par.Pagepresetcamera.val, ui.par.Pagepresetflow.val, ui.par.Promptpreset.val),
+                         ("none", "none", "none"))
+        self.assertEqual(ui.par.Opticalflowredogeneration.val, "None")
+        self.assertEqual(ui.op("prompt_seq").rows[-1], ["0", "gold", ""])
+        self.assertEqual(ui.par.Fovschedule.val, 70.0)             # the example's own value
+        ui.par.Pagepresetcamera.val = "tele"                       # on top of the example
+        ctl.on_ui_value(self.root, "Pagepresetcamera")
+        self.assertEqual(ui.par.Fovschedule.val, 35.0)
+        ui.par.Preset.val = "none"
+        ctl.on_ui_value(self.root, "Preset")
+        self.assertEqual((ui.par.Pagepresetcamera.val, ui.par.Fovschedule.val), ("none", 70.0))
+        self.assertEqual(ui.par.Animationmode.val, "3D")
+
+    def test_reapply_with_none_clears_page_presets(self):
+        ui = self.make()
+        ui.par.Pagepresetdiffusion.val = "steady"
+        ctl.on_ui_value(self.root, "Pagepresetdiffusion")
+        self.assertEqual(ui.par.Strengthschedule.val, 0.8)
+        self.assertTrue(ctl.on_ui_pulse(self.root, "Presetapply"))
+        self.assertEqual((ui.par.Pagepresetdiffusion.val, ui.par.Strengthschedule.val),
+                         ("none", schema.BY_API["strength_schedule"].default))

@@ -275,8 +275,8 @@ class BuilderTest(unittest.TestCase):
         from tdeforum import presets
         comp = self.build()
         self.assertEqual(list(comp.par.Preset.menuNames), presets.NAMES)
-        self.assertEqual(len(presets.NAMES), 28)
-        self.assertTrue(any("presets: 27 examples" in line for line in self.log), self.log[-6:])
+        self.assertEqual(len(presets.NAMES), 32)
+        self.assertTrue(any("presets: 31 examples" in line for line in self.log), self.log[-6:])
 
     def test_sweep_preview_and_old_live_sweep_ops_removed(self):
         comp = self.build()
@@ -379,7 +379,8 @@ class BuilderTest(unittest.TestCase):
         comp = self.build()
         ui_exec = comp.op("ui_exec")
         self.assertTrue(ui_exec.par.file.val.endswith("ui_exec.py"))
-        self.assertEqual(ui_exec.par.pars.val, "Preset Presetapply Promptedit Promptpreset Sweepshowlatest")
+        self.assertEqual(ui_exec.par.pars.val.split(), ctl.ui_watched())
+        self.assertIn("Pagepresetmotion3d", ui_exec.par.pars.val)
         self.assertEqual(ui_exec.par.op.val, comp.path)
         self.assertEqual((ui_exec.par.valuechange.val, ui_exec.par.onpulse.val), (1, 1))
         for name in ("Presetapply", "Promptedit"):
