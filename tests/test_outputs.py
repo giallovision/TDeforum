@@ -25,6 +25,18 @@ class LoopCapTest(unittest.TestCase):
         expect = ctl._expectation(result)
         self.assertEqual((expect["out_loop"], expect["overlap_out"]), (380 * 3, 0))   # not 1536
 
+    def test_the_sweep_a_render_used_is_remembered_for_reload(self):
+        cfg = config.load()
+        mask = "/opt/a1111/td_masks/feeds/cn_sweep_e16888def3.mp4"
+        result = {"request": {"deforum_settings": {"use_mask_video": True, "video_mask_path": mask,
+                                                   "cn_1_enabled": True, "cn_1_vid_path": "/x/cn1_feed.mp4"}}}
+        self.assertTrue(ctl._sweep_used(result, cfg).endswith("td_masks/feeds/cn_sweep_e16888def3.mp4"))
+        guide = {"request": {"deforum_settings": {"use_mask_video": False, "video_mask_path": mask,
+                                                  "cn_2_enabled": True, "cn_2_vid_path": mask}}}
+        self.assertTrue(ctl._sweep_used(guide, cfg).endswith("cn_sweep_e16888def3.mp4"))
+        off = {"request": {"deforum_settings": {"use_mask_video": False, "video_mask_path": mask}}}
+        self.assertIsNone(ctl._sweep_used(off, cfg))
+
     def test_fit_bars(self):
         # 150 bpm at 20 fps: 8 frames a beat, 32 a bar; 380 frames hold 11 bars
         self.assertEqual(payload.fit_bars(self.values(), 380), 11)

@@ -437,7 +437,7 @@ FIELDS = [
     F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
       label="Feed: recording method", target=None),
     # Outputs: 1 = render loop, 2 = sweep, 3 = the input video looped the same way as the render
-    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input (outputs 1 and 3)", target=None),
+    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input + Sweep (outputs 1-3)", target=None),
     F("loop_in_start", "0", PL, STATUS, label="Input loop: first video frame", target=None),
     F("loop_in_stride", "1", PL, STATUS, label="Input loop: video frames per render frame", target=None),
     F("loop_in_rate", "1", PL, STATUS, label="Input loop: render frames per output frame", target=None),

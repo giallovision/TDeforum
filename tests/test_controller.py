@@ -262,7 +262,14 @@ class TempoCompTest(ControllerTest.__bases__[0]):
                          ("0", "1", "0.5"))
         # Reload Render + Input: the same files again, even after they were cleared
         ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
+        sweep_file = self.share + "/td_masks/feeds/cn_sweep_abc.mp4"         # the sweep this render used
+        os.makedirs(os.path.dirname(sweep_file), exist_ok=True)
+        open(sweep_file, "wb").close()
+        stored = self.root.storage[ctl.LAST_LOAD_KEY]
+        stored["expect"]["sweep"] = sweep_file
+        ui.op("sweep_preview").par.file.val = ""
         self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
+        self.assertEqual(ui.op("sweep_preview").par.file.val, sweep_file)
         self.assertEqual(ui.op("loop_head").par.file.val, path)
         self.assertEqual(ui.op("in_head").par.file.val, conformed)
 

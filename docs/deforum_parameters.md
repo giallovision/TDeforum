@@ -1,6 +1,6 @@
 # deforum COMP: parameter reference
 
-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.3). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
 Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
@@ -287,7 +287,7 @@ Units 2 and 3 have their own pages with the same parameters (`Cn2...`, `Feed2...
 | `Loopoffset` | Loop Player Offset (frames) | 0 | Shifts the loop player's start against the timeline. |
 | `Feedloopstart` | Feed: loop start frame (0 = timeline start) | 0 | Timeline frame where TOP feeds and beat_clock start counting (0 = timeline start). |
 | `Feedmethod` | Feed: recording method | addframe | Add Frame: the recorder steps the timeline frame by frame. Continuous: records every cooked frame. |
-| `Reloadoutputs` | Reload Render + Input (outputs 1 and 3) | (button) | Loads the last render (output 1) and its input video (output 3) again; with nothing loaded yet, the newest render with the current settings' loop plan. |
+| `Reloadoutputs` | Reload Render + Input + Sweep (outputs 1-3) | (button) | Loads the last render (output 1), its input video (output 3) and the sweep video it used (output 2) again; with nothing loaded yet, the newest render with the current settings' loop plan and the newest sweep. |
 | `Loopinstart` | Input loop: first video frame | (read-only) | Read-only: first init-video frame the render used (output 3 starts there). |
 | `Loopinstride` | Input loop: video frames per render frame | (read-only) | Read-only: init-video frames per render frame (more than 1 with Video Frame Mode = Stride). |
 | `Loopinrate` | Input loop: render frames per output frame | (read-only) | Read-only: render frames per output frame (0.5 when the render is interpolated x2); keeps output 3 in step with output 1. |

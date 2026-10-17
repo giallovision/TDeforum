@@ -690,7 +690,23 @@ def _expectation(result, cfg=None):
         # Capped by a shorter init / mask video: the loop is what was rendered, with no seam tail.
         expect.update(out_loop=rendered * x, overlap_out=0, capped=rendered)
     expect["input"] = _input_expect(result, cfg, 1.0 / x, tp["render_fps"])
+    expect["sweep"] = _sweep_used(result, cfg)
     return expect
+
+
+def _sweep_used(result, cfg):
+    """Share path of the Sweep Depth video this render uses (mask or a ControlNet guide), or None."""
+    if cfg is None:
+        return None
+    settings = result.get("request", {}).get("deforum_settings", {})
+    keys = ["video_mask_path"] + ["cn_%d_vid_path" % n for n in range(1, payload.CN_UNITS + 1)]
+    for key in keys:
+        path = str(settings.get(key, "") or "")
+        if os.path.basename(path).startswith("cn_sweep_") and (
+                key == "video_mask_path" and settings.get("use_mask_video")
+                or key != "video_mask_path" and settings.get(key.replace("_vid_path", "_enabled"))):
+            return config.to_share(cfg, path) or None
+    return None
 
 
 def _input_expect(result, cfg, rate, fps=30.0):
@@ -2022,8 +2038,9 @@ def _load_input(root, ui, info, render_path=None):
 
 
 def reload_outputs(root):
-    """Pipeline > Reload Render + Input: load the last render and its input video again
-    (outputs 1 and 3); without one, the newest render with the current settings' plan."""
+    """Pipeline > Reload Render + Input + Sweep: load the last render, its input video and its
+    Sweep Depth video again (outputs 1, 3 and 2); without a render loaded yet, the newest render
+    with the current settings' plan. The sweep falls back to the newest sweep video."""
     stored = root.fetch(LAST_LOAD_KEY, None, search=False) or {}
     path, expect = stored.get("path"), stored.get("expect")
     if not path or not os.path.isfile(path):
@@ -2041,8 +2058,14 @@ def reload_outputs(root):
             log("reload: could not plan the loop from the current settings (%s)" % exc)
             expect = None
     _load_movie(root, path, expect)
-    log("reloaded render %s%s" % (os.path.basename(path),
-                                  " + input video" if (expect or {}).get("input") else " (no input video)"))
+    sweep_path = (expect or {}).get("sweep")
+    if sweep_path and os.path.isfile(sweep_path):
+        _show_sweep(_op(root, "ui"), sweep_path)
+    else:
+        sweep_path = show_latest_sweep(root, quiet=True)
+    log("reloaded render %s%s%s" % (
+        os.path.basename(path), " + input video" if (expect or {}).get("input") else " (no input video)",
+        " + sweep %s" % os.path.basename(sweep_path) if sweep_path else " (no sweep video)"))
     return path
 
 
