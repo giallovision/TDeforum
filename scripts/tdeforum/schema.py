@@ -28,7 +28,7 @@ CFG ~1.5-2 and ~8-10 steps; set those once and they persist.
 
 import re
 
-from . import feed, modulation, presets, sweep, tempo
+from . import feed, modulation, presets, prompt_presets, sweep, tempo
 
 PAGE_TEMPO = "Tempo"
 PAGE_GLOBALS = "Globals"
@@ -39,6 +39,7 @@ PAGE_CAMERA = "Camera & Depth"
 PAGE_DIFFUSION = "Diffusion"
 PAGE_NOISE = "Noise & Color"
 PAGE_FLOW = "Flow & Anti-blur"
+PAGE_HYBRID = "Hybrid Video"
 PAGE_MODS = "Mod Matrix"
 PAGE_SWEEP = "Sweep Depth"
 CN_UI_UNITS = feed.UNITS          # ControlNet units with their own page (payload sends 5)
@@ -47,7 +48,7 @@ PAGE_CN1 = PAGE_CNS[0]
 PAGE_PIPELINE = "Pipeline"
 
 PAGE_ORDER = [PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D,
-              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS,
+              PAGE_CAMERA, PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_HYBRID, PAGE_MODS,
               PAGE_SWEEP] + PAGE_CNS + [PAGE_PIPELINE]
 
 # Kinds understood by build_master_ui.py and payload.py
@@ -124,6 +125,9 @@ TE, G, PR, M2, M3, CA, DI, NO, FL, MM, CN, PL = (
     PAGE_TEMPO, PAGE_GLOBALS, PAGE_PROMPTS, PAGE_MOTION2D, PAGE_MOTION3D, PAGE_CAMERA,
     PAGE_DIFFUSION, PAGE_NOISE, PAGE_FLOW, PAGE_MODS, PAGE_CN1, PAGE_PIPELINE)
 SW = PAGE_SWEEP
+HY = PAGE_HYBRID
+HYBRID_MOTIONS = ["None", "Optical Flow", "Perspective", "Affine"]
+HYBRID_COMPOSITES = ["None", "Normal", "Before Motion", "After Generation"]
 
 COMFY_PREPROCESSORS = [
     "DWPreprocessor", "DepthAnythingV2Preprocessor", "SAMPreprocessor",
@@ -281,6 +285,8 @@ FIELDS = [
       G, STR, label="Negative Prompt", key="animation_prompts_negative"),
     F("strength", 0.8, G, FLOAT, norm=(0, 1), label="Init Strength (first frame)"),
     F("use_mask_video", False, G, TOGGLE),
+    F("invert_mask", False, G, TOGGLE, label="Invert Mask (diffuse the black areas instead)"),
+    F("overlay_mask", False, G, TOGGLE, label="Overlay Mask (keep the original outside the mask)"),
     F("video_init_path", "/opt/a1111/td_inputs/comfy_videos/archive/taichi_portrait.mp4", G, STR),
     F("video_mask_path", "/opt/a1111/td_masks/mask_01.mov", G, STR),
     F("video_frame_mode", "trim", G, MENU, menu=["trim", "stride"],
@@ -289,6 +295,8 @@ FIELDS = [
     # --- Prompts ---------------------------------------------------------------
     F("prompt_source", "sequence", PR, MENU, menu=["sequence", "json"],
       labels=["Beat sequence (prompt_seq table)", "prompt.json (frame keys)"], target=None),
+    F("prompt_preset", prompt_presets.NONE, PR, MENU, menu=prompt_presets.NAMES, labels=prompt_presets.LABELS,
+      label="Prompt Preset (writes prompt_seq)", target=None),
     F("prompt_edit", 0, PR, PULSE, label="Edit prompt_seq (opens deforum/prompt_seq)", target=None),
     F("prompt_xfade_beats", 1.0, PR, FLOAT, norm=(0, 8), label="Default Crossfade (beats)", target=None),
 
@@ -338,6 +346,18 @@ FIELDS = [
     F("optical_flow_cadence", "RAFT", FL, MENU, menu=FLOW_METHODS),
     F("optical_flow_redo_generation", "None", FL, MENU, menu=FLOW_METHODS),
     F("kernel_schedule", 5, FL, INT, norm=(1, 15), label="Anti-blur Kernel (odd)", as_schedule=True),
+
+    # --- Hybrid Video (2D / 3D driven by the Video Init Path) -------------------------
+    F("hybrid_motion", "None", HY, MENU, menu=HYBRID_MOTIONS,
+      labels=["None", "Optical Flow (move like the video)", "Perspective (camera of the video)",
+              "Affine (camera of the video)"], label="Hybrid Motion"),
+    F("hybrid_flow_method", "RAFT", HY, MENU, menu=["RAFT", "DIS Medium", "DIS Fine", "Farneback"]),
+    F("hybrid_motion_use_prev_img", False, HY, TOGGLE, label="Flow from the previous generated image"),
+    F("hybrid_flow_consistency", False, HY, TOGGLE),
+    F("hybrid_consistency_blur", 2, HY, INT, norm=(0, 16)),
+    F("hybrid_flow_factor_schedule", 1.0, HY, FLOAT, norm=(0, 2), as_schedule=True, label="Hybrid Flow Factor"),
+    F("hybrid_composite", "None", HY, MENU, menu=HYBRID_COMPOSITES, label="Hybrid Composite (mix the video in)"),
+    F("hybrid_comp_alpha_schedule", 0.5, HY, FLOAT, norm=(0, 1), as_schedule=True, label="Composite Alpha"),
 ] + [f for f in _MODS if f.page == FL] + [
 
     # --- Mod Matrix ----------------------------------------------------------------
@@ -374,6 +394,7 @@ FIELDS = [
       label="Queue only prepares the sweep (depth + mask video, no render)", target=None),
     F("sweep_depth_path", "", SW, STATUS, label="Depth Video", target=None),
     F("sweep_info", "", SW, STATUS, label="Sweep Plan", target=None),
+    F("sweep_show_latest", 0, SW, PULSE, label="Show Latest Sweep (sweep_preview / COMP output 2)", target=None),
 ] \
   + [f for n in range(1, CN_UI_UNITS + 1) for f in _cn_unit_fields(n)] + [
     # --- ControlNet Unit 1: ComfyUI preprocessing of the init video ----------------

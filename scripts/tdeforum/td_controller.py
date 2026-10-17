@@ -31,6 +31,7 @@ from . import config
 from . import feed
 from . import payload
 from . import presets
+from . import prompt_presets
 from . import schema
 from . import sweep
 from . import tempo
@@ -56,6 +57,7 @@ COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give
 COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
 FEED_FINALIZE_TIMEOUT_S = 60.0
 PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
+PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
 FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
 
@@ -246,6 +248,59 @@ def apply_preset(root, force=False):
     if kept:
         log("  driven (expression / bind / export) and left alone: %s" % ", ".join(sorted(kept)))
     return True
+
+
+def apply_prompt_preset(root):
+    """Prompts > Prompt Preset: write the picked prompt into prompt_seq (None puts yours back)."""
+    ui = _op(root, "ui")
+    menu = getattr(ui.par, "Promptpreset", None) if ui is not None else None
+    table = _inner(ui, "prompt_seq")
+    if menu is None or table is None:
+        return False
+    selected = str(menu.eval() or prompt_presets.NONE).strip() or prompt_presets.NONE
+    stored = dict(root.fetch(PROMPT_PRESET_KEY, None, search=False) or {})
+    applied = stored.get("applied", prompt_presets.NONE)
+    if selected == applied:
+        return False
+    if applied == prompt_presets.NONE:          # your own rows: keep them to come back to
+        backup = [[str(table[r, c].val) for c in range(table.numCols)] for r in range(table.numRows)]
+    else:
+        backup = stored.get("backup") or []
+    preset = prompt_presets.get(selected)
+    if preset is not None:
+        rows = [["beat", "prompt", "xfade"]] + [list(r) for r in preset.rows]
+    else:
+        rows = backup
+    if rows:
+        table.clear()
+        for row in rows:
+            table.appendRow(row)
+    root.store(PROMPT_PRESET_KEY, {"applied": selected if preset else prompt_presets.NONE,
+                                   "backup": backup if preset else []})
+    if preset is None:
+        log("prompt preset None: your prompt_seq rows are back")
+        return True
+    source = getattr(ui.par, "Promptsource", None)
+    if source is not None and str(source.eval()) != "sequence":
+        _set_constant(source, "sequence")
+        log("Prompt Source switched to the prompt_seq sequence")
+    log("prompt preset %s: %s" % (preset.label, preset.rows[0][1]))
+    return True
+
+
+def show_latest_sweep(root, cfg=None):
+    """Point deforum/sweep_preview at the newest cn_sweep_*.mp4 (COMP output 2 shows it)."""
+    cfg = cfg or config.load()
+    folder = config.to_share(cfg, cfg["cn_feed_dir"].rstrip("/") + "/")
+    found = sorted(glob.glob((folder or "") + "cn_sweep_*.mp4"), key=os.path.getmtime) if folder else []
+    found = [f for f in found if ".tmp." not in f]
+    ui = _op(root, "ui")
+    if not found:
+        log("no sweep video in %s yet" % folder)
+        return None
+    _show_sweep(ui, found[-1])
+    log("sweep_preview: %s" % found[-1])
+    return found[-1]
 
 
 def open_prompt_seq(root):

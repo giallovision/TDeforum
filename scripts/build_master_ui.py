@@ -17,7 +17,7 @@
 #   loop_head/tail -> loop_cross -> out_loop   seamless loop player (COMP output 1)
 #   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
 #                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
-#   sweep_preview     Movie File In TOP  the last Sweep Depth mask video (set by the controller)
+#   sweep_preview -> out_sweep   the last Sweep Depth mask video (COMP output 2)
 #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
 #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
 #                                    channels named after parameters (drive live visuals with it)
@@ -243,14 +243,17 @@ def build_inner(comp, values):
         if stale is not None:
             stale.destroy()
             say('removed %s/%s (Sweep Depth renders its video directly now)' % (comp.name, name))
-    _get(comp, moviefileinTOP, td_controller.SWEEP_PREVIEW, -300, -700)
+    preview = _get(comp, moviefileinTOP, td_controller.SWEEP_PREVIEW, -300, -700)
+    preview.viewer = True
+    out_sweep = _get(comp, outTOP, 'out_sweep', 400, -700)     # COMP output 2 (below out_loop)
+    out_sweep.inputConnectors[0].connect(preview)
 
     build_clock(comp)
 
     # Buttons: picking a preset applies it, Re-apply, Edit prompt_seq.
     ui_exec = _get(comp, parameterexecuteDAT, 'ui_exec', -400, -600)
     for name, value in (('file', _scripts + '/ui_exec.py'), ('syncfile', 1), ('op', comp.path),
-                        ('pars', 'Preset Presetapply Promptedit'), ('custom', 1), ('builtin', 0),
+                        ('pars', 'Preset Presetapply Promptedit Promptpreset Sweepshowlatest'), ('custom', 1), ('builtin', 0),
                         ('valuechange', 1), ('onpulse', 1), ('active', 1)):
         par = getattr(ui_exec.par, name, None)
         if par is None:
@@ -401,6 +404,12 @@ def run():
     build_inner(comp, values)
     write_map_table(root, comp)
     ensure_prompt_dat(root, comp)
+    preview = comp.op(td_controller.SWEEP_PREVIEW)
+    if preview is not None and not str(preview.par.file.eval() or '').strip():
+        try:
+            td_controller.show_latest_sweep(root)
+        except Exception as exc:
+            say('sweep_preview not set: %s' % exc)
 
     total = len(schema.all_td_names())
     say('%s %s: %d parameters on %d pages, %d values %s.' % (

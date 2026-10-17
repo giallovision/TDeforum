@@ -27,7 +27,7 @@ frame (1.003 = +20 % per second), Strength is how much of the previous frame is 
 
 NONE = "none"
 
-GOOD, EXTREME = "good", "extreme"
+GOOD, EXTREME, UNORTHODOX = "good", "extreme", "unorthodox"
 
 
 class Preset(object):
@@ -171,6 +171,100 @@ PRESETS = [
                                    "sweep_grow": 10, "sweep_blur": 6.0, "sweep_trail": 16, "sweep_smooth": 0.3,
                                    "cn_1_weight": 1.1, "cn_1_guidance_end": 1.0,
                                    "cn_1_control_mode": "ControlNet is more important"})),
+
+    # ================================================================== unorthodox
+    # Things that only a generative feedback loop can do: the picture is re-imagined every frame,
+    # so geometry, depth, noise and even the seed become animation channels.
+    # ------------------------------------------------------------------ 2D
+    Preset("2d_ouroboros", "2D - Ouroboros (unorthodox)", "2D", UNORTHODOX,
+           "Zoom OUT with wrapped edges: the frame shrinks into tiled copies of itself and every pass "
+           "fuses the seams into one ever-growing mandala that never runs out of picture.",
+           _merge(_SMOOTH, _2D, {"zoom": 0.985, "angle": 0.15, "border": "wrap", "strength_schedule": 0.72,
+                                 "noise_schedule": 0.02, "diffusion_cadence": 2})),
+    Preset("2d_folding_plane", "2D - Folding plane (unorthodox)", "2D", UNORTHODOX,
+           "Perspective flip on three beat-locked axes: the picture plane folds and unfolds like paper and "
+           "diffusion paints whatever the fold reveals beyond the edges.",
+           _merge(_SMOOTH, _2D, {"enable_perspective_flip": True, "perspective_flip_fv": 53.0, "zoom": 1.002,
+                                 "strength_schedule": 0.72},
+                  _slot(1, "perspective_flip_theta", "sine", 8.0, 20.0),
+                  _slot(2, "perspective_flip_phi", "sine", 4.0, 12.0, phase=0.25),
+                  _slot(3, "perspective_flip_gamma", "triangle", 8.0, 6.0))),
+    Preset("2d_flow_puppet", "2D - Flow puppet (unorthodox)", "2D", UNORTHODOX,
+           "Hybrid Video optical flow: the hallucination moves exactly like your init video (every sway, "
+           "every step) without a single pixel of the video showing. Needs Globals > Video Init Path.",
+           _merge(_SMOOTH, _2D, {"hybrid_motion": "Optical Flow", "hybrid_flow_method": "RAFT",
+                                 "hybrid_motion_use_prev_img": False, "hybrid_composite": "None",
+                                 "hybrid_flow_factor_schedule": 1.0, "seamless_loop": False,
+                                 "strength_schedule": 0.68, "diffusion_cadence": 1,
+                                 "optical_flow_cadence": "None"})),
+    # ------------------------------------------------------------------ 3D
+    Preset("3d_endless_vertigo", "3D - Endless vertigo (unorthodox)", "3D", UNORTHODOX,
+           "A dolly zoom that never ends: the camera pushes forward while the FOV breathes 45-95 degrees "
+           "over the loop, so space stretches and collapses around a subject that keeps being re-made.",
+           _merge(_SMOOTH, _3D, {"translation_z": 1.0, "midas_weight": 0.4, "strength_schedule": 0.72},
+                  _slot(1, "fov_schedule", "sine", 8.0, 25.0))),
+    Preset("3d_escher_descent", "3D - Escher descent (unorthodox)", "3D", UNORTHODOX,
+           "Sink and tilt at once with mirrored padding: every frame is a step down an impossible staircase "
+           "that the depth model keeps folding back into itself.",
+           _merge(_SMOOTH, _3D, {"translation_y": -0.8, "rotation_3d_x": 0.35, "translation_z": 0.4,
+                                 "padding_mode": "reflection", "strength_schedule": 0.74})),
+    Preset("3d_breathing_space", "3D - Breathing space (unorthodox)", "3D", UNORTHODOX,
+           "The geometry itself breathes on the bar: aspect ratio and FOV swing in opposite phase, an "
+           "anamorphic inhale the depth warp re-paints instead of stretching.",
+           _merge(_SMOOTH, _3D, {"translation_z": 0.3, "strength_schedule": 0.74},
+                  _slot(1, "aspect_ratio_schedule", "sine", 4.0, 0.25),
+                  _slot(2, "fov_schedule", "sine", 4.0, 12.0, phase=0.5))),
+    # ------------------------------------------------------------------ Video Input
+    Preset("video_depth_peel", "Video Input - Depth peel (unorthodox)", "Video Input", UNORTHODOX,
+           "The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays "
+           "the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it).",
+           _merge(_VIDEO, _SWEEP, {"cn_1_enabled": False, "sweep_as_mask": True, "sweep_mode": "max",
+                                   "sweep_width": 40, "sweep_softness": 16, "sweep_grow": 10,
+                                   "sweep_blur": 8.0, "sweep_trail": 20, "strength_schedule": 0.35,
+                                   "color_coherence": "Video Input", "overlay_mask": True,
+                                   "invert_mask": False})),
+    Preset("video_depth_puppet", "Video Input - Depth puppet (unorthodox)", "Video Input", UNORTHODOX,
+           "The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is "
+           "barely kept: the prompt becomes a new world that moves with the performer's depth.",
+           _merge(_VIDEO, _SWEEP, {"sweep_width": 255, "sweep_fill": "depth", "sweep_softness": 0,
+                                   "sweep_grow": 0, "sweep_blur": 2.0, "sweep_trail": 0, "sweep_smooth": 0.5,
+                                   "strength_schedule": 0.25, "cn_1_weight": 0.95, "cn_1_guidance_end": 0.7})),
+    Preset("video_depth_strobe", "Video Input - Depth strobe (unorthodox)", "Video Input", UNORTHODOX,
+           "A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene "
+           "is sliced into strobing depth layers locked to the tempo.",
+           _merge(_VIDEO, _SWEEP, {"sweep_cycles": 8.0, "sweep_width": 12, "sweep_softness": 2,
+                                   "sweep_grow": 2, "sweep_blur": 1.0, "sweep_trail": 0, "sweep_smooth": 0.3,
+                                   "strength_schedule": 0.5, "cn_1_weight": 1.0, "cn_1_guidance_end": 0.9,
+                                   "cn_1_control_mode": "ControlNet is more important"})),
+    # ------------------------------------------------------------------ Interpolation
+    # Every frame is drawn from noise (no previous frame), so with a fixed seed a frame is a pure
+    # function of its settings: modulate the seed itself and the loop closes perfectly.
+    Preset("interp_seed_walk", "Interpolation - Seed walk (unorthodox)", "Interpolation", UNORTHODOX,
+           "A walk through latent space: the noise blends from seed 424242 to its neighbour and back over "
+           "the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. "
+           "Perfectly seamless.",
+           {"animation_mode": "Interpolation", "seed_behavior": "fixed", "enable_subseed_scheduling": True,
+            "subseed_schedule": "0:(424243)", "subseed_strength_schedule": 0.5, "seamless_loop": True,
+            "loop_overlap_beats": 0.0, "diffusion_cadence": 1,
+            "mod1_active": True, "mod1_target": "subseed_strength_schedule", "mod1_shape": "triangle",
+            "mod1_beats": 8.0, "mod1_depth": 0.5, "mod1_sharpness": 4.0, "mod1_phase": 0.0}),
+    Preset("interp_beat_jolt", "Interpolation - Beat jolt (unorthodox)", "Interpolation", UNORTHODOX,
+           "On every beat the noise jumps towards another seed and relaxes back: the image flinches into a "
+           "sibling version on the kick and settles, with no motion at all.",
+           _merge({"animation_mode": "Interpolation", "seed_behavior": "fixed",
+                   "enable_subseed_scheduling": True, "subseed_schedule": "0:(424299)",
+                   "subseed_strength_schedule": 0.0, "seamless_loop": True, "loop_overlap_beats": 0.0,
+                   "diffusion_cadence": 1},
+                  _slot(1, "subseed_strength_schedule", "decay", 1.0, 0.55, 6.0))),
+    Preset("interp_guidance_bloom", "Interpolation - Guidance bloom (unorthodox)", "Interpolation", UNORTHODOX,
+           "CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into "
+           "over-defined detail and back, while a slow seed drift keeps it alive.",
+           _merge({"animation_mode": "Interpolation", "seed_behavior": "fixed",
+                   "enable_subseed_scheduling": True, "subseed_schedule": "0:(424243)",
+                   "subseed_strength_schedule": 0.15, "seamless_loop": True, "loop_overlap_beats": 0.0,
+                   "diffusion_cadence": 1},
+                  _slot(1, "cfg_scale_schedule", "sine", 8.0, 0.9),
+                  _slot(2, "subseed_strength_schedule", "triangle", 8.0, 0.15))),
 ]
 
 BY_ID = dict((p.id, p) for p in PRESETS)

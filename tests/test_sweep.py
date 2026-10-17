@@ -297,7 +297,7 @@ class SchemaFeedTest(unittest.TestCase):
         self.assertEqual(sorted(f.api for f in fields), sorted(
             ["sweep_depth_video", "sweep_prepare_only", "sweep_enabled", "sweep_model", "sweep_mode",
              "sweep_cycles", "sweep_shape", "sweep_direction", "sweep_width", "sweep_softness", "sweep_trail",
-             "sweep_grow", "sweep_blur",
+             "sweep_grow", "sweep_blur", "sweep_show_latest",
              "sweep_smooth", "sweep_fill", "sweep_as_mask", "sweep_depth_path", "sweep_info"]))
         self.assertTrue(all(f.target is None for f in fields))
         self.assertEqual(fields[0].api, "sweep_enabled")

@@ -110,7 +110,7 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
 
 ### Example presets
 
-*Tempo › Example Preset* (first page of the COMP) lays one of 15 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
+*Tempo › Example Preset* (first page of the COMP) lays one of 27 example configurations over the COMP **as soon as you pick it** (it is checked again at bake and Queue). *Re-apply Preset* lays the selected one over the COMP again after you have changed things. The baselines in `schema.py` never change; the presets live in `scripts/tdeforum/presets.py`.
 
 * Only constant parameters are set; anything you have bound, exported or given an expression keeps its driver (the log lists them).
 * A MOD parameter's *raw schedule* is cleared while a preset is on, otherwise it would beat the preset's base value.
@@ -135,6 +135,37 @@ The baselines are set for LCM checkpoints: **4 steps, CFG 1.8, sampler LCM**, no
 | `video_depth_sweep_away` | Video Input - Depth sweep away (good) | One slow sweep: a soft glowing band starts on the nearest depth (white) and travels to the farthest, so it seems to move away from you. Needs Globals > Video Init Path; takes over ControlNet unit 1. |
 | `video_depth_sweep_toward` | Video Input - Depth sweep toward (good) | The same, the other way: the band starts on the farthest depth and ends on the nearest, so it seems to rush toward you. |
 | `video_depth_sweep_pulses` | Video Input - Depth sweep pulses (extreme) | Four out-and-back sweeps of a wide band that keeps the depth shading and leaves long trails; ControlNet leads, so the picture pulses through the depth layers. |
+| `2d_ouroboros` | 2D - Ouroboros (unorthodox) | Zoom OUT with wrapped edges: the frame shrinks into tiled copies of itself and every pass fuses the seams into one ever-growing mandala that never runs out of picture. |
+| `2d_folding_plane` | 2D - Folding plane (unorthodox) | Perspective flip on three beat-locked axes: the picture plane folds and unfolds like paper and diffusion paints whatever the fold reveals beyond the edges. |
+| `2d_flow_puppet` | 2D - Flow puppet (unorthodox) | Hybrid Video optical flow: the hallucination moves exactly like your init video (every sway, every step) without a single pixel of the video showing. Needs Globals > Video Init Path. |
+| `3d_endless_vertigo` | 3D - Endless vertigo (unorthodox) | A dolly zoom that never ends: the camera pushes forward while the FOV breathes 45-95 degrees over the loop, so space stretches and collapses around a subject that keeps being re-made. |
+| `3d_escher_descent` | 3D - Escher descent (unorthodox) | Sink and tilt at once with mirrored padding: every frame is a step down an impossible staircase that the depth model keeps folding back into itself. |
+| `3d_breathing_space` | 3D - Breathing space (unorthodox) | The geometry itself breathes on the bar: aspect ratio and FOV swing in opposite phase, an anamorphic inhale the depth warp re-paints instead of stretching. |
+| `video_depth_peel` | Video Input - Depth peel (unorthodox) | The sweep becomes the MASK, not the guide: only the glowing band is re-dreamed, the rest stays the real video, so the restyle peels through the scene layer by layer (Invert Mask flips it). |
+| `video_depth_puppet` | Video Input - Depth puppet (unorthodox) | The whole depth map (a band 255 levels wide, depth-shaded) drives QR Monster while the video is barely kept: the prompt becomes a new world that moves with the performer's depth. |
+| `video_depth_strobe` | Video Input - Depth strobe (unorthodox) | A thin hard band races through the depth once per beat (8 cycles over an 8-beat loop): the scene is sliced into strobing depth layers locked to the tempo. |
+| `interp_seed_walk` | Interpolation - Seed walk (unorthodox) | A walk through latent space: the noise blends from seed 424242 to its neighbour and back over the loop (subseed strength 0 -> 1 -> 0), so one image morphs into its sibling and returns. Perfectly seamless. |
+| `interp_beat_jolt` | Interpolation - Beat jolt (unorthodox) | On every beat the noise jumps towards another seed and relaxes back: the image flinches into a sibling version on the kick and settles, with no motion at all. |
+| `interp_guidance_bloom` | Interpolation - Guidance bloom (unorthodox) | CFG swings 0.9 -> 2.7 over the loop: the picture dissolves into a soft dream, then blooms into over-defined detail and back, while a slow seed drift keeps it alive. |
+
+The **unorthodox** dozen (three per mode, including **Interpolation**) lean on what only a generative feedback loop can do: zooming *out* into wrapped copies of the frame, folding the picture plane with perspective flip, moving a hallucination with a video's optical flow (*Hybrid Video* page), breathing aspect ratio / FOV that the depth warp re-paints, using the sweep as an inpainting **mask** instead of a guide (*Invert Mask* / *Overlay Mask* are on the Globals page), the whole depth map as a QR Monster relief, and in Interpolation mode (every frame drawn from noise) animating the **seed itself** with subseed strength, which closes the loop perfectly.
+
+### Prompt presets
+
+*Prompts › Prompt Preset* writes one of ten visionary prompts into `deforum/prompt_seq` and switches *Prompt Source* to the sequence. The rows it replaced come back when you pick **None**. The Negative Prompt (Globals) still applies.
+
+| id | name | prompt |
+|---|---|---|
+| `fractal_temple` | Fractal temple | vast fractal temple of iridescent glass and liquid gold, infinite recursive arches, sacred geometry, volumetric god rays through bioluminescent mist, hyperdetailed, cinematic lighting |
+| `mycelial_cosmos` | Mycelial cosmos | glowing mycelium network spanning a cosmic nebula, bioluminescent fungi, drifting spores like tiny galaxies, deep teal and magenta light, macro photography, ethereal, hyperdetailed |
+| `cosmic_eye` | Eye of the cosmos | colossal cosmic eye made of swirling galaxies, iris of nebula clouds, concentric rings of light, sacred geometry halo, otherworldly, volumetric light, ultra detailed |
+| `haeckel_abyss` | Haeckel abyss | radiolarians and jellyfish in the style of Ernst Haeckel, translucent bioluminescent sea creatures, intricate radial symmetry, deep ocean glow, scientific illustration meets hyperrealism |
+| `chromatic_liquid` | Chromatic liquid | molten chrome and rainbow oil flowing into kaleidoscopic patterns, liquid metal ripples, thin-film interference colours, macro photography, studio lighting, hyperreal |
+| `astral_forest` | Astral forest | ancient forest of crystal trees under a violet aurora, glowing runes in the bark, floating motes of light, mystical fog, fantasy realism, highly detailed |
+| `hyperspace` | Hyperspace lattice | geometric hyperspace tunnel of shifting jewel-toned mosaics, self-transforming beings of light, impossible architecture, intricate interlocking patterns, vivid saturated colours, transcendental |
+| `living_mandala` | Living mandala | living mandala of flowers, feathers and gemstones unfolding endlessly, perfect radial symmetry, gold filigree on deep indigo, ornate, hyperdetailed |
+| `blake_vision` | Blake vision | visionary engraving in the style of William Blake and Gustave Dore, angels spiralling through radiant clouds, cosmic light, dramatic chiaroscuro, epic, intricate |
+| `neural_bloom` | Neural bloom | bioluminescent neural network blooming like coral, synapses firing light, electric blue and violet, microscopic universe, shallow depth of field, hyperdetailed |
 
 ### Sweep Depth (Animation Mode = Video Input)
 
@@ -142,7 +173,7 @@ A moving band through the depth of your init video, rendered as a ControlNet gui
 
 1. **Sweep Depth** page: switch it **On**; on *ControlNet Unit N* set **Guide Source = Sweep Depth** (and the unit on). Needs Animation Mode = Video Input and Globals > Video Init Path.
 2. At Queue, ComfyUI depth-maps the init video for the frames being rendered (`max_frames`) with the *Depth Model* you picked, at 512 px (the mask is resized to the render size anyway). **Depth Anything V2 small (vits)** is the default and several times faster than the large model the AIO node always loads. Cached per video / size / model / frame count (*Force ComfyUI re-preprocess* remakes it).
-3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`. Same depth video + same look + same frames = cache hit, no re-render.
+3. TouchDesigner gets the depth video (from the share, or downloaded from ComfyUI's `/view` into `td_masks/comfy_fetch/`, see *Share layout*) and renders the band mask **in a background thread** with OpenCV + numpy (`tdeforum/sweep.py`): a few seconds, frame-exact, TD stays responsive. The result, `td_masks/feeds/cn_sweep_<key>.mp4`, becomes the unit's `vid_path` and plays in `deforum/sweep_preview`, which is also the COMP's **second output** (wire a Null to it); *Show Latest Sweep* points it at the newest sweep video on the share. Same depth video + same look + same frames = cache hit, no re-render.
 4. Then the render is submitted as usual.
 
 Depth maps are white = near. **Max** starts on the nearest levels (245-255 for a width of 10) and ends on 0-10, so the white sweep seems to move away from you; **Min** does the reverse.
@@ -220,7 +251,7 @@ Deforum splits a schedule on `,` and `:` before evaluating it, and evaluates wit
 | Run Script | `export_deforum_payload` | `export_deforum_payload.py` | dry run → `runtime/last_deforum_payload.json` |
 | Run Script | `preproc_payload_exec` | `comfy_preprocessor_payload_exec.py` | ComfyUI preprocess only |
 | Run Script | `builder_master_ui` | `build_master_ui.py` | build / rebuild the `deforum` COMP |
-| Example Preset, *Re-apply Preset*, *Edit prompt_seq* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
+| Example Preset, *Re-apply Preset*, *Edit prompt_seq*, Prompt Preset, *Show Latest Sweep* | `deforum/ui_exec` | `ui_exec.py` | `td_controller.apply_preset` / `open_prompt_seq` |
 | `deforum/mod_live` cooks (input `beat_clock`) | `deforum/mod_live_callbacks` | `mod_live_chop.py` | `td_controller.mod_live_cook` |
 | Run Script | `export_toe` | `export_toe.py` | save + copy the `.toe` to `T:/` |
 
@@ -253,7 +284,8 @@ scripts/
     prompt_seq.py      # beat-indexed prompts -> held keys + AND crossfades
     feed.py            # TOP -> ControlNet guide video: frame plan, paths, checks
     sweep.py           # Sweep Depth: band maths, mask, background render of the mask video
-    presets.py         # 15 example configurations (Example Preset drop-down)
+    presets.py         # 27 example configurations (Example Preset drop-down)
+    prompt_presets.py  # 10 visionary prompts (Prompt Preset drop-down)
     migrate.py         # Deforum_UI -> deforum COMP value migration
     payload.py         # batch request + frame plan
     comfy.py           # ComfyUI request / history parsing

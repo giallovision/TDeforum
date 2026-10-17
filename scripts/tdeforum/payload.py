@@ -84,8 +84,15 @@ def border_modes(choice):
     return "replicate", "border"
 
 
+def hybrid_active(values):
+    """Hybrid Video drives a 2D / 3D render from the init video's motion or pixels."""
+    return _text(values.get("animation_mode", "")) in ("2D", "3D") and (
+        _text(values.get("hybrid_motion", "None")) not in ("", "None")
+        or _text(values.get("hybrid_composite", "None")) not in ("", "None"))
+
+
 def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
-                init_frames=None, mask_frames=None):
+                init_frames=None, mask_frames=None, hybrid=False):
     """Work out max_frames and the frame-extraction window.
 
     Returns a dict with max_frames, extract_* settings (or None when Deforum's
@@ -123,10 +130,12 @@ def plan_frames(mode, ui_max_frames, frame_mode="trim", use_mask_video=False,
 
     if mode in ("2D", "3D"):
         cap, limited = ui_max_frames, "ui"
+        if hybrid and init_frames and init_frames < cap:
+            cap, limited = init_frames, "init video"
         if use_mask_video and mask_frames and mask_frames < cap:
             cap, limited = mask_frames, "mask video"
         plan.update(max_frames=cap, source_frames=cap, limited_by=limited)
-        if use_mask_video:
+        if use_mask_video or hybrid:
             plan.update(extract_from_frame=0, extract_to_frame=cap - 1, extract_nth_frame=1)
     return plan
 
@@ -264,11 +273,12 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     ui_max = tp["max_frames"] if tp else values.get("max_frames", 240)
     init_frames = mask_frames = None
     if frame_counter is not None:
-        if mode == "Video Input":
+        if mode == "Video Input" or hybrid_active(values):
             init_frames = _count(frame_counter, values.get("video_init_path"), "init video", warnings)
         if use_mask_video:
             mask_frames = _count(frame_counter, values.get("video_mask_path"), "mask video", warnings)
-    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames)
+    hybrid = hybrid_active(values)
+    plan = plan_frames(mode, ui_max, frame_mode, use_mask_video, init_frames, mask_frames, hybrid)
     total = plan["max_frames"]
     if tp and total < tp["max_frames"]:
         warnings.append("the %s is shorter than the loop (%d < %d frames); the loop will not close"
@@ -345,6 +355,11 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
 
     _check_sampling(values, settings, options, ranges, mode, warnings)
+    if hybrid:
+        # Deforum reads the video's frames from <outdir>/hybridframes; extract them every run.
+        settings["hybrid_generate_inputframes"] = True
+        if not _text(values.get("video_init_path", "")):
+            warnings.append("Hybrid Video is on but Globals > Video Init Path is empty")
 
     # --- ControlNet: units 1..CN_UI_UNITS from the UI, the rest off ------------------
     # Deforum parses every unit's schedules even when the unit is off, so a unit the
@@ -377,7 +392,8 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
     settings["prompts"] = sequence or dict(prompts or DEFAULT_PROMPTS)
 
     # --- output: fps / interpolation, and what the TD side relies on -----------------------
-    settings.update(skip_video_creation=False, use_mask=use_mask_video, overlay_mask=False,
+    settings.update(skip_video_creation=False, use_mask=use_mask_video,
+                    overlay_mask=use_mask_video and _as_bool(values.get("overlay_mask", False)),
                     store_frames_in_ram=True)
     if tp:
         settings["fps"] = tp["render_fps"]
@@ -413,7 +429,8 @@ def _check_sampling(values, settings, options, ranges, mode, warnings):
                         "(use 1.5-2)" % cfg[1])
     keep = ranges.get("strength_schedule")
     steps = settings.get("steps")
-    if keep and isinstance(steps, int) and not _as_bool(options.get("img2img_fix_steps", False)):
+    if keep and isinstance(steps, int) and mode != "Interpolation" \
+            and not _as_bool(options.get("img2img_fix_steps", False)):
         actual = int(steps * (1.0 - min(0.999, keep[1])))
         if actual < 3:
             warnings.append("A1111 runs int(steps x (1 - Strength)) steps on img2img frames: %d step(s) at "

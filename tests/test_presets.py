@@ -9,10 +9,34 @@ from tdeforum import td_controller as ctl
 
 
 class PresetDataTest(unittest.TestCase):
-    def test_fifteen_examples_good_and_extreme_per_mode(self):
-        self.assertEqual(len(presets.PRESETS), 15)
+    def test_three_unorthodox_per_mode(self):
+        for mode in ("2D", "3D", "Video Input", "Interpolation"):
+            odd = [p for p in presets.PRESETS if p.mode == mode and p.level == presets.UNORTHODOX]
+            self.assertEqual(len(odd), 3, mode)
+            for p in odd:
+                self.assertIn("(unorthodox)", p.label)
+
+    def test_interpolation_presets_hold_the_seed_and_loop_cleanly(self):
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        for preset in [p for p in presets.PRESETS if p.mode == "Interpolation"]:
+            values = _comp_values(**presets.resolve(preset, defaults))
+            result = payload.build_request(values, {"0": "x"}, MODELS)
+            s = result["request"]["deforum_settings"]
+            self.assertEqual((s["animation_mode"], s["seed_behavior"]), ("Interpolation", "fixed"), preset.id)
+            self.assertIs(s["enable_subseed_scheduling"], True, preset.id)
+            self.assertFalse([w for w in result["warnings"] if "loop" in w or "LCM" in w], (preset.id, result["warnings"]))
+
+    def test_flow_puppet_turns_hybrid_video_on(self):
+        defaults = dict((f.api, f.default) for f in schema.FIELDS)
+        values = _comp_values(**presets.resolve(presets.BY_ID["2d_flow_puppet"], defaults))
+        s = payload.build_request(values, {"0": "x"}, MODELS)["request"]["deforum_settings"]
+        self.assertEqual((s["hybrid_motion"], s["hybrid_generate_inputframes"]), ("Optical Flow", True))
+        self.assertEqual(s["extract_nth_frame"], 1)
+
+    def test_twentyseven_examples_good_and_extreme_per_mode(self):
+        self.assertEqual(len(presets.PRESETS), 27)
         for mode in ("3D", "2D", "Video Input"):
-            levels = [p.level for p in presets.PRESETS if p.mode == mode]
+            levels = [p.level for p in presets.PRESETS if p.mode == mode and p.level != presets.UNORTHODOX]
             self.assertGreaterEqual(levels.count(presets.GOOD), 1, mode)
             self.assertGreaterEqual(levels.count(presets.EXTREME), 1, mode)
             self.assertGreaterEqual(len(levels), 2, mode)
@@ -46,9 +70,9 @@ class PresetDataTest(unittest.TestCase):
                      "sd_model_checkpoint", "sd_vae", "n_prompt", "cfg_scale_schedule"}
         for preset in presets.PRESETS:
             self.assertFalse(protected & set(preset.values), preset.id)
-            if preset.mode != "Video Input":
+            if preset.mode in ("2D", "3D"):
                 self.assertNotIn("seed_behavior", preset.values, preset.id)
-            if "sweep" not in preset.id:
+            if not preset.values.get("sweep_enabled"):
                 self.assertFalse([k for k in preset.values if k.startswith("cn_") or k.startswith("feed_")],
                                  preset.id)
 
@@ -230,6 +254,35 @@ class ApplyPresetTest(test_controller.ControllerTest.__bases__[0]):
         table.openViewer = lambda: opened.append(True)
         ctl.open_prompt_seq(self.root)
         self.assertEqual(opened, [True])
+
+    def test_prompt_preset_writes_prompt_seq_and_none_restores_it(self):
+        from tdeforum import prompt_presets
+        ui = self.make(prompt_source="json")
+        table = ui.op("prompt_seq")
+        self.assertEqual(len(prompt_presets.PRESETS), 10)
+        ui.par.Promptpreset.val = "cosmic_eye"
+        self.assertTrue(ctl.apply_prompt_preset(self.root))
+        self.assertEqual(table.rows[0], ["beat", "prompt", "xfade"])
+        self.assertIn("cosmic eye", table.rows[1][1])
+        self.assertEqual(ui.par.Promptsource.val, "sequence")
+        ui.par.Promptpreset.val = "neural_bloom"
+        ctl.apply_prompt_preset(self.root)
+        self.assertIn("neural network", table.rows[1][1])
+        ui.par.Promptpreset.val = "none"
+        ctl.apply_prompt_preset(self.root)
+        self.assertEqual(table.rows, [["beat", "prompt", "xfade"], ["0", "gold", ""]])
+        values = ctl.read_ui(ui)
+        prompts = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=ctl.read_prompt_rows(ui))
+        self.assertEqual(prompts["request"]["deforum_settings"]["prompts"]["0"], "gold")
+
+    def test_every_prompt_preset_compiles(self):
+        from tdeforum import prompt_presets
+        values = _comp_values()
+        for preset in prompt_presets.PRESETS:
+            rows = [["beat", "prompt", "xfade"]] + [list(r) for r in preset.rows]
+            s = payload.build_request(values, {"0": "x"}, MODELS, prompt_rows=rows)["request"]["deforum_settings"]
+            self.assertEqual(s["prompts"]["0"], preset.rows[0][1], preset.id)
+            self.assertLess(len(preset.rows[0][1].split()), 45, preset.id)       # CLIP: 77 tokens
 
     def test_every_preset_applies_and_then_queues(self):
         ui = self.make()
