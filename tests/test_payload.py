@@ -102,6 +102,14 @@ class PayloadTest(unittest.TestCase):
             self.assertEqual(s["cn_%d_weight" % unit], "0:(1.0)")
             self.assertEqual(s["cn_%d_guidance_end" % unit], "0:(0.8)")
 
+    def test_zoe_depth_is_sent_as_midas_with_a_warning(self):
+        for algo in ("Zoe", "Zoe+AdaBins (old)"):
+            result = payload.build_request(_comp_values(depth_algorithm=algo, animation_mode="3D"), {"0": "x"}, MODELS)
+            self.assertEqual(result["request"]["deforum_settings"]["depth_algorithm"], "Midas-3-Hybrid")
+            self.assertTrue(any("crashes in this A1111 image" in w for w in result["warnings"]), algo)
+        ok = payload.build_request(_comp_values(depth_algorithm="Leres", animation_mode="3D"), {"0": "x"}, MODELS)
+        self.assertEqual(ok["request"]["deforum_settings"]["depth_algorithm"], "Leres")
+
     def test_td_only_fields_not_sent(self):
         s = self.build()["request"]["deforum_settings"]
         for key in ("comfy_preproc_enable", "comfy_preprocessor", "video_frame_mode",

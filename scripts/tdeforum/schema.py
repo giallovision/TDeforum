@@ -329,7 +329,9 @@ FIELDS = [
 
     # --- Camera & Depth ---------------------------------------------------------
     F("use_depth_warping", True, CA, TOGGLE),
-    F("depth_algorithm", "Midas-3-Hybrid", CA, MENU, menu=DEPTH_ALGORITHMS),
+    F("depth_algorithm", "Midas-3-Hybrid", CA, MENU, menu=DEPTH_ALGORITHMS,
+      labels=[a + (" (crashes in our image: sent as Midas-3-Hybrid)" if a.startswith("Zoe") else "")
+              for a in DEPTH_ALGORITHMS]),
     F("midas_weight", 0.2, CA, FLOAT, norm=(0, 1)),
     # Without this toggle Deforum ignores every perspective_flip_* schedule (2D and 3D).
     F("enable_perspective_flip", False, CA, TOGGLE),

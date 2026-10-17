@@ -1,6 +1,6 @@
 # deforum COMP: parameter reference
 
-Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
+Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.12.1). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
 Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
@@ -120,7 +120,7 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 |---|---|---|---|
 | `Pagepresetcamera` | Page Preset (Camera & Depth) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Usedepthwarping` | Use Depth Warping | On | 3D: warp the previous frame through its depth map (real parallax) instead of a flat transform. |
-| `Depthalgorithm` | Depth Algorithm | Midas-3-Hybrid | Depth model Deforum uses for 3D warping (MiDaS hybrid by default; Zoe/AdaBins/LeReS alternatives). |
+| `Depthalgorithm` | Depth Algorithm | Midas-3-Hybrid | Depth model Deforum uses for 3D warping (Midas-3-Hybrid by default). The Zoe options crash in our A1111 image, so they are sent as Midas-3-Hybrid with a warning. |
 | `Midasweight` | Midas Weight | 0.2 | Blend weight of MiDaS in the hybrid depth algorithms; higher = stronger depth relief. |
 | `Enableperspectiveflip` | Enable Perspective Flip | Off | Turns on the perspective flip schedules (theta, phi, gamma, fv); without it they do nothing. |
 | `Fovschedule` | ~ FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |

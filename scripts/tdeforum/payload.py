@@ -417,6 +417,7 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
         settings["padding_mode"] = border_modes(_text(values["border"]))[1]
 
     _check_sampling(values, settings, options, ranges, mode, warnings)
+    _check_depth(settings, warnings)
     if hybrid:
         # Deforum reads the video's frames from <outdir>/hybridframes; extract them every run.
         settings["hybrid_generate_inputframes"] = True
@@ -487,6 +488,21 @@ def build_request(values, prompts=None, models=None, frame_counter=None,
         request["options_overrides"] = options
     return {"request": request, "plan": plan, "tempo": tp, "schedules": compiled,
             "warnings": warnings}
+
+
+# Deforum's vendored ZoeDepth runs MiDaS' BEiT backbone, which crashes with the timm in our A1111
+# image on the first warped frame ("'Block' object has no attribute 'target'"). Until the image
+# pins a timm it works with, these are sent as Midas-3-Hybrid instead.
+BROKEN_DEPTH = ("Zoe", "Zoe+AdaBins (old)")
+DEPTH_FALLBACK = "Midas-3-Hybrid"
+
+
+def _check_depth(settings, warnings):
+    algo = settings.get("depth_algorithm")
+    if algo in BROKEN_DEPTH and settings.get("use_depth_warping", True) is not False:
+        settings["depth_algorithm"] = DEPTH_FALLBACK
+        warnings.append("Depth Algorithm %s crashes in this A1111 image (ZoeDepth vs timm: 'Block' object has "
+                        "no attribute 'target'); sent %s instead" % (algo, DEPTH_FALLBACK))
 
 
 def _check_sampling(values, settings, options, ranges, mode, warnings):
