@@ -186,7 +186,9 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
             ui_pars[field.raw_td_name] = ui_values.get(field.api + ":raw", "")
     if comp:
         for name in ("Pipelinestatus", "Tempoinfo", "Loopoutframes", "Loopoutoverlap", "Loopoutrate",
-                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath"):
+                     "Feed1info", "Feed2info", "Feed3info", "Sweepinfo", "Sweepdepthpath",
+                     "Loopinstart", "Loopinstride", "Loopinrate", "Snapshotname", "Snapshotpath",
+                     "Snapshotinfo"):
             ui_pars.setdefault(name, "")
     ui = root.add(Op("deforum" if comp else "Deforum_UI", root, **ui_pars))
     if comp:
@@ -195,7 +197,7 @@ def make_network(ui_values, comp=False, prompt_rows=None, chop=None):
         mod = ui.add(Op("in_mod", ui))
         mod.channels = [Channel(n, v) for n, v in (chop or {}).items()]
         ui.add(Op("schedule_preview", ui))
-        for name in ("loop_head", "loop_tail"):
+        for name in ("loop_head", "loop_tail", "in_head", "in_tail"):
             ui.add(Op(name, ui, file=Par("file", ""), reloadpulse=0))
         root.timeline = Timeline()
         top = root.add(Op("/", root))

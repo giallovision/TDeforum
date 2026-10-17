@@ -236,6 +236,43 @@ class TempoCompTest(ControllerTest.__bases__[0]):
         self.assertEqual(ui.par.Loopoutframes.val, "120")      # 4 beats at 60 fps
         self.assertEqual(ui.par.Loopoutoverlap.val, "30")      # 15 render frames x2
         self.assertEqual(ui.par.Loopoutrate.val, "1")
+        # output 3: the init video, looped the same way (30 fps render on a 60 fps loop)
+        self.assertTrue(ui.op("in_head").par.file.val.endswith("comfy_videos/archive/a.mp4"))
+        self.assertEqual(ui.op("in_tail").par.file.val, ui.op("in_head").par.file.val)
+        self.assertEqual((ui.par.Loopinstart.val, ui.par.Loopinstride.val, ui.par.Loopinrate.val),
+                         ("0", "1", "0.5"))
+        # Reload Render + Input: the same files again, even after they were cleared
+        ui.op("loop_head").par.file.val = ui.op("in_head").par.file.val = ""
+        self.assertEqual(ctl.on_ui_pulse(self.root, "Reloadoutputs"), path)
+        self.assertEqual(ui.op("loop_head").par.file.val, path)
+        self.assertTrue(ui.op("in_head").par.file.val.endswith("a.mp4"))
+
+    def test_snapshot_round_trip(self):
+        ui = self.make()
+        ui.par.Translationz.val = 3.5
+        ui.par.Zoomraw.val = "0:(1.01)"
+        ui.par.Snapshotname.val = "gold run!"
+        ui.par.Rotation3dy.mode, ui.par.Rotation3dy.expr = ParMode.EXPRESSION, "op('pattern1')['chan1']"
+        self.root.store(ctl.PRESET_KEY, {"applied": "none", "backup": {"Zoom": 1.0}})
+        path = ctl.on_ui_pulse(self.root, "Snapshottake")
+        self.assertTrue(path.startswith(self.share + "/snapshots/gold_run_"), path)
+        self.assertEqual(ui.par.Snapshotpath.val, path)
+        ui.par.Translationz.val, ui.par.Zoomraw.val = 0.0, ""
+        ui.par.Rotation3dy.mode = ParMode.CONSTANT
+        ui.op("prompt_seq").rows = [["beat", "prompt", "xfade"], ["0", "changed", ""]]
+        self.root.store(ctl.PRESET_KEY, {})
+        ui.par.Snapshotpath.val = os.path.basename(path)[:-5]          # a bare name works too
+        self.assertTrue(ctl.on_ui_pulse(self.root, "Snapshotload"))
+        self.assertEqual((ui.par.Translationz.val, ui.par.Zoomraw.val), (3.5, "0:(1.01)"))
+        self.assertEqual((ui.par.Rotation3dy.mode, ui.par.Rotation3dy.expr),
+                         (ParMode.EXPRESSION, "op('pattern1')['chan1']"))
+        self.assertEqual(ui.op("prompt_seq").rows[1], ["0", "gold", ""])
+        self.assertEqual(self.root.storage[ctl.PRESET_KEY]["backup"], {"Zoom": 1.0})
+        self.assertIn("loaded gold_run_", ui.par.Snapshotinfo.val)
+        with open(path) as fh:
+            saved = json.load(fh)
+        self.assertNotIn("Pipelinestatus", saved["pars"])           # status lines are not saved
+        self.assertNotIn("Snapshotpath", saved["pars"])
 
     def test_missing_interpolation_falls_back_to_plain_render(self):
         ui = self.make()

@@ -27,6 +27,7 @@ import time
 import traceback
 
 from . import chop_link
+from . import snapshots
 from . import comfy
 from . import config
 from . import feed
@@ -61,6 +62,7 @@ FEED_FINALIZE_TIMEOUT_S = 60.0
 PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
 PAGE_PRESET_KEY = "tdeforum_page_presets"     # root storage: {page api: {applied, backup}}
 PROMPT_PRESET_KEY = "tdeforum_prompt_preset"   # root storage: {applied: id, backup: [prompt_seq rows]}
+LAST_LOAD_KEY = "tdeforum_last_load"  # root storage: {path, expect} of the render last loaded
 FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
 CAPTURE_STALL_S = 4.0        # no Frame End callback this long -> drive the capture with run() instead
 
@@ -84,6 +86,8 @@ INNER = {
     "preview": "schedule_preview",    # table written by preview()
     "head": "loop_head",              # loop player: Movie File In at the playhead
     "tail": "loop_tail",              # loop player: Movie File In one loop later
+    "in_head": "in_head",             # input loop (output 3): the init video at the playhead
+    "in_tail": "in_tail",             # input loop: one loop later
     "sweep_preview": "sweep_preview", # Sweep Depth: Movie File In showing the last mask video
     "beat_clock": "beat_clock",       # Constant CHOP: loop / beat / bar phase on the timeline
     "mod_live": "mod_live",           # Script CHOP: Mod Matrix values at the current loop frame
@@ -346,12 +350,19 @@ def on_ui_pulse(root, name):
         return open_prompt_seq(root)
     if name == "Sweepshowlatest":
         return show_latest_sweep(root)
+    if name == "Reloadoutputs":
+        return reload_outputs(root)
+    if name == "Snapshottake":
+        return take_snapshot(root)
+    if name == "Snapshotload":
+        return load_snapshot(root)
     return False
 
 
 def ui_watched():
     """TD names ui_exec watches."""
-    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest"] + \
+    return ["Preset", "Presetapply", "Promptedit", "Promptpreset", "Sweepshowlatest", "Reloadoutputs",
+            "Snapshottake", "Snapshotload"] + \
         [schema.BY_API[a].td_name for a in schema.PAGE_PRESET_APIS]
 
 
@@ -631,13 +642,30 @@ def build(root, cfg):
     return values, result
 
 
-def _expectation(result):
-    """What the finished render will look like on disk / how to loop it (kept in state)."""
+def _expectation(result, cfg=None):
+    """What the finished render will look like on disk / how to loop it (kept in state).
+
+    ``input``: how the init video lines up with the render (COMP output 3 plays it looped the
+    same way): video frame = start + stride * render frame, render frame = output frame * rate."""
     tp = result.get("tempo")
     if not tp:
         return None
-    return {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
-            "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
+    expect = {"engine": tp["engine"], "x": tp["interp_x"], "out_loop": tp["out_loop_frames"],
+              "overlap_out": tp["overlap_frames"] * tp["interp_x"]}
+    expect["input"] = _input_expect(result, cfg, 1.0 / max(1, int(tp["interp_x"] or 1)))
+    return expect
+
+
+def _input_expect(result, cfg, rate):
+    settings = result.get("request", {}).get("deforum_settings", {})
+    init = str(settings.get("video_init_path", "") or "").strip()
+    if not init or cfg is None:
+        return None
+    plan = result.get("plan") or {}
+    return {"container": init, "share": config.to_share(cfg, init) or init,
+            "start": int(plan.get("extract_from_frame") or 0),
+            "stride": int(plan.get("extract_nth_frame") or 1), "rate": float(rate),
+            "size": [settings.get("W"), settings.get("H")]}
 
 
 def _write_runtime_json(cfg, name, data):
@@ -1061,7 +1089,7 @@ def _submit_deforum(root, cfg, result, st):
                                  header=JSON_HEADERS, data=json.dumps(result["request"]))
     now = time.time()
     _save(root, {"state": DEFORUM_SUBMITTED, "submitted": now, "updated": now,
-                 "expect": _expectation(result)})
+                 "expect": _expectation(result, cfg)})
     _set_status(root, "render: submitted")
     log("render submitted: " + payload.summary(result))
 
@@ -1811,6 +1839,8 @@ def _load_movie(root, path, expect=None):
             reload_ = getattr(player.par, "reloadpulse", None)
             if reload_ is not None:
                 reload_.pulse()
+    _load_input(ui, (expect or {}).get("input"))
+    root.store(LAST_LOAD_KEY, {"path": path, "expect": expect})
     if expect and expect.get("out_loop"):
         loop = int(expect["out_loop"])                 # output frames per loop
         rate = float(expect.get("rate", 1.0))          # file frames per output frame
@@ -1826,6 +1856,153 @@ def _load_movie(root, path, expect=None):
         log("loop player: %d-frame loop, %d-frame seam crossfade%s%s"
             % (loop, overlap, "" if rate == 1 else ", file played at %gx" % rate,
                "" if frames else " (file length unknown, used the plan)"))
+
+
+def _load_input(ui, info):
+    """COMP output 3: the init video, looped like the render (in_head / in_tail -> in_cross)."""
+    if ui is None:
+        return
+    share = (info or {}).get("share") or ""
+    if info:
+        _set_par(ui, "Loopinstart", str(int(info.get("start", 0))))
+        _set_par(ui, "Loopinstride", str(int(info.get("stride", 1))))
+        _set_par(ui, "Loopinrate", "%g" % float(info.get("rate", 1.0)))
+    for key in ("in_head", "in_tail"):
+        player = _inner(ui, key)
+        if player is None:
+            continue
+        _set_constant(player.par.file, share)
+        reload_ = getattr(player.par, "reloadpulse", None)
+        if reload_ is not None:
+            try:
+                reload_.pulse()
+            except Exception:
+                pass
+    if info:
+        log("input loop (output 3): %s from frame %d, every %d%s" % (
+            os.path.basename(share), int(info.get("start", 0)), int(info.get("stride", 1)),
+            "" if float(info.get("rate", 1)) == 1 else ", %g render frames per output frame" % info["rate"]))
+
+
+def reload_outputs(root):
+    """Pipeline > Reload Render + Input: load the last render and its input video again
+    (outputs 1 and 3); without one, the newest render with the current settings' plan."""
+    stored = root.fetch(LAST_LOAD_KEY, None, search=False) or {}
+    path, expect = stored.get("path"), stored.get("expect")
+    if not path or not os.path.isfile(path):
+        cfg = config.load()
+        outputs = config.to_share(cfg, "/opt/a1111/outputs/img2img-images/")
+        path = latest_render(glob.glob((outputs or "") + "Deforum_*/*.mp4"))
+        if path is None:
+            log("nothing to reload: no render loaded yet and none under %s" % outputs)
+            return None
+        path = path.replace("\\", "/")
+        try:
+            _values, result = build(root, cfg)
+            expect = _expectation(result, cfg)
+        except Exception as exc:
+            log("reload: could not plan the loop from the current settings (%s)" % exc)
+            expect = None
+    _load_movie(root, path, expect)
+    log("reloaded render %s%s" % (os.path.basename(path),
+                                  " + input video" if (expect or {}).get("input") else " (no input video)"))
+    return path
+
+
+# --------------------------------------------------------------------------- snapshots
+
+def _preset_storage(root):
+    return dict((key, root.fetch(key, None, search=False))
+                for key in (PRESET_KEY, PAGE_PRESET_KEY, PROMPT_PRESET_KEY))
+
+
+def take_snapshot(root, cfg=None):
+    """Pipeline > Take Snapshot: every parameter + prompt_seq + preset state -> JSON on the share."""
+    cfg = cfg or config.load()
+    ui = _op(root, "ui")
+    if ui is None:
+        log("no deforum COMP to snapshot")
+        return None
+    pars = dict((n, getattr(ui.par, n)) for n in snapshots.par_names() if getattr(ui.par, n, None) is not None)
+    name = str(getattr(getattr(ui.par, "Snapshotname", None), "val", "") or "")
+    data = snapshots.build(pars, read_prompt_rows(ui), _preset_storage(root), name,
+                           getattr(sys.modules.get(__package__), "__version__", ""))
+    path = snapshots.write(snapshots.new_path(cfg, name), data)
+    par = getattr(ui.par, "Snapshotpath", None)
+    if par is not None:
+        _set_constant(par, path)
+    _set_par(ui, "Snapshotinfo", "saved %s (%d parameters)" % (os.path.basename(path), len(pars)))
+    log("snapshot saved: %s (%d parameters)" % (path, len(pars)))
+    return path
+
+
+def _restore_par(par, entry):
+    mode = str(entry.get("mode", "CONSTANT")).upper()
+    if mode == "EXPRESSION" and entry.get("expr"):
+        par.expr = entry["expr"]
+        par.mode = type(par.mode).EXPRESSION if hasattr(type(par.mode), "EXPRESSION") else par.mode
+        return
+    if mode == "BIND" and entry.get("bind"):
+        par.bindExpr = entry["bind"]
+        par.mode = type(par.mode).BIND if hasattr(type(par.mode), "BIND") else par.mode
+        return
+    value = entry.get("val")
+    menu = getattr(par, "menuNames", None)
+    if menu and value not in list(menu):
+        raise ValueError("%r is not a choice" % (value,))
+    _set_constant(par, value)
+
+
+def load_snapshot(root, cfg=None):
+    """Pipeline > Load Snapshot: put back what Take Snapshot saved in Snapshot File."""
+    cfg = cfg or config.load()
+    ui = _op(root, "ui")
+    field = getattr(ui.par, "Snapshotpath", None) if ui is not None else None
+    path = snapshots.resolve(cfg, field.eval() if field is not None else "")
+    if not path:
+        log("Snapshot File is empty: take a snapshot or pick one in %s" % snapshots.folder(cfg))
+        return False
+    try:
+        data = snapshots.read(path)
+    except Exception as exc:
+        log("snapshot %s could not be read: %s" % (path, exc))
+        _set_par(ui, "Snapshotinfo", "could not read %s" % os.path.basename(path))
+        return False
+    # Preset bookkeeping first, so the menus changing below match what is 'applied' (no re-apply).
+    for key, value in (data.get("presets") or {}).items():
+        if key in (PRESET_KEY, PAGE_PRESET_KEY, PROMPT_PRESET_KEY):
+            root.store(key, value)
+    done, kept, missing, bad = 0, [], [], []
+    for name, entry in sorted(data["pars"].items()):
+        par = getattr(ui.par, name, None)
+        if par is None:
+            missing.append(name)
+            continue
+        if snapshots.mode_name(par) == "EXPORT":
+            kept.append(name)
+            continue
+        try:
+            _restore_par(par, entry)
+            done += 1
+        except Exception as exc:
+            bad.append("%s (%s)" % (name, exc))
+    rows = data.get("prompt_seq") or []
+    table = _inner(ui, "prompt_seq")
+    if rows and table is not None:
+        table.clear()
+        for row in rows:
+            table.appendRow(row)
+    text = "loaded %s: %d parameters%s" % (os.path.basename(path), done,
+                                           ", prompt_seq %d rows" % max(0, len(rows) - 1) if rows else "")
+    _set_par(ui, "Snapshotinfo", text)
+    log("snapshot " + text + (" (taken %s)" % data.get("taken") if data.get("taken") else ""))
+    if kept:
+        log("  exported from a CHOP, left alone: %s" % ", ".join(kept))
+    if missing:
+        log("  not on this COMP (older/newer build): %s" % ", ".join(missing))
+    if bad:
+        log("  could not set: %s" % "; ".join(bad))
+    return True
 
 
 # --------------------------------------------------------------------------- buttons

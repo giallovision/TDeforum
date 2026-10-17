@@ -238,6 +238,20 @@ echo "$HOME/Codebase/comfyui/output/preprocessed_vids $PWD/td_masks/preprocessed
 sudo mount -a && make down && make up
 ```
 
+### Outputs for compositing
+
+| COMP output | what |
+|---|---|
+| 1 `out_loop` | the render, seamless loop player |
+| 2 `out_sweep` | the last Sweep Depth mask video |
+| 3 `out_input` | the **init video looped the same way as the render**: at render size (W × H), the frames Deforum used (start / stride from the frame plan), interpolation-aware, with the same seam crossfade, so outputs 1 and 3 line up frame for frame |
+
+*Pipeline › Reload Render + Input* loads the last render and its input video again (outputs 1 and 3); with nothing loaded yet it takes the newest render and plans the loop from the current settings.
+
+### Snapshots
+
+*Pipeline › Take Snapshot* saves every parameter (values, expressions and binds, so CHOP References too), `prompt_seq` and the preset state to `T:/snapshots/<name>_<date_time>.json` and puts that path in *Snapshot File*. *Load Snapshot* puts it all back; *Snapshot File* also takes just a file name from `T:/snapshots`. Status lines and buttons are not saved; a parameter exported from a CHOP keeps its export.
+
 ### Live CHOPs: `beat_clock` and `mod_live`
 
 Two CHOPs inside the COMP make live TouchDesigner visuals line up with what Deforum renders:

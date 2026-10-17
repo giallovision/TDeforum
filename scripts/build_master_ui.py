@@ -18,6 +18,7 @@
 #   feedN_sel -> feedN_out   per ControlNet unit: Select TOP (source TOP) -> Movie File Out TOP
 #                            that records the guide movie at Queue (see README, "ControlNet from a TOP")
 #   sweep_preview -> out_sweep   the last Sweep Depth mask video (COMP output 2)
+#   in_head/in_tail -> in_cross -> out_input   the init video looped like the render (COMP output 3)
 #   beat_clock        Constant CHOP  loop / beat / bar phase of the timeline at the COMP's tempo
 #   mod_live          Script CHOP    Mod Matrix (+ Mod CHOP) values at the current loop frame,
 #                                    channels named after parameters (drive live visuals with it)
@@ -118,6 +119,9 @@ def create(page, field, section=False):
     elif kind == schema.PULSE:
         p = page.appendPulse(name, label=label)[0]
         return [p]
+    elif kind == schema.FILE:
+        p = page.appendFile(name, label=label)[0]
+        p.default = str(field.default)
     else:  # str, schedule, seed, checkpoint, status
         p = page.appendStr(name, label=label)[0]
         p.default = str(field.default)
@@ -266,12 +270,51 @@ def build_inner(comp, values):
     cross = _get(comp, crossTOP, 'loop_cross', 200, 0)
     cross.inputConnectors[0].connect(head)
     cross.inputConnectors[1].connect(tail)
-    # Tail weight 1 -> 0 over the overlap at the start of each loop (smoothstep: no kink at
-    # either end), 0 afterwards.
-    _expr(cross, 'cross', '(lambda p, o: (lambda w: w * w * (3.0 - 2.0 * w))(1.0 - p / o) '
-                          'if 0 < o and p < o else 0.0)'
-                          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
+    _expr(cross, 'cross', _CROSS)
     out = _get(comp, outTOP, 'out_loop', 400, 0)
+    out.inputConnectors[0].connect(cross)
+
+    build_input_loop(comp)
+
+
+# Tail weight 1 -> 0 over the overlap at the start of each loop (smoothstep: no kink at
+# either end), 0 afterwards.
+_CROSS = ('(lambda p, o: (lambda w: w * w * (3.0 - 2.0 * w))(1.0 - p / o) if 0 < o and p < o else 0.0)'
+          '(%s, int(parent().par.Loopoutoverlap.eval() or 0))' % _P)
+
+
+def _input_index(offset):
+    """Init-video frame for the loop playhead: start + stride * render frame (the frame Deforum used)."""
+    return ('int(parent().par.Loopinstart.eval() or 0) + int(parent().par.Loopinstride.eval() or 1) * '
+            'int((%s%s) * float(parent().par.Loopinrate.eval() or 1))' % (_P, offset))
+
+
+def build_input_loop(comp):
+    """COMP output 3: the init video at render size, looped and seam-crossfaded like the render,
+    so render and input line up frame for frame for blending / compositing."""
+    head = _get(comp, moviefileinTOP, 'in_head', 0, -950)
+    tail = _get(comp, moviefileinTOP, 'in_tail', 0, -1100)
+    for player, offset in ((head, ''), (tail, ' + %s' % _LOOP)):
+        playmode = getattr(player.par, 'playmode', None)
+        if playmode is not None:
+            _set_menu(playmode, 'specify', 'specifyindex')
+        unit = getattr(player.par, 'indexunit', None)
+        if unit is not None:
+            _set_menu(unit, 'indices', 'index', 'frames')
+        _expr(player, 'index', _input_index(offset))
+        res = getattr(player.par, 'outputresolution', None)
+        if res is not None:
+            _set_menu(res, 'custom')
+            _expr(player, 'resolutionw', 'int(parent().par.Width.eval())')
+            _expr(player, 'resolutionh', 'int(parent().par.Height.eval())')
+        else:
+            say('NOTE %s has no outputresolution; set Common > Output Resolution to the render size by hand'
+                % player.name)
+    cross = _get(comp, crossTOP, 'in_cross', 200, -1000)
+    cross.inputConnectors[0].connect(head)
+    cross.inputConnectors[1].connect(tail)
+    _expr(cross, 'cross', _CROSS)
+    out = _get(comp, outTOP, 'out_input', 400, -1000)        # COMP output 3 (below out_sweep)
     out.inputConnectors[0].connect(cross)
 
 

@@ -80,6 +80,9 @@ class Page(object):
     def appendPulse(self, name, label=""):
         return self._add(name, "Pulse", 0)
 
+    def appendFile(self, name, label=""):
+        return self._add(name, "File", "")
+
     def destroy(self):
         self.comp.customPages.remove(self)
         for p in [p for p in self.comp.customPars]:
@@ -168,7 +171,9 @@ BUILTINS = {
     "moviefileinTOP": [("file", "Str", "", ()), ("index", "Float", 0, ()),
                        ("playmode", "Menu", "locked", ("locked", "specify", "sequential")),
                        ("indexunit", "Menu", "frames", ("indices", "frames", "seconds", "fraction")),
-                       ("reloadpulse", "Pulse", 0, ())],
+                       ("reloadpulse", "Pulse", 0, ()),
+                       ("outputresolution", "Menu", "useinput", ("useinput", "half", "fit", "custom")),
+                       ("resolutionw", "Int", 0, ()), ("resolutionh", "Int", 0, ())],
     "crossTOP": [("cross", "Float", 0, ())],
     "selectTOP": [("top", "Str", "", ())],
     "scriptCHOP": [("callbacks", "Str", "", ())],
@@ -259,6 +264,27 @@ class BuilderTest(unittest.TestCase):
         self.assertIs(comp.op("out_loop").inputConnectors[0].source, cross)
         self.assertIsNotNone(comp.op("in_mod"))
         self.assertFalse(any("NOTE loop_" in line for line in self.log))
+
+    def test_input_loop_is_output_three(self):
+        comp = self.build()
+        head, tail, cross = comp.op("in_head"), comp.op("in_tail"), comp.op("in_cross")
+        self.assertIs(comp.op("out_input").inputConnectors[0].source, cross)
+        self.assertIs(cross.inputConnectors[1].source, tail)
+        self.assertLess(comp.op("out_input").nodeY, comp.op("out_sweep").nodeY)
+        self.assertEqual(head.par.outputresolution.val, "custom")
+        self.assertIn("Width", head.par.resolutionw.expr)
+        self.assertIn("Loopinstride", tail.par.index.expr)
+        self.assertIn("Loopoutframes", tail.par.index.expr)
+        self.assertEqual(cross.par.cross.expr, comp.op("loop_cross").par.cross.expr)
+        # head index at loop frame 20, start 10, stride 2, 0.5 render frames per output frame
+        pars = dict(Loopoutframes=120, Loopoffset=0, Loopinstart=10, Loopinstride=2, Loopinrate=0.5)
+        ns = {"absTime": type("T", (), {"frame": 140})(),
+              "parent": lambda: type("C", (), {"par": type("P", (), dict(
+                  (k, type("V", (), {"eval": (lambda v: lambda self: v)(v)})()) for k, v in pars.items()))()})()}
+        self.assertEqual(eval(head.par.index.expr, ns), 10 + 2 * 10)
+        self.assertEqual(eval(tail.par.index.expr, ns), 10 + 2 * 70)
+        for name in ("Snapshottake", "Snapshotload", "Snapshotpath", "Reloadoutputs", "Loopinstride"):
+            self.assertTrue(hasattr(comp.par, name), name)
 
     def test_feed_ops_per_unit(self):
         comp = self.build()

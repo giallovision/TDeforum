@@ -59,6 +59,7 @@ SEED = "seed"              # string par (seeds overflow TD int pars); sent as in
 CHECKPOINT = "checkpoint"  # index / filename / schedule -> checkpoint_schedule
 STATUS = "status"          # read-only string written by the controller
 PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
+FILE = "file"              # string par with a file browser (TD-only)
 
 RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
 MOD_MARK = "~ "            # label prefix of driveable (MOD) parameters on the COMP
@@ -429,6 +430,17 @@ FIELDS = [
       label="Feed: loop start frame (0 = timeline start)", target=None),
     F("feed_method", feed.ADD_FRAME, PL, MENU, menu=feed.METHODS, labels=feed.METHOD_LABELS,
       label="Feed: recording method", target=None),
+    # Outputs: 1 = render loop, 2 = sweep, 3 = the input video looped the same way as the render
+    F("reload_outputs", 0, PL, PULSE, label="Reload Render + Input (outputs 1 and 3)", target=None),
+    F("loop_in_start", "0", PL, STATUS, label="Input loop: first video frame", target=None),
+    F("loop_in_stride", "1", PL, STATUS, label="Input loop: video frames per render frame", target=None),
+    F("loop_in_rate", "1", PL, STATUS, label="Input loop: render frames per output frame", target=None),
+    # Snapshots of every parameter (tdeforum/snapshots.py)
+    F("snapshot_name", "", PL, STR, label="Snapshot Name (optional)", target=None),
+    F("snapshot_take", 0, PL, PULSE, label="Take Snapshot (saves every parameter)", target=None),
+    F("snapshot_path", "", PL, FILE, label="Snapshot File (path, or a name in T:/snapshots)", target=None),
+    F("snapshot_load", 0, PL, PULSE, label="Load Snapshot", target=None),
+    F("snapshot_info", "", PL, STATUS, label="Snapshot", target=None),
 ]
 
 def _with_page_presets(fields):
