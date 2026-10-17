@@ -61,6 +61,8 @@ STATUS = "status"          # read-only string written by the controller
 PULSE = "pulse"            # button handled by the COMP's ui_exec DAT (never sent anywhere)
 
 RAW_SUFFIX = "raw"         # TD name of a MOD field's override: <Name>raw
+MOD_MARK = "~ "            # label prefix of driveable (MOD) parameters on the COMP
+LINK_MARK = "  [CHOP]"     # label suffix while a CHOP channel drives the parameter
 MOD_SLOTS = 8
 
 
@@ -111,6 +113,11 @@ class Field(object):
     @property
     def td_name(self):
         return td_name(self.api)
+
+    @property
+    def ui_label(self):
+        """Label on the COMP: driveable parameters are marked with MOD_MARK."""
+        return (MOD_MARK + self.label) if self.kind == MOD else self.label
 
     @property
     def raw_td_name(self):

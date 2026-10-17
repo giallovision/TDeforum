@@ -2,11 +2,11 @@
 
 Every custom parameter of the `deforum` Base COMP, page by page, as built by `build_master_ui` (tdeforum 0.10.0). **TD name** is the parameter's name in TouchDesigner (`op('deforum').par.<name>`); **default** is the baseline value.
 
-Parameters marked **MOD** are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
+Parameters marked **MOD** (their label on the COMP starts with `~`) are the driveable (keyframeable) ones: a float base value plus a `<name>raw` override. Type a Deforum schedule into the raw one (e.g. `0:(1), 30:(1.04)`) and it is sent as written, ignoring the base and any modulation; leave it empty to use the base + CHOP link + Mod Matrix + Mod CHOP.
 
 ## Driving a parameter with a CHOP (CHOP links)
 
-Drag a channel from any CHOP (Pattern, LFO, Noise, Animation, a math chain ...) onto a MOD parameter's **float base** and choose **CHOP Reference** (`op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live; at Queue the *whole* channel is baked into that parameter's Deforum schedule, and Mod Matrix slots / the Mod CHOP still add on top.
+Drag a channel from any CHOP (Pattern, LFO, Noise, Animation, a math chain ...) onto a MOD parameter's **float base** and choose **CHOP Reference** (`op('pattern1')['chan1']`) or **Export CHOP**. The parameter shows the channel live and its label gets `[CHOP]` (and *Mod Matrix > CHOP-linked Parameters* lists it); at Queue the *whole* channel is baked into that parameter's Deforum schedule, and Mod Matrix slots / the Mod CHOP still add on top.
 
 - **Base, not raw.** A channel dropped on `<name>raw` is treated the same way, but typed text in raw always beats a CHOP on the base (Queue warns).
 - **Maths is fine:** `op('pattern1')['chan1'] * 2 + 1` or a sum of channels is evaluated over the whole arrays. An expression that cannot be (`math.sin(...)`) falls back to its first channel, as-is, with a warning.
@@ -94,12 +94,12 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 |---|---|---|---|
 | `Pagepresetmotion2d` | Page Preset (Motion 2D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Border` | Border | replicate | What fills the edges revealed by 2D motion: Replicate (stretch the edge pixels) or Wrap (tile the image). |
-| `Zoom` | Zoom (2D, 1 = still) | 1.0 | 2D zoom factor per frame (1 = still, 1.003 = slow zoom in, below 1 = zoom out). **MOD** (raw: `Zoomraw`) |
-| `Angle` | Angle (2D, deg/frame) | 0.0 | 2D rotation in degrees per frame. **MOD** (raw: `Angleraw`) |
-| `Transformcenterx` | Transform Center X (2D) | 0.5 | Horizontal pivot for 2D zoom and rotation (0 = left, 1 = right). **MOD** (raw: `Transformcenterxraw`) |
-| `Transformcentery` | Transform Center Y (2D) | 0.5 | Vertical pivot for 2D zoom and rotation (0 = top, 1 = bottom). **MOD** (raw: `Transformcenteryraw`) |
-| `Translationx` | Translation X (2D + 3D) | 0.0 | Sideways movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationxraw`) |
-| `Translationy` | Translation Y (2D + 3D) | 0.0 | Vertical movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationyraw`) |
+| `Zoom` | ~ Zoom (2D, 1 = still) | 1.0 | 2D zoom factor per frame (1 = still, 1.003 = slow zoom in, below 1 = zoom out). **MOD** (raw: `Zoomraw`) |
+| `Angle` | ~ Angle (2D, deg/frame) | 0.0 | 2D rotation in degrees per frame. **MOD** (raw: `Angleraw`) |
+| `Transformcenterx` | ~ Transform Center X (2D) | 0.5 | Horizontal pivot for 2D zoom and rotation (0 = left, 1 = right). **MOD** (raw: `Transformcenterxraw`) |
+| `Transformcentery` | ~ Transform Center Y (2D) | 0.5 | Vertical pivot for 2D zoom and rotation (0 = top, 1 = bottom). **MOD** (raw: `Transformcenteryraw`) |
+| `Translationx` | ~ Translation X (2D + 3D) | 0.0 | Sideways movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationxraw`) |
+| `Translationy` | ~ Translation Y (2D + 3D) | 0.0 | Vertical movement per frame (pixels in 2D, camera units in 3D). **MOD** (raw: `Translationyraw`) |
 
 ## Motion 3D
 
@@ -108,10 +108,10 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Pagepresetmotion3d` | Page Preset (Motion 3D) | none | Quick presets that change only this page's parameters; they stack with other pages. None puts this page's values back. |
 | `Paddingmode` | Padding Mode | border | What fills areas the 3D camera reveals: Border (smear), Reflection (mirror) or Zeros (black). |
 | `Samplingmode` | Sampling Mode | bicubic | Pixel interpolation for 3D warps: bicubic (sharp), bilinear or nearest. |
-| `Translationz` | Translation Z (3D push) | 0.0 | Camera push per frame (positive = forward into the image). **MOD** (raw: `Translationzraw`) |
-| `Rotation3dx` | Rotation 3D X (tilt, deg/frame) | 0.0 | Camera tilt in degrees per frame. **MOD** (raw: `Rotation3dxraw`) |
-| `Rotation3dy` | Rotation 3D Y (pan, deg/frame) | 0.0 | Camera pan in degrees per frame. **MOD** (raw: `Rotation3dyraw`) |
-| `Rotation3dz` | Rotation 3D Z (roll, deg/frame) | 0.0 | Camera roll in degrees per frame. **MOD** (raw: `Rotation3dzraw`) |
+| `Translationz` | ~ Translation Z (3D push) | 0.0 | Camera push per frame (positive = forward into the image). **MOD** (raw: `Translationzraw`) |
+| `Rotation3dx` | ~ Rotation 3D X (tilt, deg/frame) | 0.0 | Camera tilt in degrees per frame. **MOD** (raw: `Rotation3dxraw`) |
+| `Rotation3dy` | ~ Rotation 3D Y (pan, deg/frame) | 0.0 | Camera pan in degrees per frame. **MOD** (raw: `Rotation3dyraw`) |
+| `Rotation3dz` | ~ Rotation 3D Z (roll, deg/frame) | 0.0 | Camera roll in degrees per frame. **MOD** (raw: `Rotation3dzraw`) |
 
 ## Camera & Depth
 
@@ -122,14 +122,14 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Depthalgorithm` | Depth Algorithm | Midas-3-Hybrid | Depth model Deforum uses for 3D warping (MiDaS hybrid by default; Zoe/AdaBins/LeReS alternatives). |
 | `Midasweight` | Midas Weight | 0.2 | Blend weight of MiDaS in the hybrid depth algorithms; higher = stronger depth relief. |
 | `Enableperspectiveflip` | Enable Perspective Flip | Off | Turns on the perspective flip schedules (theta, phi, gamma, fv); without it they do nothing. |
-| `Fovschedule` | FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |
-| `Nearschedule` | Near (3D) | 200.0 | 3D near clipping distance of the depth warp. **MOD** (raw: `Nearscheduleraw`) |
-| `Farschedule` | Far (3D) | 10000.0 | 3D far clipping distance of the depth warp. **MOD** (raw: `Farscheduleraw`) |
-| `Aspectratioschedule` | Aspect Ratio (3D) | 1.0 | 3D aspect ratio of the camera; changing it squeezes or stretches space. **MOD** (raw: `Aspectratioscheduleraw`) |
-| `Perspectivefliptheta` | Flip Theta | 0.0 | Perspective flip: tilt of the picture plane around the horizontal axis (degrees). **MOD** (raw: `Perspectiveflipthetaraw`) |
-| `Perspectiveflipphi` | Flip Phi | 0.0 | Perspective flip: tilt around the vertical axis (degrees). **MOD** (raw: `Perspectiveflipphiraw`) |
-| `Perspectiveflipgamma` | Flip Gamma | 0.0 | Perspective flip: rotation in the picture plane (degrees). **MOD** (raw: `Perspectiveflipgammaraw`) |
-| `Perspectiveflipfv` | Flip FV | 53.0 | Perspective flip: field of view of the virtual camera looking at the plane. **MOD** (raw: `Perspectiveflipfvraw`) |
+| `Fovschedule` | ~ FOV (3D) | 70.0 | 3D camera field of view in degrees; wider = more parallax and stretching. **MOD** (raw: `Fovscheduleraw`) |
+| `Nearschedule` | ~ Near (3D) | 200.0 | 3D near clipping distance of the depth warp. **MOD** (raw: `Nearscheduleraw`) |
+| `Farschedule` | ~ Far (3D) | 10000.0 | 3D far clipping distance of the depth warp. **MOD** (raw: `Farscheduleraw`) |
+| `Aspectratioschedule` | ~ Aspect Ratio (3D) | 1.0 | 3D aspect ratio of the camera; changing it squeezes or stretches space. **MOD** (raw: `Aspectratioscheduleraw`) |
+| `Perspectivefliptheta` | ~ Flip Theta | 0.0 | Perspective flip: tilt of the picture plane around the horizontal axis (degrees). **MOD** (raw: `Perspectiveflipthetaraw`) |
+| `Perspectiveflipphi` | ~ Flip Phi | 0.0 | Perspective flip: tilt around the vertical axis (degrees). **MOD** (raw: `Perspectiveflipphiraw`) |
+| `Perspectiveflipgamma` | ~ Flip Gamma | 0.0 | Perspective flip: rotation in the picture plane (degrees). **MOD** (raw: `Perspectiveflipgammaraw`) |
+| `Perspectiveflipfv` | ~ Flip FV | 53.0 | Perspective flip: field of view of the virtual camera looking at the plane. **MOD** (raw: `Perspectiveflipfvraw`) |
 
 ## Diffusion
 
@@ -143,16 +143,16 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Enableddimetascheduling` | Enable DDIM Eta Scheduling | Off | Lets the DDIM Eta schedule apply (DDIM samplers only). |
 | `Enableancestraletascheduling` | Enable Ancestral Eta Scheduling | Off | Lets the Ancestral Eta schedule apply (ancestral samplers only). |
 | `Enableclipskipscheduling` | Enable CLIP Skip Scheduling | Off | Lets the CLIP Skip schedule apply. |
-| `Strengthschedule` | Strength (keep of previous frame) | 0.65 | How much of the previous frame is kept (0.8 = keep 80 %, re-imagine 20 %). The main smoothness vs. change control. **MOD** (raw: `Strengthscheduleraw`) |
-| `Noiseschedule` | Noise | 0.02 | Fresh noise added to each frame before diffusing; more = more new detail and more flicker. **MOD** (raw: `Noisescheduleraw`) |
-| `Contrastschedule` | Contrast | 1.0 | Contrast applied to each frame before diffusing (1 = unchanged); above 1 builds up contrast over time. **MOD** (raw: `Contrastscheduleraw`) |
-| `Cfgscaleschedule` | CFG Scale (LCM: 1.5-2) | 1.8 | How strongly the prompt is followed. LCM checkpoints want 1.5-2; higher burns. **MOD** (raw: `Cfgscalescheduleraw`) |
-| `Stepsschedule` | Steps (needs Enable Steps Scheduling) | 25.0 | Steps per frame over time (needs Enable Steps Scheduling). **MOD** (raw: `Stepsscheduleraw`) |
-| `Noisemultiplierschedule` | Noise Multiplier | 1.0 | Multiplier on the sampler's own noise; 1 = unchanged. **MOD** (raw: `Noisemultiplierscheduleraw`) |
-| `Subseedstrengthschedule` | Subseed Strength (needs Enable Subseed) | 0.0 | 0..1 blend from the seed's noise to the subseed's noise (needs Enable Subseed). **MOD** (raw: `Subseedstrengthscheduleraw`) |
-| `Ddimetaschedule` | DDIM Eta (needs Enable) | 0.0 | DDIM eta: randomness of DDIM sampling (needs Enable). **MOD** (raw: `Ddimetascheduleraw`) |
-| `Ancestraletaschedule` | Ancestral Eta (needs Enable) | 1.0 | Ancestral eta: randomness of ancestral samplers (needs Enable). **MOD** (raw: `Ancestraletascheduleraw`) |
-| `Clipskipschedule` | CLIP Skip (needs Enable) | 2.0 | How many final CLIP layers to skip when encoding the prompt (needs Enable). **MOD** (raw: `Clipskipscheduleraw`) |
+| `Strengthschedule` | ~ Strength (keep of previous frame) | 0.65 | How much of the previous frame is kept (0.8 = keep 80 %, re-imagine 20 %). The main smoothness vs. change control. **MOD** (raw: `Strengthscheduleraw`) |
+| `Noiseschedule` | ~ Noise | 0.02 | Fresh noise added to each frame before diffusing; more = more new detail and more flicker. **MOD** (raw: `Noisescheduleraw`) |
+| `Contrastschedule` | ~ Contrast | 1.0 | Contrast applied to each frame before diffusing (1 = unchanged); above 1 builds up contrast over time. **MOD** (raw: `Contrastscheduleraw`) |
+| `Cfgscaleschedule` | ~ CFG Scale (LCM: 1.5-2) | 1.8 | How strongly the prompt is followed. LCM checkpoints want 1.5-2; higher burns. **MOD** (raw: `Cfgscalescheduleraw`) |
+| `Stepsschedule` | ~ Steps (needs Enable Steps Scheduling) | 25.0 | Steps per frame over time (needs Enable Steps Scheduling). **MOD** (raw: `Stepsscheduleraw`) |
+| `Noisemultiplierschedule` | ~ Noise Multiplier | 1.0 | Multiplier on the sampler's own noise; 1 = unchanged. **MOD** (raw: `Noisemultiplierscheduleraw`) |
+| `Subseedstrengthschedule` | ~ Subseed Strength (needs Enable Subseed) | 0.0 | 0..1 blend from the seed's noise to the subseed's noise (needs Enable Subseed). **MOD** (raw: `Subseedstrengthscheduleraw`) |
+| `Ddimetaschedule` | ~ DDIM Eta (needs Enable) | 0.0 | DDIM eta: randomness of DDIM sampling (needs Enable). **MOD** (raw: `Ddimetascheduleraw`) |
+| `Ancestraletaschedule` | ~ Ancestral Eta (needs Enable) | 1.0 | Ancestral eta: randomness of ancestral samplers (needs Enable). **MOD** (raw: `Ancestraletascheduleraw`) |
+| `Clipskipschedule` | ~ CLIP Skip (needs Enable) | 2.0 | How many final CLIP layers to skip when encoding the prompt (needs Enable). **MOD** (raw: `Clipskipscheduleraw`) |
 
 ## Noise & Color
 
@@ -176,11 +176,11 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Opticalflowcadence` | Optical Flow Cadence | RAFT | How the in-between (cadence) frames are made: None (plain blend) or an optical-flow method (RAFT is best) that moves pixels along the motion. |
 | `Opticalflowredogeneration` | Optical Flow Redo Generation | None | Renders each diffused frame twice and uses optical flow between them to stabilise it (less flicker, about 2x slower). |
 | `Kernelschedule` | Anti-blur Kernel (odd) | 5 | Anti-blur sharpening kernel size (odd number). |
-| `Cadenceflowfactorschedule` | Cadence Flow Factor | 1.0 | Strength of the optical flow applied to cadence frames (1 = full). **MOD** (raw: `Cadenceflowfactorscheduleraw`) |
-| `Redoflowfactorschedule` | Redo Flow Factor | 1.0 | Strength of the flow used by Redo Generation. **MOD** (raw: `Redoflowfactorscheduleraw`) |
-| `Amountschedule` | Anti-blur Amount | 0.1 | Anti-blur sharpening amount, fights the softening that accumulates over many frames. **MOD** (raw: `Amountscheduleraw`) |
-| `Sigmaschedule` | Anti-blur Sigma | 1.0 | Anti-blur blur radius used to build the sharpening mask. **MOD** (raw: `Sigmascheduleraw`) |
-| `Thresholdschedule` | Anti-blur Threshold | 0.0 | Anti-blur threshold: only edges above it are sharpened. **MOD** (raw: `Thresholdscheduleraw`) |
+| `Cadenceflowfactorschedule` | ~ Cadence Flow Factor | 1.0 | Strength of the optical flow applied to cadence frames (1 = full). **MOD** (raw: `Cadenceflowfactorscheduleraw`) |
+| `Redoflowfactorschedule` | ~ Redo Flow Factor | 1.0 | Strength of the flow used by Redo Generation. **MOD** (raw: `Redoflowfactorscheduleraw`) |
+| `Amountschedule` | ~ Anti-blur Amount | 0.1 | Anti-blur sharpening amount, fights the softening that accumulates over many frames. **MOD** (raw: `Amountscheduleraw`) |
+| `Sigmaschedule` | ~ Anti-blur Sigma | 1.0 | Anti-blur blur radius used to build the sharpening mask. **MOD** (raw: `Sigmascheduleraw`) |
+| `Thresholdschedule` | ~ Anti-blur Threshold | 0.0 | Anti-blur threshold: only edges above it are sharpened. **MOD** (raw: `Thresholdscheduleraw`) |
 
 ## Hybrid Video
 
@@ -192,9 +192,9 @@ Driveable parameters: `Zoom`, `Angle`, `Transformcenterx`, `Transformcentery`, `
 | `Hybridmotionuseprevimg` | Flow from the previous generated image | Off | Measures flow between the previous generated frame and the video frame, which pulls the image towards the video's layout. |
 | `Hybridflowconsistency` | Hybrid Flow Consistency | Off | Masks out pixels where the flow is unreliable (occlusions) to reduce tearing. |
 | `Hybridconsistencyblur` | Hybrid Consistency Blur | 2 | Softens the flow-consistency mask. |
-| `Hybridflowfactorschedule` | Hybrid Flow Factor | 1.0 | Scales the borrowed motion (0.5 = half the video's motion, 2 = exaggerated). **MOD** (raw: `Hybridflowfactorscheduleraw`) |
+| `Hybridflowfactorschedule` | ~ Hybrid Flow Factor | 1.0 | Scales the borrowed motion (0.5 = half the video's motion, 2 = exaggerated). **MOD** (raw: `Hybridflowfactorscheduleraw`) |
 | `Hybridcomposite` | Hybrid Composite (mix the video in) | None | Blends the video's pixels into each frame before diffusion: Normal, Before Motion or After Generation; None = motion only. |
-| `Hybridcompalphaschedule` | Composite Alpha | 0.5 | How much of the video frame is blended in by Hybrid Composite (0..1). **MOD** (raw: `Hybridcompalphascheduleraw`) |
+| `Hybridcompalphaschedule` | ~ Composite Alpha | 0.5 | How much of the video frame is blended in by Hybrid Composite (0..1). **MOD** (raw: `Hybridcompalphascheduleraw`) |
 
 ## Mod Matrix
 

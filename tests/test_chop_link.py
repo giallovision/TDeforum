@@ -143,6 +143,23 @@ class LinkControllerTest(unittest.TestCase):
         self.assertEqual(result["schedules"]["zoom"][0], "chop")
         self.assertTrue(result["schedules"]["zoom"][1].startswith("0:(1.00000), 1:(1.00100)"))
 
+    def test_linked_labels(self):
+        tz = schema.BY_API["translation_z"]
+        self.ui.par.Translationz = Par("Translationz", 0.0, ParMode.EXPRESSION, "op('pattern1')['chan1']")
+        self.ui.par.Translationz.label = tz.ui_label
+        self.ui.par.Zoom.label = schema.BY_API["zoom"].ui_label
+        self.assertTrue(tz.ui_label.startswith(schema.MOD_MARK))
+        self.ui.par.Choplinksinfo = Par("Choplinksinfo", "")
+        values = ctl.read_ui(self.ui)
+        ctl.show_links(self.ui, ctl.read_links(self.ui, values))
+        self.assertEqual(self.ui.par.Translationz.label, tz.ui_label + schema.LINK_MARK)
+        self.assertEqual(self.ui.par.Zoom.label, schema.BY_API["zoom"].ui_label)
+        self.assertIn("Translationz", self.ui.par.Choplinksinfo.val)
+        self.ui.par.Translationz.mode = ParMode.CONSTANT                 # unlinked: the mark goes away
+        ctl.show_links(self.ui, ctl.read_links(self.ui, ctl.read_ui(self.ui)))
+        self.assertEqual(self.ui.par.Translationz.label, tz.ui_label)
+        self.assertTrue(self.ui.par.Choplinksinfo.val.startswith("none"))
+
     def test_timeline_timing_uses_feed_loop_start(self):
         self.root.timeline = None
         self.ui.time = type("T", (), {"rate": 60.0, "start": 1})()

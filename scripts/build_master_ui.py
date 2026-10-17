@@ -99,7 +99,7 @@ def _help(p, text):
 
 
 def create(page, field, section=False):
-    name, label = field.td_name, field.label
+    name, label = field.td_name, field.ui_label
     kind = field.kind
     if kind == schema.MENU:
         p = page.appendMenu(name, label=label)[0]
@@ -139,7 +139,7 @@ def create(page, field, section=False):
         _help(p, 'Base value. Drop a CHOP channel on it (CHOP Reference or Export CHOP) and the whole '
                  'channel is baked into the schedule at Queue (Mod Matrix > CHOP Timing); the Mod Matrix '
                  'and the Mod CHOP add beat-locked motion on top.')
-        raw = page.appendStr(field.raw_td_name, label='   raw schedule')[0]
+        raw = page.appendStr(field.raw_td_name, label='     raw schedule')[0]
         raw.default = ''
         _help(raw, 'Optional hand-written Deforum schedule, e.g. 0:(1), 30:(1.04). '
                    'When not empty it is sent verbatim and the base + modulation are ignored. '
@@ -424,6 +424,8 @@ def run():
     for note in notes:
         say('NOTE ' + note)
     menu = getattr(comp.par, 'Preset', None)
+    say('driveable (labels start with "%s", %d): drag a CHOP channel onto one (CHOP Reference / Export CHOP); '
+        'it then shows%s and the whole channel is baked at Queue' % (schema.MOD_MARK.strip(), len(schema.MOD_FIELDS), schema.LINK_MARK))
     say('presets: %d examples in the Example Preset menu (Tempo page), pages: %s' % (
         len(getattr(menu, 'menuNames', []) or []) - 1 if menu is not None else 0,
         ', '.join(schema.PAGE_ORDER[-len(schema.PAGE_CNS) - 2:-len(schema.PAGE_CNS)])))

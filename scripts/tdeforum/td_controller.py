@@ -499,6 +499,35 @@ def read_links(ui, values):
     return links
 
 
+_SHOWN_LINKS = {}
+
+
+def show_links(ui, links):
+    """Make CHOP links visible on the COMP: '[CHOP]' after a linked parameter's label and the
+    Mod Matrix > CHOP-linked Parameters line. Only touches labels when the set changes."""
+    if ui is None:
+        return
+    key = getattr(ui, "path", id(ui))
+    current = dict((api, link.get("par")) for api, link in links.items())
+    if _SHOWN_LINKS.get(key) == current:
+        return
+    _SHOWN_LINKS[key] = current
+    for field in schema.MOD_FIELDS:
+        linked = field.api in links
+        for name in (field.td_name, field.raw_td_name):
+            par = getattr(ui.par, name, None)
+            if par is None or not hasattr(par, "label"):
+                continue
+            base = field.ui_label if name == field.td_name else "     raw schedule"
+            want = base + (schema.LINK_MARK if linked and current[field.api] == name else "")
+            try:
+                if par.label != want:
+                    par.label = want
+            except Exception:
+                pass
+    _set_par(ui, "Choplinksinfo", describe_links(links))
+
+
 def describe_links(links):
     if not links:
         return "none (drag a CHOP channel onto a schedule parameter: CHOP Reference or Export)"
@@ -586,7 +615,7 @@ def build(root, cfg):
         raise RuntimeError("no 'deforum' COMP in %s; run builder_master_ui" % root.path)
     values = read_ui(ui)
     links = read_links(ui, values)
-    _set_par(ui, "Choplinksinfo", describe_links(links))
+    show_links(ui, links)
     known = root.fetch(FRAMES_KEY, {}, search=False) or {}
     result = payload.build_request(values, read_prompts(root, cfg), read_models(root),
                                    _frame_counter(cfg, known), cfg.get("default_checkpoint",
@@ -1868,6 +1897,7 @@ def mod_live_cook(script_op):
         loop_frame = float(chan[0]) if chan is not None else 0.0
         values = read_ui(ui)
         links = read_links(ui, values)
+        show_links(ui, links)
         live = payload.live_values(values, read_mod_chop(ui, values, quiet=True), loop_frame,
                                    script_op.time.rate, links)
         script_op.clear()

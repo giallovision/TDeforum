@@ -89,6 +89,7 @@ Make whatever CHOP you like (Pattern, LFO, Noise, Animation, Script, a math chai
 
 * Drop it on the **base**, not on `…raw`. A channel dropped on `…raw` is handled the same way, but a typed raw schedule always wins over a CHOP on the base (Queue warns).
 * *Mod Matrix › CHOP Link Timing*: **Timeline** (default) renders what the parameter shows while the timeline plays, from *Pipeline › Feed Loop Start* for one loop, using the CHOP's sample rate and start (a Pattern CHOP with Length `me.time.end` is exactly right; past its end it wraps). **Whole channel = one loop** stretches the channel over the loop whatever its length (Pattern *Cycles 4* = four cycles per loop).
+* Driveable parameters have labels starting with `~`; a linked one gets `[CHOP]` after its label (live, via `mod_live`).
 * *Mod Matrix › CHOP-linked Parameters* and the Textport (Queue, bake, `doctor()`) list what is linked; `mod_live` outputs the linked curves too.
 
 Press **bake** (or `td_controller.preview(op('/project1'))`) to see exactly what Queue would send in `deforum/schedule_preview`, with warnings (seam jumps, 2D-only parameters in 3D, values leaving Deforum's sane range).
