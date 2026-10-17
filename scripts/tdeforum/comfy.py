@@ -33,6 +33,10 @@ def build_prompt(template, cfg, values, plan, force=False, stamp=""):
     load["frame_load_cap"] = frames
     load["skip_first_frames"] = 0
     load["select_every_nth"] = 1
+    # Decode straight to the render size: a tall / 4K source would otherwise sit in RAM at full
+    # size for every frame before node 11 resizes it (a few GB for 240 frames).
+    load["custom_width"] = width
+    load["custom_height"] = height
     workflow["11"]["inputs"]["width"] = width
     workflow["11"]["inputs"]["height"] = height
     resolution = int(values.get("comfy_resolution") or 0) or min(width, height)

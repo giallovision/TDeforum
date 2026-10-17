@@ -51,6 +51,9 @@ SWEEP_RENDERING = "sweep_rendering"  # Sweep Depth mask video rendering in a bac
 BUSY = (COMFY_SUBMITTED, COMFY_RUNNING, DEFORUM_SUBMITTED, DEFORUM_RUNNING, WAITING_FILE,
         CAPTURING, WAITING_FEED, SWEEP_RENDERING)
 LOST_CONTACT_S = 120.0
+COMFY_POLL_TIMEOUT_S = 4.0   # GET /history and /queue (TouchDesigner waits for the answer)
+COMFY_MAX_ERRORS = 3         # failed polls in a row while ComfyUI works -> give up with the reason
+COMFY_QUEUE_EVERY = 3        # every Nth "still pending" answer, ask /queue whether the job still exists
 FEED_FINALIZE_TIMEOUT_S = 60.0
 PRESET_KEY = "tdeforum_preset"   # root storage: {applied: preset id, backup: {TD par: value}}
 FRAMES_KEY = "tdeforum_known_frames"  # root storage: {container path: frame count} learned elsewhere
@@ -1215,7 +1218,8 @@ def _comfy_call(root, cfg, method, path, data=None):
         return
     dat = _op(root, "comfy")
     try:
-        code, text = _http(method, url, data)
+        # Polls are short so a hung server cannot freeze TouchDesigner for long.
+        code, text = _http(method, url, data, timeout=15.0 if method == "POST" else COMFY_POLL_TIMEOUT_S)
     except Exception as exc:
         on_error(root, dat, "%s %s: %s" % (method, url, exc))
         return
@@ -1234,6 +1238,14 @@ def on_error(root, dat, error):
               % (config.comfy_url(cfg), error, cfg["local_file"]))
     elif dat.name == NAMES["deforum"] and st.get("state") == DEFORUM_SUBMITTED:
         _fail(root, st, "could not reach Deforum at %s (%s)" % (config.deforum_url(cfg), error))
+    elif dat.name == NAMES["comfy"] and st.get("state") == COMFY_RUNNING:
+        st["errors"] = st.get("errors", 0) + 1
+        if st["errors"] >= COMFY_MAX_ERRORS:
+            _fail(root, st, "lost ComfyUI while it was preprocessing (%d failed polls, last: %s). If it "
+                            "crashed, its container log says why (out of memory is the usual one); "
+                            "Queue again once it is back." % (st["errors"], error))
+            return
+        _save(root, st)
 
 
 def _reachable(host, port, timeout=2.0):
@@ -1321,12 +1333,19 @@ def _on_comfy(root, cfg, st, code, body, text):
     if current != COMFY_RUNNING or not isinstance(body, dict):
         return
 
+    st["errors"] = 0
+    if "queue_running" in body or "queue_pending" in body:
+        _on_comfy_queue(root, st, body)
+        return
     state, subfolder, filename, message = comfy.parse_history(
         body, st.get("comfy_prompt_id"), cfg["comfy_output_node"])
     if state == "pending":
         st["updated"] = time.time()
+        st["pending_polls"] = st.get("pending_polls", 0) + 1
         _save(root, st)
         _set_status(root, "preprocessing: running")
+        if st["pending_polls"] % COMFY_QUEUE_EVERY == 0:
+            _comfy_call(root, cfg, "GET", "/queue")   # is the job still there at all?
         return
     if state == "error":
         _fail(root, st, "ComfyUI preprocess failed: %s" % message)
@@ -1350,6 +1369,24 @@ def _on_comfy(root, cfg, st, code, body, text):
         _submit_deforum(root, cfg, result, st)
     else:
         _finish(root, st, "preprocessed %s" % filename)
+
+
+def _on_comfy_queue(root, st, body):
+    """GET /queue: a prompt that is neither queued nor running (and not in /history) is gone,
+    e.g. ComfyUI restarted or crashed while working on it."""
+    pid = st.get("comfy_prompt_id")
+    listed = [item for key in ("queue_running", "queue_pending") for item in (body.get(key) or [])]
+    if any(isinstance(item, (list, tuple)) and len(item) > 1 and item[1] == pid for item in listed):
+        st["missing"] = 0
+        _save(root, st)
+        return
+    st["missing"] = st.get("missing", 0) + 1
+    if st["missing"] >= 2:
+        _fail(root, st, "ComfyUI no longer has prompt %s (not queued, not running, no result): it restarted "
+                        "or crashed while working on it; its container log says why. Queue again to resubmit."
+              % pid)
+        return
+    _save(root, st)
 
 
 def render_path(outdir, stamp, expect):

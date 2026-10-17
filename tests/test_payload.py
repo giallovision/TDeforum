@@ -409,6 +409,8 @@ class DepthNodeTest(unittest.TestCase):
         self.assertEqual(node["inputs"]["resolution"], 512)
         self.assertEqual(node["inputs"]["image"], ["11", 0])
         self.assertIn("depth_anything_v2_vits_240f", job["cache_key"])
+        load = job["body"]["prompt"]["10"]["inputs"]
+        self.assertEqual((load["custom_width"], load["custom_height"]), (1024, 576))
         aio = comfy.build_prompt(template, cfg, _comp_values(comfy_preprocessor="PiDiNetPreprocessor"), plan)
         self.assertEqual(aio["body"]["prompt"]["19"]["class_type"], "AIO_Preprocessor")
         self.assertEqual(aio["body"]["prompt"]["19"]["inputs"]["resolution"], 576)

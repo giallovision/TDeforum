@@ -565,3 +565,76 @@ class FeedTest(ControllerTest.__bases__[0]):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ComfyWatchdogTest(ControllerTest.__bases__[0]):
+    """ComfyUI going away while it preprocesses must not leave the pipeline 'busy' forever."""
+
+    setUp = ControllerTest.setUp
+    state = ControllerTest.state
+    tick = ControllerTest.tick
+
+    def running(self):
+        ui = self.root.op("Deforum_UI")
+        ui.par.Comfypreprocenable.val = True
+        ctl.queue(self.root)
+        respond(self.root, "webclient_comfyui", 200, {"prompt_id": "p1", "number": 1, "node_errors": {}})
+        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
+        return self.root.op("webclient_comfyui")
+
+    def test_repeated_connection_errors_fail_with_the_reason(self):
+        dat = self.running()
+        ctl.on_error(self.root, dat, "timed out")
+        ctl.on_error(self.root, dat, "[WinError 10054] reset")
+        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
+        ctl.on_error(self.root, dat, "[WinError 10061] refused")
+        self.assertEqual(self.state(), ctl.IDLE)
+        status = self.root.op("Deforum_UI").par.Pipelinestatus.val
+        self.assertIn("lost ComfyUI", status)
+        self.assertIn("10061", status)
+
+    def test_an_answer_resets_the_error_count(self):
+        dat = self.running()
+        ctl.on_error(self.root, dat, "timed out")
+        ctl.on_error(self.root, dat, "timed out")
+        respond(self.root, "webclient_comfyui", 200, {})            # still running
+        ctl.on_error(self.root, dat, "timed out")
+        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
+
+    def pending_polls(self, n):
+        for _ in range(n):
+            respond(self.root, "webclient_comfyui", 200, {})
+
+    def test_a_job_comfyui_forgot_fails_after_two_queue_checks(self):
+        dat = self.running()
+        self.pending_polls(ctl.COMFY_QUEUE_EVERY)
+        self.assertTrue(dat.requests[-1][1].endswith("/queue"))
+        respond(self.root, "webclient_comfyui", 200, {"queue_running": [], "queue_pending": []})
+        self.assertEqual(self.state(), ctl.COMFY_RUNNING)            # could have just finished
+        self.pending_polls(ctl.COMFY_QUEUE_EVERY)
+        respond(self.root, "webclient_comfyui", 200, {"queue_running": [], "queue_pending": []})
+        self.assertEqual(self.state(), ctl.IDLE)
+        self.assertIn("no longer has prompt p1", self.root.op("Deforum_UI").par.Pipelinestatus.val)
+
+    def test_a_queued_job_keeps_running(self):
+        self.running()
+        for _ in range(3):
+            self.pending_polls(ctl.COMFY_QUEUE_EVERY)
+            respond(self.root, "webclient_comfyui", 200,
+                    {"queue_running": [[1, "p1", {}, {}, ["21"]]], "queue_pending": []})
+        self.assertEqual(self.state(), ctl.COMFY_RUNNING)
+
+    def test_urllib_polls_use_a_short_timeout(self):
+        self.cfg["comfy_transport"] = "urllib"
+        self.root.op("Deforum_UI").par.Comfypreprocenable.val = True
+        timeouts = []
+
+        def fake(method, url, data=None, timeout=15.0):
+            timeouts.append((method, timeout))
+            if method == "POST":
+                return 200, json.dumps({"prompt_id": "p1", "number": 1, "node_errors": {}})
+            return 200, "{}"
+        with mock.patch.object(ctl, "_http", side_effect=fake):
+            ctl.queue(self.root)
+            self.tick()
+        self.assertEqual(timeouts, [("POST", 15.0), ("GET", ctl.COMFY_POLL_TIMEOUT_S)])
